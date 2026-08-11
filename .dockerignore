@@ -1,0 +1,14 @@
+# Keep the build context small: the Dockerfile only copies frontend/ and
+# backend/ sources plus the Firefox resolver under docker/playwright/. Large
+# runtime/test directories are unnecessary and would otherwise blow the context
+# up to several GB.
+.git
+**/node_modules
+data/
+backend/testdata/
+# docker/ is excluded wholesale, then the resolver is allowed back in: stage 4
+# of backend/Dockerfile installs it into the image.
+docker/*
+!docker/playwright
+docs/
+*.log

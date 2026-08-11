@@ -1,0 +1,22 @@
+# Environment & secrets
+.env
+.env.local
+
+# User data: leftovers from the PHP stack, still on disk. The Go app writes
+# nothing here — its files live in the Docker volume mounted at /data — so the
+# whole directory is ignored instead of listing subfolders that come and go.
+/data/
+
+# Debug logs
+*.log
+
+# IDE
+.idea/
+*.iml
+
+# Claude local settings
+.claude/
+
+# Node
+frontend/node_modules/
+frontend/dist/

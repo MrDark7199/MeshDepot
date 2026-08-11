@@ -1,0 +1,1971 @@
+openapi: 3.1.0
+info:
+  title: MeshDepot API
+  version: 1.0.0
+  description: >
+    REST API for MeshDepot - a self-hosted 3D design library manager.
+    All endpoints (except `/health`, `/auth/login`, `/auth/totp/verify`,
+    and `/users/{id}/avatar` GET) require an authenticated session cookie.
+    Admin endpoints additionally require the session user to have admin privileges.
+
+servers:
+  - url: /api
+    description: Relative path (same origin as frontend)
+
+tags:
+  - name: Auth
+  - name: Designs
+  - name: Design Files
+  - name: Design Images
+  - name: Tags
+  - name: Collections
+  - name: Downloads
+  - name: Shares
+  - name: Users
+  - name: Notifications
+  - name: Admin
+  - name: Public
+
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        # Opaque public id. The numeric primary key never leaves the backend, so
+        # every route and every body addresses an account by this value.
+        id:          { type: string, example: a3f1c8e94b2d7f0a5c6e1b8d4a9f2c37 }
+        name:        { type: string }
+        email:       { type: string, format: email }
+        admin:       { type: boolean }
+        must_change_password: { type: boolean }
+        language:    { type: string, example: de }
+        avatar_url:  { type: string, nullable: true }
+        totp_enabled: { type: boolean }
+        custom_css:  { type: string, description: The account's own stylesheet, applied on login and on every load }
+
+    Design:
+      type: object
+      properties:
+        id:              { type: string, description: Public id - the design is addressed by this everywhere }
+        name:            { type: string }
+        description:     { type: string, nullable: true }
+        source_url:      { type: string, nullable: true }
+        source_platform: { type: string, nullable: true, example: thingiverse }
+        source_id:       { type: string, nullable: true }
+        category:        { type: string, nullable: true }
+        license:         { type: string, nullable: true }
+        author:          { type: string, nullable: true }
+        rating:          { type: integer, nullable: true, minimum: 1, maximum: 5 }
+        print_time_minutes: { type: integer, nullable: true }
+        notes:           { type: string, nullable: true }
+        cover_path:      { type: string, nullable: true }
+        created_at:      { type: string, format: date-time }
+        updated_at:      { type: string, format: date-time }
+
+    DesignDetail:
+      allOf:
+        - $ref: '#/components/schemas/Design'
+        - type: object
+          properties:
+            tags:    { type: array, items: { $ref: '#/components/schemas/Tag' } }
+            images:  { type: array, items: { $ref: '#/components/schemas/DesignImage' } }
+            shares:  { type: array, items: { $ref: '#/components/schemas/Share' } }
+
+    Tag:
+      type: object
+      properties:
+        id:          { type: integer }
+        name:        { type: string }
+        color:       { type: string, nullable: true, example: '#e74c3c' }
+        usage_count: { type: integer }
+
+    Collection:
+      type: object
+      properties:
+        id:           { type: integer }
+        name:         { type: string }
+        description:  { type: string, nullable: true }
+        design_count: { type: integer }
+        created_at:   { type: string, format: date-time }
+        updated_at:   { type: string, format: date-time }
+
+    DesignFileVersion:
+      type: object
+      properties:
+        id:          { type: integer }
+        design_id:   { type: string, description: Public id of the design }
+        version:     { type: string }
+        filename:    { type: string }
+        size_bytes:  { type: integer }
+        file_count:  { type: integer }
+        is_current:  { type: boolean }
+        created_at:  { type: string, format: date-time }
+        entries:
+          type: array
+          items:
+            type: object
+            properties:
+              id:       { type: integer }
+              filename: { type: string }
+              size_bytes: { type: integer }
+
+    DesignImage:
+      type: object
+      properties:
+        id:       { type: integer }
+        path:     { type: string }
+        sort_order: { type: integer }
+
+    ShareLink:
+      type: object
+      properties:
+        id:           { type: integer }
+        token:        { type: string, description: The whole credential - only ever shown to the owner }
+        expires_at:   { type: string, format: date-time, nullable: true, description: null means it runs until revoked }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        view_count:   { type: integer }
+        created_at:   { type: string, format: date-time }
+        expired:      { type: integer, description: 1 once the expiry has passed }
+
+    Share:
+      type: object
+      properties:
+        id:                  { type: integer }
+        shared_with_name:    { type: string }
+        shared_with_email:   { type: string, format: email }
+        created_at:          { type: string, format: date-time }
+
+    QueueEntry:
+      type: object
+      properties:
+        id:          { type: integer }
+        design_id:   { type: string, nullable: true, description: Public id of the design, once it exists }
+        source_url:  { type: string }
+        platform:    { type: string }
+        status:      { type: string, enum: [pending, downloading, done, failed] }
+        error_msg:   { type: string, nullable: true }
+        done_at:     { type: string, format: date-time, nullable: true }
+        design_name: { type: string, nullable: true }
+
+    Notification:
+      type: object
+      properties:
+        id:        { type: integer }
+        type:      { type: string }
+        title:     { type: string }
+        body:      { type: string }
+        design_id: { type: string, nullable: true, description: Public id of the design the notification is about }
+        read_at:   { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    PlatformAccount:
+      type: object
+      properties:
+        id:                { type: integer }
+        platform:          { type: string, example: thingiverse }
+        token:             { type: string, nullable: true, description: Masked - only shows whether a token is set }
+        username:          { type: string, nullable: true }
+        has_password:      { type: boolean }
+        has_totp_secret:   { type: boolean }
+        auto_library_sync: { type: boolean }
+        token_expires_at:  { type: string, format: date-time, nullable: true }
+        updated_at:        { type: string, format: date-time }
+
+    HealthChecks:
+      type: object
+      properties:
+        checks:
+          type: object
+          properties:
+            database: { $ref: '#/components/schemas/HealthCheck' }
+            redis:    { $ref: '#/components/schemas/HealthCheck' }
+            storage:  { $ref: '#/components/schemas/HealthCheck' }
+            php:      { $ref: '#/components/schemas/HealthCheck' }
+            worker:   { $ref: '#/components/schemas/HealthCheck' }
+
+    HealthCheck:
+      type: object
+      properties:
+        label_key:   { type: string }
+        status:      { type: string, enum: [ok, warn, error, off] }
+        message_key: { type: string }
+        vars:        { type: object, additionalProperties: true, nullable: true }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+  responses:
+    Unauthorized:
+      description: Not authenticated
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: PHPSESSID
+      description: PHP session cookie set on login
+
+security:
+  - sessionCookie: []
+
+paths:
+
+  # ── Health ──────────────────────────────────────────────────────────────────
+
+  /health:
+    get:
+      tags: [Public]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200':
+          description: Application is running
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  # ── Auth ────────────────────────────────────────────────────────────────────
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:    { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: Logged in, or TOTP required
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/User'
+                  - type: object
+                    properties:
+                      totp_required:  { type: boolean, example: true }
+                      pending_token:  { type: string }
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: Too many failed attempts
+
+  /auth/totp/verify:
+    post:
+      tags: [Auth]
+      summary: Complete TOTP login (step 2)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pending_token, code]
+              properties:
+                pending_token: { type: string }
+                code:          { type: string, example: '123456' }
+      responses:
+        '200':
+          description: Login complete
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401':
+          description: Invalid code or token
+
+  /auth/totp/setup:
+    post:
+      tags: [Auth]
+      summary: Generate TOTP secret and QR URI
+      responses:
+        '200':
+          description: TOTP setup data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string }
+                  uri:    { type: string, description: otpauth:// URI for QR code }
+
+  /auth/totp/enable:
+    post:
+      tags: [Auth]
+      summary: Confirm and enable TOTP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, example: '123456' }
+      responses:
+        '200':
+          description: TOTP enabled
+        '401':
+          description: Invalid code
+
+  /auth/totp/disable:
+    post:
+      tags: [Auth]
+      summary: Disable TOTP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+      responses:
+        '200':
+          description: TOTP disabled
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Destroy session
+      responses:
+        '200':
+          description: Logged out
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current session user
+      responses:
+        '200':
+          description: Authenticated user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Designs ─────────────────────────────────────────────────────────────────
+
+  /designs:
+    get:
+      tags: [Designs]
+      summary: List designs
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: source_platform, in: query, schema: { type: string } }
+        - { name: tag_ids, in: query, description: Comma-separated tag IDs, schema: { type: string } }
+        - { name: shared_only, in: query, schema: { type: boolean } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, default: 24 } }
+      responses:
+        '200':
+          description: Paginated design list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Design' } }
+                  total: { type: integer }
+    post:
+      tags: [Designs]
+      summary: Create design
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:            { type: string }
+                description:     { type: string }
+                source_url:      { type: string }
+                source_platform: { type: string }
+                source_id:       { type: string }
+                category:        { type: string }
+                license:         { type: string }
+                author:          { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Design' }
+
+  /designs/check-url:
+    get:
+      tags: [Designs]
+      summary: Check whether a source URL is already in the library
+      parameters:
+        - { name: url, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Lookup result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exists: { type: boolean }
+                  design:
+                    nullable: true
+                    type: object
+                    properties:
+                      id:   { type: integer }
+                      name: { type: string }
+
+  /designs/sync-all:
+    post:
+      tags: [Designs]
+      summary: Queue all designs for metadata sync
+      responses:
+        '200':
+          description: Number of queued designs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued: { type: integer }
+
+  /designs/sync-status:
+    get:
+      tags: [Designs]
+      summary: Get sync status for all recently synced designs
+      responses:
+        '200':
+          description: Sync status list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:          { type: integer }
+                    design_id:   { type: integer }
+                    design_name: { type: string }
+                    status:      { type: string }
+                    progress:    { type: integer, nullable: true }
+                    error_msg:   { type: string, nullable: true }
+                    done_at:     { type: string, format: date-time, nullable: true }
+
+  /designs/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+    get:
+      tags: [Designs]
+      summary: Get design detail
+      responses:
+        '200':
+          description: Design with tags, images and shares
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DesignDetail' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Designs]
+      summary: Update design metadata
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:               { type: string }
+                description:        { type: string }
+                source_url:         { type: string }
+                source_platform:    { type: string }
+                source_id:          { type: string }
+                category:           { type: string }
+                license:            { type: string }
+                author:             { type: string }
+                rating:             { type: integer, minimum: 1, maximum: 5 }
+                print_time_minutes: { type: integer }
+                notes:              { type: string }
+      responses:
+        '200':
+          description: Updated
+    delete:
+      tags: [Designs]
+      summary: Delete design and all associated files
+      responses:
+        '200':
+          description: Deleted
+
+  /designs/{id}/fetch-cover:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+    post:
+      tags: [Designs]
+      summary: Fetch and store cover image from source platform
+      responses:
+        '200':
+          description: New cover path
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cover_path: { type: string }
+
+  /designs/{id}/sync:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+    post:
+      tags: [Designs]
+      summary: Queue design for background metadata sync
+      responses:
+        '200':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  design_id: { type: integer }
+                  status:    { type: string, example: queued }
+
+  /designs/{id}/duplicates:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+    get:
+      tags: [Designs]
+      summary: Find duplicate designs
+      responses:
+        '200':
+          description: List of duplicates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:         { type: integer }
+                    name:       { type: string }
+                    source_url: { type: string, nullable: true }
+                    cover_path: { type: string, nullable: true }
+
+  /designs/{id}/collections:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+    get:
+      tags: [Designs]
+      summary: Collections this design belongs to
+      responses:
+        '200':
+          description: Collection list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Collection' }
+
+  # ── Design Files ─────────────────────────────────────────────────────────────
+
+  /designs/{id}/files:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+    get:
+      tags: [Design Files]
+      summary: List file versions
+      responses:
+        '200':
+          description: File version list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DesignFileVersion' }
+    post:
+      tags: [Design Files]
+      summary: Upload new file version
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, version]
+              properties:
+                file:    { type: string, format: binary, description: ZIP or single 3D file }
+                version: { type: string }
+                notes:   { type: string }
+      responses:
+        '201':
+          description: Uploaded
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DesignFileVersion'
+                  - type: object
+                    properties:
+                      duplicate_warnings: { type: array, items: { type: string } }
+
+  /designs/{id}/files/{fileVersionId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: fileVersionId, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [Design Files]
+      summary: Delete file version
+      responses:
+        '200':
+          description: Deleted
+
+  /designs/{id}/files/{fileVersionId}/download:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: fileVersionId, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Design Files]
+      summary: Download file version (single file or ZIP)
+      responses:
+        '200':
+          description: File content
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+
+  /designs/{id}/files/{fileVersionId}/entries:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: fileVersionId, in: path, required: true, schema: { type: integer } }
+    post:
+      tags: [Design Files]
+      summary: Add files to an existing version
+      description: >
+        Owner only. ZIP uploads are extracted. A filename that already exists in
+        this version aborts the whole upload with 409.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  description: One or more files (ZIP or single 3D/G-code file)
+                  oneOf:
+                    - { type: string, format: binary }
+                    - { type: array, items: { type: string, format: binary } }
+      responses:
+        '201':
+          description: Version with all entries after the upload
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DesignFileVersion'
+                  - type: object
+                    properties:
+                      duplicate_warnings: { type: array, items: { type: string } }
+        '403':
+          description: Not the owner of the design
+        '409':
+          description: Filename already exists in this version
+
+  /designs/{id}/files/{fileVersionId}/stl:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: fileVersionId, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Design Files]
+      summary: Serve the first STL/OBJ/3MF of a version (legacy viewer route)
+      responses:
+        '200':
+          description: File content
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404':
+          description: Version contains no mesh file
+
+  /designs/{id}/files/{fileVersionId}/entry/{entryId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: fileVersionId, in: path, required: true, schema: { type: integer } }
+      - { name: entryId, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Design Files]
+      summary: Serve a single file entry (STL/OBJ/3MF - for viewer/slicer)
+      responses:
+        '200':
+          description: File content with CORS headers
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+
+    delete:
+      tags: [Design Files]
+      summary: Delete a single file entry from a version
+      description: Owner only. The version itself stays, even when it becomes empty.
+      responses:
+        '200':
+          description: Deleted
+        '403':
+          description: Not the owner of the design
+
+  /designs/{id}/files/{fileVersionId}/entry/{entryId}/pwmx/mesh:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: fileVersionId, in: path, required: true, schema: { type: integer } }
+      - { name: entryId, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Design Files]
+      summary: Surface mesh of a resin-slicer file (.pwmx) as binary STL
+      description: >
+        Reconstructs a 3D surface from the per-layer exposure images so the
+        viewer can display .pwmx files. The first call takes seconds; the result
+        is cached on disk per blob hash and streamed directly afterwards.
+      responses:
+        '200':
+          description: Binary STL
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '422':
+          description: Entry is not a .pwmx file, or the reconstruction failed
+
+  /designs/{id}/files/{fileVersionId}/entry/{entryId}/token:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: fileVersionId, in: path, required: true, schema: { type: integer } }
+      - { name: entryId, in: path, required: true, schema: { type: integer } }
+    post:
+      tags: [Design Files]
+      summary: Create a 30-minute download token (for slicer integration)
+      responses:
+        '200':
+          description: Token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+
+  /files/token/{token}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Design Files]
+      summary: Download file by token (no session required, single-use)
+      security: []
+      responses:
+        '200':
+          description: File content
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404':
+          description: Token expired or invalid
+
+  # ── Design Images ────────────────────────────────────────────────────────────
+
+  /designs/{id}/images:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+    post:
+      tags: [Design Images]
+      summary: Upload gallery images
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  description: One or more image files (JPEG/PNG/WebP/GIF)
+                  oneOf:
+                    - { type: string, format: binary }
+                    - { type: array, items: { type: string, format: binary } }
+      responses:
+        '200':
+          description: Number of images uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploaded: { type: integer }
+
+  /designs/{id}/images/{imageId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: imageId, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [Design Images]
+      summary: Delete gallery image
+      responses:
+        '200':
+          description: Deleted
+
+  /designs/{id}/images/{imageId}/cover:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: imageId, in: path, required: true, schema: { type: integer } }
+    put:
+      tags: [Design Images]
+      summary: Use this gallery image as the design cover
+      responses:
+        '200':
+          description: New cover path
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cover_path: { type: string }
+
+  # ── Covers (public) ──────────────────────────────────────────────────────────
+
+  /covers/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        description: Path below the data root, may contain slashes
+        schema: { type: string }
+      - name: share
+        in: query
+        required: false
+        description: >
+          Share-link token, for the public share page: it has no session, and
+          the token only opens the pictures of its own design.
+        schema: { type: string }
+    get:
+      tags: [Public]
+      summary: Serve a cover or gallery image file
+      description: >
+        Served to whoever may see the design: its owner, a user it was shared
+        with, or the holder of a share link for it. The session travels in the
+        cookie, which an `<img>` sends on its own. Path traversal is rejected,
+        and the answer is cached privately - it depends on who asked.
+      security: []
+      responses:
+        '200':
+          description: Image content
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '404':
+          description: >
+            Not found, outside the data root, or not visible to this caller -
+            one answer for all three, so counting through design ids tells the
+            caller nothing
+
+  # ── Tags ─────────────────────────────────────────────────────────────────────
+
+  /tags:
+    get:
+      tags: [Tags]
+      summary: List all tags
+      responses:
+        '200':
+          description: Tag list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Tag' }
+    post:
+      tags: [Tags]
+      summary: Create tag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:  { type: string }
+                color: { type: string, example: '#e74c3c' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tag' }
+
+  /tags/search:
+    get:
+      tags: [Tags]
+      summary: Tag hit list for the combobox
+      description: >
+        Sorted by origin (manually created first), then by usage count. Lets the
+        frontend search server-side instead of preloading every tag.
+      parameters:
+        - { name: q, in: query, required: false, schema: { type: string }, description: Substring search on the tag name }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 20, minimum: 1, maximum: 50 } }
+      responses:
+        '200':
+          description: Matching tags with usage count
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: '#/components/schemas/Tag'
+                    - type: object
+                      properties:
+                        usage_count: { type: integer }
+
+  /tags/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [Tags]
+      summary: Delete tag
+      responses:
+        '200':
+          description: Deleted
+
+  /designs/{id}/tags:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+    put:
+      tags: [Tags]
+      summary: Replace all tags on a design
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tag_ids]
+              properties:
+                tag_ids: { type: array, items: { type: integer } }
+      responses:
+        '200':
+          description: Tags updated
+
+  # ── Collections ──────────────────────────────────────────────────────────────
+
+  /collections:
+    get:
+      tags: [Collections]
+      summary: List collections
+      responses:
+        '200':
+          description: Collection list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Collection' }
+    post:
+      tags: [Collections]
+      summary: Create collection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:        { type: string }
+                description: { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Collection' }
+
+  /collections/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    put:
+      tags: [Collections]
+      summary: Update collection
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:        { type: string }
+                description: { type: string }
+      responses:
+        '200':
+          description: Updated
+    delete:
+      tags: [Collections]
+      summary: Delete collection
+      responses:
+        '200':
+          description: Deleted
+
+  /collections/{id}/designs:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Collections]
+      summary: List designs in collection
+      responses:
+        '200':
+          description: Design list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Design' }
+    post:
+      tags: [Collections]
+      summary: Add designs to collection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [design_ids]
+              properties:
+                design_ids: { type: array, items: { type: integer } }
+      responses:
+        '200':
+          description: Added
+
+  /collections/{id}/addable-designs:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Collections]
+      summary: Designs that can still be added to this collection
+      description: >
+        Own and shared designs that are not already in the collection, paginated.
+      parameters:
+        - { name: search, in: query, required: false, schema: { type: string }, description: Matches name, author, description and the German translation }
+        - { name: page, in: query, required: false, schema: { type: integer, default: 1, minimum: 1 } }
+        - { name: per_page, in: query, required: false, schema: { type: integer, default: 40, minimum: 1, maximum: 100 } }
+      responses:
+        '200':
+          description: Page of addable designs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:              { type: integer }
+                        name:            { type: string }
+                        author:          { type: string, nullable: true }
+                        source_platform: { type: string, nullable: true }
+                        cover_path:      { type: string, nullable: true }
+                        is_shared:       { type: integer, enum: [0, 1] }
+
+  /collections/{id}/designs/{designId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+      - { name: designId, in: path, required: true, schema: { type: string }, description: The design's public id }
+    delete:
+      tags: [Collections]
+      summary: Remove design from collection
+      responses:
+        '200':
+          description: Removed
+
+  # ── Downloads ────────────────────────────────────────────────────────────────
+
+  /download:
+    post:
+      tags: [Downloads]
+      summary: Queue a URL for download and import
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_url]
+              properties:
+                source_url: { type: string }
+      responses:
+        '201':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queue_id: { type: integer }
+                  platform: { type: string }
+                  status:   { type: string, example: pending }
+
+  /download/queue:
+    get:
+      tags: [Downloads]
+      summary: List download queue entries
+      responses:
+        '200':
+          description: Queue list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/QueueEntry' }
+
+  /download/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Downloads]
+      summary: Get queue entry status
+      responses:
+        '200':
+          description: Queue entry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueueEntry' }
+    delete:
+      tags: [Downloads]
+      summary: Cancel pending/downloading entry
+      responses:
+        '200':
+          description: Cancelled
+
+  /download/{id}/retry:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    post:
+      tags: [Downloads]
+      summary: Retry a failed download
+      responses:
+        '200':
+          description: Re-queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queue_id: { type: integer }
+                  status:   { type: string, example: pending }
+
+  /download/{id}/dismiss:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [Downloads]
+      summary: Dismiss (remove) a failed entry
+      responses:
+        '200':
+          description: Removed
+
+  # ── Shares ───────────────────────────────────────────────────────────────────
+
+  /designs/{id}/shares:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+    get:
+      tags: [Shares]
+      summary: List shares for a design
+      responses:
+        '200':
+          description: Share list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Share' }
+    post:
+      tags: [Shares]
+      summary: Share design with users
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emails]
+              properties:
+                emails: { type: array, items: { type: string, format: email } }
+      responses:
+        '200':
+          description: Shared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  shared_count: { type: integer }
+
+  /designs/{id}/shares/{shareId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: shareId, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [Shares]
+      summary: Remove share
+      responses:
+        '200':
+          description: Removed
+
+  # ── Users ────────────────────────────────────────────────────────────────────
+
+  /users/search:
+    get:
+      tags: [Users]
+      summary: Search users (for share dialog)
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2 } }
+      responses:
+        '200':
+          description: Matching users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:    { type: integer }
+                    name:  { type: string }
+                    email: { type: string, format: email }
+
+  /users/{id}/avatar:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Users]
+      summary: Get avatar image (public)
+      security: []
+      responses:
+        '200':
+          description: Image file
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+    post:
+      tags: [Users]
+      summary: Upload avatar
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [avatar]
+              properties:
+                avatar: { type: string, format: binary }
+      responses:
+        '200':
+          description: New avatar URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  avatar_url: { type: string }
+    delete:
+      tags: [Users]
+      summary: Delete avatar
+      responses:
+        '200':
+          description: Deleted
+
+  /designs/{id}/links:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+    get:
+      tags: [Shares]
+      summary: List the design's share links
+      responses:
+        '200':
+          description: Links, newest first
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/ShareLink' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Shares]
+      summary: Create a share link
+      description: >
+        Hands the design to anyone holding the returned token: the public
+        endpoints below need no session. Only the listed lifetimes are accepted.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expires_in_hours: { type: integer, minimum: 0, maximum: 87600, description: 0 means no expiry; the owner picks the value }
+      responses:
+        '201':
+          description: The created link
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareLink' }
+        '422':
+          description: Unsupported lifetime
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /designs/{id}/links/{linkId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: linkId, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [Shares]
+      summary: Revoke a share link, effective immediately
+      responses:
+        '200': { description: Removed }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /public/share/{token}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Public]
+      security: []
+      summary: The design behind a share link
+      description: >
+        No session. An unknown, revoked or expired token is answered with 404 -
+        all three look the same, so a caller cannot tell a design is there and
+        wait for the next link. The payload is assembled field by field and
+        carries neither the owner's notes nor any identifier.
+      responses:
+        '200':
+          description: The shared design
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:            { type: string }
+                  description:     { type: string, nullable: true }
+                  author:          { type: string, nullable: true }
+                  source_url:      { type: string, nullable: true }
+                  source_platform: { type: string, nullable: true }
+                  cover_path:      { type: string, nullable: true }
+                  category:        { type: string, nullable: true }
+                  license:         { type: string, nullable: true }
+                  version:         { type: string }
+                  tags:            { type: array, items: { type: object, properties: { name: { type: string }, color: { type: string } } } }
+                  images:          { type: array, items: { type: object, properties: { path: { type: string } } } }
+                  files:           { type: array, items: { type: object, properties: { id: { type: integer }, filename: { type: string }, size_bytes: { type: integer } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /public/share/{token}/files/{entryId}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+      - { name: entryId, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Public]
+      security: []
+      summary: Download one file of the shared design
+      description: The entry has to belong to the design the token names; anything else is a 404.
+      responses:
+        '200': { description: The file }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /public/share/{token}/download:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Public]
+      security: []
+      summary: Download every file of the shared design as one archive
+      description: A version holding a single file is served as that file rather than as a one-entry ZIP.
+      responses:
+        '200': { description: ZIP (or the single file) }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /users/{id}/share-links:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Shares]
+      summary: Every share link of the account, across all designs
+      description: >
+        Each row names its design by public id and name, so the per-design
+        delete revokes it - the account view needs no endpoint of its own.
+      responses:
+        '200':
+          description: Links, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: '#/components/schemas/ShareLink'
+                    - type: object
+                      properties:
+                        design_id:   { type: string }
+                        design_name: { type: string }
+
+  /users/{id}/profile:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      tags: [Users]
+      summary: Update own profile
+      description: >
+        Every field is optional; only the ones present are written. language and
+        custom_css live on the account rather than in the browser, so they follow
+        the member to another device and survive a reload.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:       { type: string }
+                email:      { type: string, format: email }
+                language:   { type: string, enum: [en, de] }
+                custom_css: { type: string, maxLength: 65536, description: The account's own stylesheet, applied to its documents }
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:         { type: string }
+                  name:       { type: string }
+                  email:      { type: string, format: email }
+                  language:   { type: string }
+                  custom_css: { type: string }
+        '422':
+          description: Invalid email, unsupported language, or a stylesheet over 64 KB
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /users/{id}/change-password:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Users]
+      summary: Change own password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password:     { type: string }
+      responses:
+        '200':
+          description: Password changed
+
+  /users/{id}/force-password:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Users]
+      summary: Set password without verifying old one (for must_change_password flow)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_password]
+              properties:
+                new_password: { type: string }
+      responses:
+        '200':
+          description: Password set
+
+  /users/{id}/stats:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Users]
+      summary: Get user storage and design statistics
+      responses:
+        '200':
+          description: User stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  design_count:    { type: integer }
+                  entry_count:     { type: integer }
+                  used_bytes:      { type: integer }
+                  tag_count:       { type: integer }
+                  collection_count: { type: integer }
+                  synced_count:    { type: integer }
+                  newest_design_at: { type: string, format: date-time, nullable: true }
+                  platforms:       { type: array, items: { type: string } }
+
+  /users/{id}/sync-state:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Users]
+      summary: Get what the manual sync buttons need to decide whether they may be offered
+      description: >
+        Cooldowns, queue depth and whether any platform account exists. A queue
+        that is still being filled looks empty for a moment, so a client reading
+        only its own countdown would reopen the button in the middle of the run
+        it just started.
+      responses:
+        '200':
+          description: Sync state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  has_accounts:                { type: boolean }
+                  library_cooldown_seconds:    { type: integer }
+                  update_all_cooldown_seconds: { type: integer }
+                  downloads_pending:           { type: integer }
+                  syncs_pending:               { type: integer }
+                  queue_busy:                  { type: boolean }
+
+  /users/{id}/platform-accounts:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Users]
+      summary: List platform credentials
+      responses:
+        '200':
+          description: Platform account list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PlatformAccount' }
+    post:
+      tags: [Users]
+      summary: Save or update platform credentials
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [platform]
+              properties:
+                platform:          { type: string, example: thingiverse }
+                token:             { type: string }
+                username:          { type: string }
+                password:          { type: string }
+                totp_secret:       { type: string }
+                auto_library_sync: { type: boolean }
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformAccount' }
+
+  /users/{id}/platform-accounts/validate:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Users]
+      summary: Check platform credentials without saving them
+      description: >
+        Empty fields and the mask `***` are resolved from the stored (encrypted)
+        credentials, so the frontend can re-validate without resending secrets.
+        Platforms without a validator answer with `unsupported: true`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [platform]
+              properties:
+                platform:    { type: string, example: thingiverse }
+                username:    { type: string }
+                password:    { type: string }
+                token:       { type: string }
+                totp_secret: { type: string }
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:          { type: boolean }
+                  error:       { type: string, nullable: true, description: i18n key, e.g. error.platform_invalid_credentials }
+                  unsupported: { type: boolean, description: Present when the platform has no credential check }
+
+  /users/{id}/platform-accounts/{accountId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: accountId, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [Users]
+      summary: Delete platform credentials
+      responses:
+        '200':
+          description: Deleted
+
+  /users/{id}/platform-accounts/sync-all:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Users]
+      summary: Trigger library sync for all platforms
+      responses:
+        '200':
+          description: Sync triggered
+
+  /users/{id}/platform-accounts/{platform}/sync:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: platform, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Users]
+      summary: Trigger library sync for a specific platform
+      responses:
+        '200':
+          description: Sync triggered
+
+  # ── Notifications ────────────────────────────────────────────────────────────
+
+  /users/{id}/notifications:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Notifications]
+      summary: List notifications
+      responses:
+        '200':
+          description: Notifications with unread count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:  { type: array, items: { $ref: '#/components/schemas/Notification' } }
+                  unread: { type: integer }
+    delete:
+      tags: [Notifications]
+      summary: Delete all notifications
+      responses:
+        '200':
+          description: Deleted
+
+  /users/{id}/notifications/read-all:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Notifications]
+      summary: Mark all notifications as read
+      responses:
+        '200':
+          description: Marked
+
+  /users/{id}/notifications/{notifId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: notifId, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [Notifications]
+      summary: Delete a single notification
+      responses:
+        '200':
+          description: Deleted
+
+  /users/{id}/notification-prefs:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Notifications]
+      summary: Get notification preferences
+      responses:
+        '200':
+          description: Preferences
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sync_update:      { type: boolean }
+                  download_failed:  { type: boolean }
+                  design_shared:    { type: boolean }
+                  storage_80:       { type: boolean }
+                  sync_min_age_days: { type: integer, nullable: true }
+    put:
+      tags: [Notifications]
+      summary: Update notification preferences
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sync_update:       { type: boolean }
+                download_failed:   { type: boolean }
+                design_shared:     { type: boolean }
+                storage_80:        { type: boolean }
+                sync_min_age_days: { type: integer }
+      responses:
+        '200':
+          description: Saved
+
+  # ── Admin ────────────────────────────────────────────────────────────────────
+
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: List all users
+      responses:
+        '200':
+          description: User list with stats
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: '#/components/schemas/User'
+                    - type: object
+                      properties:
+                        state:        { type: string, enum: [active, disabled] }
+                        created_at:   { type: string, format: date-time }
+                        design_count: { type: integer }
+                        used_bytes:   { type: integer }
+    post:
+      tags: [Admin]
+      summary: Create user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, password]
+              properties:
+                name:                 { type: string }
+                email:                { type: string, format: email }
+                password:             { type: string }
+                admin:                { type: boolean }
+                must_change_password: { type: boolean }
+      responses:
+        '200':
+          description: Created user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+
+  /admin/users/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      tags: [Admin]
+      summary: Update user
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:                 { type: string }
+                email:                { type: string, format: email }
+                admin:                { type: boolean }
+                must_change_password: { type: boolean }
+                state:                { type: string, enum: [active, disabled] }
+      responses:
+        '200':
+          description: Updated
+    delete:
+      tags: [Admin]
+      summary: Delete user (blocked if last active admin)
+      responses:
+        '200':
+          description: Deleted
+
+  /admin/users/{id}/reset-password:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Admin]
+      summary: Reset user password (sets must_change_password)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_password]
+              properties:
+                new_password: { type: string }
+      responses:
+        '200':
+          description: Password reset
+
+  /admin/users/{id}/detail:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Admin]
+      summary: Get full user details
+      responses:
+        '200':
+          description: User detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+
+  /admin/stats:
+    get:
+      tags: [Admin]
+      summary: System-wide statistics
+      responses:
+        '200':
+          description: System stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_count:      { type: integer }
+                  active_users:    { type: integer }
+                  design_count:    { type: integer }
+                  file_count:      { type: integer }
+                  total_bytes:     { type: integer }
+                  tag_count:       { type: integer }
+                  collection_count: { type: integer }
+                  synced_count:    { type: integer }
+                  disk_free:       { type: integer }
+                  disk_total:      { type: integer }
+                  newest_design_at: { type: string, format: date-time, nullable: true }
+                  platforms:       { type: array, items: { type: string } }
+                  per_user:        { type: array, items: { type: object } }
+
+  /admin/health:
+    get:
+      tags: [Admin]
+      summary: Service health checks
+      responses:
+        '200':
+          description: Health status for all services
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthChecks' }
+
+  /admin/settings:
+    get:
+      tags: [Admin]
+      summary: Get application settings
+      responses:
+        '200':
+          description: Settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  library_sync_hour:       { type: integer }
+                  download_cooldown_default: { type: integer }
+    put:
+      tags: [Admin]
+      summary: Update application settings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                library_sync_hour:        { type: integer, minimum: 0, maximum: 23 }
+                download_cooldown_default: { type: integer }
+      responses:
+        '200':
+          description: Saved
+
+  /admin/translations/backfill:
+    post:
+      tags: [Admin]
+      summary: Translate one batch of untranslated designs
+      description: >
+        Runs up to 5 designs without an `original` name row through the
+        translation pipeline. The frontend calls this repeatedly until
+        `remaining` or `processed` reaches 0.
+      responses:
+        '200':
+          description: Batch result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configured: { type: boolean, description: false when no translation provider is configured }
+                  processed:  { type: integer }
+                  failed:     { type: integer }
+                  remaining:  { type: integer }
+
+  /admin/library-sync/run:
+    post:
+      tags: [Admin]
+      summary: Trigger immediate library sync for all users
+      responses:
+        '200':
+          description: Sync triggered
+
+  /settings/public:
+    get:
+      tags: [Public]
+      summary: Non-sensitive public settings (e.g. sync hour)
+      responses:
+        '200':
+          description: Public settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  library_sync_hour: { type: integer }
