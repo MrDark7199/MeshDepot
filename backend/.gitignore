@@ -1,0 +1,20 @@
+# Build-Artefakte
+/app
+/bin/
+*.test
+
+# Eingebettetes Frontend: echtes Bundle wird beim Build aus ../frontend/dist
+# kopiert; nur der Platzhalter index.html bleibt versioniert (für go:embed).
+/internal/webui/dist/*
+!/internal/webui/dist/index.html
+
+# Lokale Test-Samples: pwmx-/printmeta-Tests skippen ohne testdata/sample.pwmx
+# (echtes Photon-Mono-X-File, ~70 MB) und schreiben ihre Ausgaben daneben. Beides
+# ist zu groß fürs Repo, deshalb bleibt der ganze Ordner ungetrackt.
+/testdata/
+
+# Lokale SQLite-DB / Daten
+*.db
+*.db-wal
+*.db-shm
+/data/

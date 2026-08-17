@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MeshDepot</title>
+    <style>
+      /* ── Default (dark) theme variables - prevents flash of unstyled content ── */
+      :root {
+        --bg:            #141414;
+        --bg2:           #1c1c1c;
+        --bg3:           #252525;
+        --bg4:           #2a2a2a;
+        --surface:       rgba(255,255,255,0.03);
+        --border:        rgba(255,255,255,0.08);
+        --border2:       rgba(255,255,255,0.12);
+        --text:          #eeeeee;
+        --text2:         #cccccc;
+        --text3:         #aaaaaa;
+        --muted:         #666666;
+        --muted2:        #555555;
+        --muted3:        #444444;
+        --nav-bg:        rgba(18,18,18,0.92);
+        --accent:        #457b9d;
+        --accent-light:  #7eb5d6;
+        --accent-hover:  #3a6a8a;
+        --danger:        #e63946;
+        --danger-bg:     rgba(230,57,70,0.10);
+        --danger-border: rgba(230,57,70,0.25);
+        --success:       #4ade80;
+        --success-bg:    #1e3a2e;
+        --success-border:#2a9d5c;
+        --input-bg:      #2a2a2a;
+        --scrollbar:     #333333;
+      }
+
+      /* ── Reset + base ── */
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      html, body, #root {
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+        font-size: 16px;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* ── Scrollbar ── */
+      ::-webkit-scrollbar       { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: var(--bg2); }
+      ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 5px; }
+
+      /* ── Native controls (select arrows, number spinners, date pickers) follow the theme ── */
+      html[data-theme="dark"]  { color-scheme: dark; }
+      html[data-theme="light"] { color-scheme: light; }
+
+      /* ── Animations ── */
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      @keyframes toastIn {
+        from { opacity: 0; transform: translateX(-50%) translateY(-12px); }
+        to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+      }
+
+      /* ── Loading screen before JS hydrates ── */
+      #root:empty::after {
+        content: '';
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg);
+      }
+    </style>
+    <link rel="stylesheet" href="/fonts/fonts.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
