@@ -9,13 +9,14 @@ import { ServerSettingsModal } from './components/ServerSettings'
 import { DesignPage } from './components/DesignPage'
 import { api } from './services/api'
 import { UserAvatar } from './components/UserAvatar'
-import type { Design, DesignID, Tag, QueueItem, DownloadJob, Filters, Collection, SyncStatus, SyncStep } from './types'
+import type { Design, DesignID, Tag, QueueItem, QueueBlock, DownloadJob, Filters, Collection, SyncStatus, SyncStep } from './types'
 import { createNotificationsStore } from './hooks/useNotifications'
 import { createSyncProgressStore } from './hooks/useSyncProgress'
 import { createDownloadQueueStore } from './hooks/useDownloadQueue'
 import { NotificationBell } from './components/NotificationBell'
 import { guardClose as guardCloseGlobal, pendingActionSignal, pendingMessageSignal, confirmDiscard, cancelDiscard } from './utils/unsavedChanges'
 import { displayName, displayAuthor } from './utils/designText'
+import { errorKey } from './utils/errorMessage'
 import { PLATFORM_COLORS, PLATFORM_LABELS, platformLabel } from './constants/platforms'
 
 const GRADIENTS = [
@@ -800,6 +801,16 @@ function CollectionsPage(props: {
     api.getTags().then((r: any) => setAllTags(r.data || [])).catch(() => {})
   })
 
+  // The collection tab lists hidden collections too - unlike the filter and the
+  // rest of the app - so they can be unhidden again. It therefore loads its own
+  // list with include_hidden, separate from the parent's hidden-excluded one.
+  const [cols, setCols] = createSignal<Collection[]>(props.collections)
+  const loadCols = () => api.getCollections(true).then((r: any) => setCols(r.data || [])).catch(() => {})
+  createEffect(() => { loadCols() })
+  // Refresh both this tab's hidden-inclusive list and the parent's (which feeds
+  // the filter and grid), so a hide/unhide/rename shows everywhere at once.
+  const refreshCols = () => { loadCols(); props.onChanged() }
+
   const openCollection = async (col: Collection) => {
     setActiveCol(col); setLoadingDesigns(true); setColSearch(''); setColFilters({source_platform:'', tag_ids:[], shared_only:false, show_hidden:false})
     try { const response = await api.getCollectionDesigns(col.id) as any; setColDesigns(response.data || []) }
@@ -810,7 +821,7 @@ function CollectionsPage(props: {
   createEffect(() => {
     const id = props.initialCollectionId
     if (!id) return
-    const col = props.collections.find(c => c.id === id)
+    const col = cols().find(c => c.id === id)
     if (col) { openCollection(col); props.onInitialCollectionHandled?.() }
   })
 
@@ -833,13 +844,25 @@ function CollectionsPage(props: {
   const colHasActiveFilters = () => { const filters = colFilters(); return !!(filters.source_platform || filters.tag_ids.length || filters.shared_only || filters.show_hidden) }
 
   const createCollection = async () => {
-    if (!newColName().trim()) return; setIsCreating(true)
-    try { await api.createCollection({ name: newColName().trim() }); setNewColName(''); props.showToast(translate('toast_collection_created')); props.onChanged() }
-    catch {} finally { setIsCreating(false) }
+    const name = newColName().trim()
+    if (!name) return; setIsCreating(true)
+    try {
+      const created: any = await api.createCollection({ name })
+      setNewColName('')
+      // Show the new collection in the sidebar right away, in its sorted spot,
+      // instead of waiting for the reload round-trip.
+      if (created?.data?.id) {
+        setCols(previous => [...previous, created.data as Collection].sort((a, b) => a.name.localeCompare(b.name)))
+      }
+      props.showToast(translate('toast_collection_created'))
+      refreshCols()
+    }
+    catch (failure: unknown) { props.showToast(translate(errorKey(failure)), 'error') }
+    finally { setIsCreating(false) }
   }
 
   const deleteCollection = async (id: number) => {
-    try { await api.deleteCollection(id); props.showToast(translate('toast_collection_deleted')); props.onChanged(); if (activeCol()?.id === id) setActiveCol(null) } catch {}
+    try { await api.deleteCollection(id); props.showToast(translate('toast_collection_deleted')); refreshCols(); if (activeCol()?.id === id) setActiveCol(null) } catch {}
   }
 
   const startRename = () => { const col = activeCol(); if (!col) return; setRenameDraft(col.name); setRenamingCol(true) }
@@ -862,7 +885,20 @@ function CollectionsPage(props: {
       // collection list has come back.
       setActiveCol({ ...col, name })
       props.showToast(translate('toast_collection_renamed'))
-      props.onChanged()
+      refreshCols()
+    } catch {}
+  }
+
+  // Hiding keeps the collection and its designs; it only takes it out of the
+  // filter, a design's details and the normal lists. This tab still shows hidden
+  // collections (marked), which is the way back to unhiding one.
+  const toggleHidden = async (col: Collection) => {
+    const nowHidden = !col.is_hidden
+    try {
+      await api.updateCollection(col.id, { is_hidden: nowHidden })
+      if (activeCol()?.id === col.id) setActiveCol({ ...col, is_hidden: nowHidden })
+      props.showToast(translate(nowHidden ? 'toast_collection_hidden' : 'toast_collection_unhidden'))
+      refreshCols()
     } catch {}
   }
 
@@ -893,19 +929,26 @@ function CollectionsPage(props: {
             </div>
 
             <div style={{ display:'flex', 'flex-direction':'column', gap:'7px' }}>
-              <For each={props.collections}>{col => (
+              <For each={cols()}>{col => (
                 <div onClick={() => openCollection(col)}
-                  style={{ display:'flex', 'align-items':'center', gap:'11px', padding:'13px 15px', 'border-radius':'13px', background:activeCol()?.id === col.id ? 'rgba(69,123,157,0.15)' : 'var(--bg2)', border:`1px solid ${activeCol()?.id === col.id ? 'var(--accent)' : 'var(--border)'}`, cursor:'pointer' }}>
+                  style={{ display:'flex', 'align-items':'center', gap:'11px', padding:'13px 15px', 'border-radius':'13px', background:activeCol()?.id === col.id ? 'rgba(69,123,157,0.15)' : 'var(--bg2)', border:`1px solid ${activeCol()?.id === col.id ? 'var(--accent)' : 'var(--border)'}`, cursor:'pointer', opacity: col.is_hidden ? '0.55' : '1' }}>
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                   </svg>
-                  <span style={{ flex:'1', 'font-family':sans, 'font-size':'14px', 'font-weight':'600', color:activeCol()?.id === col.id ? 'var(--accent-light)' : 'var(--text)' }}>{col.name}</span>
+                  <span style={{ flex:'1', 'font-family':sans, 'font-size':'14px', 'font-weight':'600', color:activeCol()?.id === col.id ? 'var(--accent-light)' : 'var(--text)', display:'flex', 'align-items':'center', gap:'6px' }}>
+                    {col.name}
+                    <Show when={col.is_hidden}>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2" aria-label={translate('col_hidden')}>
+                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>
+                      </svg>
+                    </Show>
+                  </span>
                   <span style={{ 'font-family':mono, 'font-size':'11px', color:'var(--muted)', background:'var(--bg3)', 'border-radius':'5px', padding:'2px 7px' }}>{col.design_count ?? 0}</span>
                   <button onClick={e => { e.stopPropagation(); setPendingDeleteCol(col) }}
                     style={{ background:'none', border:'none', color:'var(--muted)', cursor:'pointer', 'font-size':'17px', opacity:'0.5' }}>×</button>
                 </div>
               )}</For>
-              <Show when={props.collections.length === 0}>
+              <Show when={cols().length === 0}>
                 <div style={{ 'font-family':mono, 'font-size':'14px', color:'var(--muted)', 'text-align':'center', padding:'26px' }}>{translate('col_no_collections')}</div>
               </Show>
             </div>
@@ -928,6 +971,18 @@ function CollectionsPage(props: {
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>
                       </svg>
+                    </button>
+                    {/* Hide / unhide: keeps the collection but removes it from the
+                        filter and design details. Reversible from here. */}
+                    <button onClick={() => toggleHidden(activeCol()!)}
+                      title={translate(activeCol()!.is_hidden ? 'col_unhide' : 'col_hide')}
+                      aria-label={translate(activeCol()!.is_hidden ? 'col_unhide' : 'col_hide')}
+                      style={{ background:'none', border:'none', color:activeCol()!.is_hidden ? 'var(--accent-light)' : 'var(--muted)', cursor:'pointer', padding:'2px', display:'flex', 'align-items':'center' }}>
+                      <Show when={activeCol()!.is_hidden} fallback={
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                      }>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                      </Show>
                     </button>
                     {/* Says where the collection came from - the name alone no
                         longer does once it has been renamed here. */}
@@ -980,7 +1035,7 @@ function CollectionsPage(props: {
                   collectionId={activeCol()!.id}
                   collectionName={activeCol()!.name}
                   onClose={() => setShowAddDesigns(false)}
-                  onAdded={() => { openCollection(activeCol()!); props.onChanged() }}
+                  onAdded={() => { openCollection(activeCol()!); refreshCols() }}
                   showToast={props.showToast} />
               </Show>
               {/* Result count inline with heading */}
@@ -1224,7 +1279,10 @@ function ConfirmDiscardModal() {
  * the card-delete action used to call - the app now has exactly one look for
  * "are you sure?", and the text goes through i18n like everything else.
  */
-function ConfirmModal(props: { title: string; body: string; hint?: string; confirmLabel: string; danger?: boolean; onClose: () => void; onConfirm: () => void }) {
+function ConfirmModal(props: { title: string; body: string; hint?: string; confirmLabel: string; danger?: boolean;
+  /** Optional opt-out shown above the buttons, e.g. "also keep this out of the sync". */
+  checkboxLabel?: string; checkboxChecked?: boolean; onCheckboxChange?: (value: boolean) => void;
+  onClose: () => void; onConfirm: () => void }) {
   const { translate } = useI18n()
   const cancelLabel = () => translate('btn_cancel')
   return (
@@ -1242,6 +1300,15 @@ function ConfirmModal(props: { title: string; body: string; hint?: string; confi
           <p style={{ 'font-family':"'DM Sans',sans-serif", 'font-size':'13px', color:'var(--muted)', margin:'0 0 16px 0', 'line-height':'1.5' }}>
             {props.hint}
           </p>
+        </Show>
+        <Show when={props.checkboxLabel}>
+          <label style={{ display:'flex', 'align-items':'flex-start', gap:'9px', cursor:'pointer',
+            'font-family':"'DM Sans',sans-serif", 'font-size':'13px', color:'var(--text2)', 'line-height':'1.5' }}>
+            <input type="checkbox" checked={props.checkboxChecked ?? false}
+              onChange={e => props.onCheckboxChange?.(e.currentTarget.checked)}
+              style={{ 'margin-top':'2px', cursor:'pointer', 'accent-color':'var(--accent)' }} />
+            <span>{props.checkboxLabel}</span>
+          </label>
         </Show>
         <div style={{ height:'10px' }} />
         <div style={{ display:'flex', gap:'10px', 'justify-content':'flex-end' }}>
@@ -1367,9 +1434,45 @@ type AppView = 'grid' | 'design' | 'collections'
  * - One ticker refreshes the queue (6 s), notifications (8 s) and the grid
  *   (10 s); it pauses while the tab is hidden.
  */
+/**
+ * Fixed top-right stack of alerts, one per platform whose download queue is
+ * currently paused or auto-blocked. A blocked platform names the moment it
+ * retries on its own; a manually paused one just says it is paused. Empty when
+ * nothing is suspended, so it costs nothing in the normal case.
+ */
+function QueueBlockAlerts(props: { blocks: QueueBlock[]; translate: (key: string, vars?: Record<string, string | number>) => string; locale: string }) {
+  const whenText = (iso?: string) => {
+    if (!iso) return ''
+    const parsed = new Date(iso)
+    if (isNaN(parsed.getTime())) return ''
+    return parsed.toLocaleString(props.locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  }
+  return (
+    <Show when={props.blocks.length > 0}>
+      <div style={{ position: 'fixed', top: '76px', right: '20px', 'z-index': '300', display: 'flex', 'flex-direction': 'column', gap: '10px', 'max-width': '340px', 'pointer-events': 'none' }}>
+        <For each={props.blocks}>{block => (
+          <div style={{ background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '14px', padding: '12px 15px', color: 'var(--danger)', 'font-family': "'DM Sans',sans-serif", 'font-size': '13px', 'line-height': '1.45', 'box-shadow': '0 8px 30px rgba(0,0,0,0.35)' }}>
+            <div style={{ 'font-weight': '700', 'margin-bottom': '3px', display: 'flex', 'align-items': 'center', gap: '7px' }}>
+              <span>⏸</span>
+              <span style={{ 'text-transform': 'capitalize' }}>{block.platform}</span>
+            </div>
+            <div>
+              {block.blocked
+                ? props.translate('queue_block_alert_blocked', { until: whenText(block.until) })
+                : props.translate('queue_block_alert_paused')}
+            </div>
+          </div>
+        )}</For>
+      </div>
+    </Show>
+  )
+}
+
 function MainApp() {
   const {user, updateUser, logout} = useAuth()
   const {translate, lang, translateDesigns} = useI18n()
+  const [queueBlocks, setQueueBlocks] = createSignal<QueueBlock[]>([])
+  const loadQueueBlocks = () => api.getQueueBlocks().then((r: any) => setQueueBlocks(r.data || [])).catch(() => {})
 
   onMount(() => {
     const handler = () => logout()
@@ -1401,6 +1504,7 @@ function MainApp() {
   const [allCollections, setAllCollections] = createSignal<Collection[]>([])
   const [showSyncAllConfirm, setShowSyncAllConfirm] = createSignal(false)
   const [pendingDelete, setPendingDelete] = createSignal<Design | null>(null)
+  const [excludeFromSync, setExcludeFromSync] = createSignal(true)
   const [page, setPage] = createSignal(1)
   const [hasPlatformAccount, setHasPlatformAccount] = createSignal(false)
 
@@ -1555,7 +1659,7 @@ function MainApp() {
   const loadPlatformAccountState = () => api.getSyncState(user()!.id)
     .then(response => setHasPlatformAccount(!!response.data?.has_accounts))
     .catch(() => {})
-  loadDesigns(); loadTags(); loadCollections(); downloads.refresh(); notifs.load(true); loadPlatformAccountState()
+  loadDesigns(); loadTags(); loadCollections(); downloads.refresh(); notifs.load(true); loadPlatformAccountState(); loadQueueBlocks()
 
   // Debounced search. on(..., { defer: true }) instead of reading search()
   // inside the body: the previous version guarded with a `prevSearch`
@@ -1585,6 +1689,7 @@ function MainApp() {
       { everyMs: 6000,  lastRun: Date.now(), run: downloads.refresh },
       { everyMs: 8000,  lastRun: Date.now(), run: () => notifs.load(false) },
       { everyMs: 10000, lastRun: Date.now(), run: prependNewDesigns },
+      { everyMs: 20000, lastRun: Date.now(), run: loadQueueBlocks },
     ]
     const tick = () => {
       if (document.hidden) return
@@ -1666,13 +1771,18 @@ function MainApp() {
     onCleanup(() => window.removeEventListener('popstate', onPop))
   })
   /** Prompts for confirmation, then deletes the design via the API. */
-  const deleteDesign = (design: Design) => setPendingDelete(design)
+  const deleteDesign = (design: Design) => {
+    // Preselected: a design deleted on purpose is one the user does not want
+    // back, and the sync would otherwise hand it over again on its next run.
+    setExcludeFromSync(!!design.source_url)
+    setPendingDelete(design)
+  }
 
   /** Performs the deletion once the ConfirmModal has been acknowledged. */
   const confirmDeleteDesign = async (design: Design) => {
     setPendingDelete(null)
     try {
-      await api.deleteDesign(design.id)
+      await api.deleteDesign(design.id, excludeFromSync() && !!design.source_url)
       showToast(translate('toast_design_deleted_named', { name: displayName(design, lang(), translateDesigns()) }))
       loadDesigns(search())
     } catch { showToast(translate('toast_delete_failed'), 'error') }
@@ -1837,6 +1947,9 @@ function MainApp() {
             body={translate('confirm_delete_card', { name: displayName(design(), lang(), translateDesigns()) })}
             confirmLabel={translate('btn_confirm_delete')}
             danger
+            checkboxLabel={design().source_url ? translate('delete_exclude_from_sync') : undefined}
+            checkboxChecked={excludeFromSync()}
+            onCheckboxChange={setExcludeFromSync}
             onClose={() => setPendingDelete(null)}
             onConfirm={() => confirmDeleteDesign(design())} />
         )}
@@ -2012,6 +2125,7 @@ function MainApp() {
         <Show when={downloads.panelOpen()}>
           <QueuePanel queue={downloads.queue} onClose={() => downloads.setPanelOpen(false)} onCancel={downloads.cancel} onRetry={downloads.retry} onRetryAll={() => downloads.retryAll(visibleDownloadJobs().filter(job => job.status === 'failed'))} onDismiss={downloads.dismiss} onOpenSettings={() => { setAccountSettingsTab('platforms'); setShowAccountSettings(true) }} />
         </Show>
+        <QueueBlockAlerts blocks={queueBlocks()} translate={translate} locale={lang()} />
         {commonModals()}
       </Show>
     </div>

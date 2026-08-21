@@ -98,6 +98,10 @@ func (server *Server) DownloadQueue(responseWriter http.ResponseWriter, request 
 		httpx.Error(responseWriter, http.StatusConflict, "error.duplicate_design:"+coerce.StringOr(duplicate["name"], "Unknown"))
 		return
 	}
+	// Asking for this design by hand outranks an earlier "delete and keep it
+	// gone": without lifting the block the import would succeed and the design
+	// would silently disappear again on the next library sync.
+	platforms.LiftSyncExclusion(server.DB, currentUserID, platform, "", sourceURL)
 	insertResult, failure := server.DB.Exec("INSERT INTO download_queue (user_id, source_url, platform, status) VALUES (?, ?, ?, 'pending')", currentUserID, sourceURL, platform)
 	if failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")

@@ -521,6 +521,25 @@ func TestPlatformAccountsSyncCooldownIsPerPlatform(t *testing.T) {
 	}
 }
 
+// Issue #4: triggering one platform's sync must not put another platform's
+// "sync now" on cooldown. Unlike the test above (which stamps a timestamp
+// directly), this goes through the real trigger, which used to also stamp the
+// account-wide users.last_manual_sync_at and thereby block every other platform.
+func TestPlatformAccountsSyncOneDoesNotBlockAnotherPlatform(t *testing.T) {
+	testHarness := newHarness(t)
+	testHarness.saveAccount(map[string]any{"platform": "thingiverse", "token": "geheimes-token"})
+	testHarness.saveAccount(map[string]any{"platform": "printables", "username": "sammler", "password": "geheim"})
+
+	first := testHarness.asUser(http.MethodPost, platformAccountsPath(testHarness.publicID(testHarness.userID))+"/thingiverse/sync", nil)
+	if first.status != http.StatusOK {
+		t.Fatalf("the thingiverse trigger answered %d: %s", first.status, first.rawBody)
+	}
+	second := testHarness.asUser(http.MethodPost, platformAccountsPath(testHarness.publicID(testHarness.userID))+"/printables/sync", nil)
+	if second.status != http.StatusOK {
+		t.Fatalf("the printables trigger answered %d (want 200) - one platform's sync blocked another: %s", second.status, second.rawBody)
+	}
+}
+
 // The list carries the remaining cooldown so the client can disable the button
 // instead of offering a call the server only rejects.
 func TestPlatformAccountsIndexReportsTheRemainingCooldown(t *testing.T) {
@@ -580,5 +599,100 @@ func TestSyncAllHoldsItsCooldownWithoutAnyPlatformAccount(t *testing.T) {
 	}
 	if key := second.errorKey(t); key != "error.sync_cooldown" {
 		t.Fatalf("reported %q", key)
+	}
+}
+
+// A credential that no longer decrypts (APP_KEY changed after it was saved)
+// must be reported as such. Without the flag the account looks like one that
+// was never set up, and the user has nothing to act on.
+func TestPlatformAccountsIndexFlagsUnreadableCredentials(t *testing.T) {
+	testHarness := newHarness(t)
+	testHarness.saveAccount(map[string]any{
+		"platform": "thingiverse", "token": "geheimes-token", "username": "sammler", "password": "geheim",
+	})
+	if _, failure := testHarness.database.Exec(
+		// Valid base64, but not something this key can open.
+		"UPDATE platform_accounts SET password_encrypted = ? WHERE user_id = ?",
+		"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", testHarness.userID); failure != nil {
+		t.Fatalf("break the stored password: %v", failure)
+	}
+
+	accounts := testHarness.asUser(http.MethodGet, platformAccountsPath(testHarness.publicID(testHarness.userID)), nil).list(t)
+
+	if len(accounts) != 1 {
+		t.Fatalf("%d accounts were listed", len(accounts))
+	}
+	if account := accounts[0].(map[string]any); account["credentials_unreadable"] != true {
+		t.Fatalf("the account came back as %v", account)
+	}
+}
+
+func TestPlatformAccountsIndexReportsReadableCredentialsAsReadable(t *testing.T) {
+	testHarness := newHarness(t)
+	testHarness.saveAccount(map[string]any{
+		"platform": "thingiverse", "token": "geheimes-token", "username": "sammler", "password": "geheim",
+	})
+
+	accounts := testHarness.asUser(http.MethodGet, platformAccountsPath(testHarness.publicID(testHarness.userID)), nil).list(t)
+
+	if account := accounts[0].(map[string]any); account["credentials_unreadable"] != false {
+		t.Fatalf("the account came back as %v", account)
+	}
+}
+
+// Validating with a masked password whose stored value cannot be decrypted used
+// to check the platform with an empty password, so the user was told their
+// credentials were wrong. It must name the real problem instead.
+func TestPlatformAccountsValidateReportsUnreadableCredentials(t *testing.T) {
+	testHarness := newHarness(t)
+	testHarness.saveAccount(map[string]any{
+		"platform": "thingiverse", "token": "geheimes-token", "username": "sammler", "password": "geheim",
+	})
+	if _, failure := testHarness.database.Exec(
+		"UPDATE platform_accounts SET password_encrypted = ? WHERE user_id = ?",
+		"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", testHarness.userID); failure != nil {
+		t.Fatalf("break the stored password: %v", failure)
+	}
+	validator := &stubValidator{}
+	validator.valid = true
+	testHarness.server.Registry = platforms.Registry{"thingiverse": validator}
+
+	answer := testHarness.asUser(http.MethodPost, platformAccountsPath(testHarness.publicID(testHarness.userID))+"/validate",
+		map[string]any{"platform": "thingiverse", "username": "sammler", "password": "***"})
+
+	data := answer.data(t)
+	if data["ok"] != false || data["error"] != "error.platform_credentials_unreadable" {
+		t.Fatalf("the answer is %v", data)
+	}
+	// The platform must not have been contacted with an empty password.
+	if validator.seen.Password != "" || validator.seen.Email != "" {
+		t.Fatalf("the downloader was called with %+v", validator.seen)
+	}
+}
+
+// A password the user typed replaces the unreadable one, so validation runs
+// normally instead of reporting the stored value.
+func TestPlatformAccountsValidateAcceptsATypedPasswordOverAnUnreadableOne(t *testing.T) {
+	testHarness := newHarness(t)
+	testHarness.saveAccount(map[string]any{
+		"platform": "thingiverse", "token": "geheimes-token", "username": "sammler", "password": "geheim",
+	})
+	if _, failure := testHarness.database.Exec(
+		"UPDATE platform_accounts SET password_encrypted = ? WHERE user_id = ?",
+		"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", testHarness.userID); failure != nil {
+		t.Fatalf("break the stored password: %v", failure)
+	}
+	validator := &stubValidator{}
+	validator.valid = true
+	testHarness.server.Registry = platforms.Registry{"thingiverse": validator}
+
+	answer := testHarness.asUser(http.MethodPost, platformAccountsPath(testHarness.publicID(testHarness.userID))+"/validate",
+		map[string]any{"platform": "thingiverse", "username": "sammler", "password": "neues-passwort"})
+
+	if answer.data(t)["ok"] != true {
+		t.Fatalf("the answer is %v", answer.data(t))
+	}
+	if validator.seen.Password != "neues-passwort" {
+		t.Fatalf("the downloader saw %+v", validator.seen)
 	}
 }

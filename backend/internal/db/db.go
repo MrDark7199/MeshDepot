@@ -98,6 +98,9 @@ func migrate(database *sql.DB) {
 		// predate the column; findOrCreateCollection fills it on the next sync and
 		// leaves the local name alone until then.
 		"ALTER TABLE collections ADD COLUMN source_name TEXT DEFAULT NULL",
+		// Collections the user pushed out of sight; see the column comment in
+		// schema.sql.
+		"ALTER TABLE collections ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0",
 	}
 	for _, statement := range alterStatements {
 		database.Exec(statement) // Error (column already exists) intentionally ignored.

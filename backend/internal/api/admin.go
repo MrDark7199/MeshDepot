@@ -18,6 +18,7 @@ import (
 	"meshdepot/internal/health"
 	"meshdepot/internal/httpx"
 	"meshdepot/internal/publicid"
+	"meshdepot/internal/queuestate"
 	"meshdepot/internal/scheduler"
 	"meshdepot/internal/translate"
 )
@@ -57,6 +58,11 @@ var settingsSchema = map[string]settingBound{
 	"download_cooldown_cults3d":       cooldownBound(30, "error.cooldown_too_low"),
 	"download_cooldown_myminifactory": cooldownBound(30, "error.cooldown_too_low"),
 	"translation_enabled":             {min: 0, max: 1},
+	// Auto-pause: how many anti-bot/rate-limit hits in a row pause a platform's
+	// queue, and for how many hours. See the queuestate package and the download
+	// worker's registerBlockStrike.
+	"queue_block_threshold": {min: 1, max: 20},
+	"queue_block_hours":     {min: 1, max: 720},
 }
 
 // AdminList returns all users with design/storage statistics.
@@ -461,6 +467,9 @@ func (server *Server) GetSettings(responseWriter http.ResponseWriter, request *h
 	// The manual trigger is refused during its cooldown, so the page can disable
 	// the button instead of offering a call that only comes back as 429.
 	settings["library_sync_cooldown_seconds"] = syncCooldownRemaining(coerce.StringOr(settings["library_sync_last_run"], ""))
+	// Per-platform pause/block state so the settings page can show what is
+	// suspended and offer a resume.
+	settings["queue_blocks"] = queuestate.All(server.DB, time.Now())
 	httpx.Success(responseWriter, settings)
 }
 

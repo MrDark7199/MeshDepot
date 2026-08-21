@@ -17,11 +17,17 @@ func (server *Server) requireCollection(responseWriter http.ResponseWriter, coll
 
 // CollectionsIndex returns all collections of the user incl. design_count.
 func (server *Server) CollectionsIndex(responseWriter http.ResponseWriter, request *http.Request) {
+	// Hidden collections are left out unless they are asked for: the collection
+	// tab needs them to offer unhiding, everything else must not show them.
+	hiddenClause := "AND c.is_hidden = 0"
+	if request.URL.Query().Get("include_hidden") == "1" {
+		hiddenClause = ""
+	}
 	rows, _ := dbutil.QueryMaps(server.DB, `
 		SELECT c.*, COUNT(dc.design_id) AS design_count
 		FROM collections c
 		LEFT JOIN design_collections dc ON dc.collection_id = c.id
-		WHERE c.user_id = ?
+		WHERE c.user_id = ? `+hiddenClause+`
 		GROUP BY c.id ORDER BY c.name ASC`, userID(request))
 	httpx.Success(responseWriter, rows)
 }
@@ -37,6 +43,15 @@ func (server *Server) CollectionsStore(responseWriter http.ResponseWriter, reque
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.name_required")
 		return
 	}
+	// No two collections of the same name for one user - the same name twice only
+	// confuses the picker and the filter. Case-insensitive, matching the client's
+	// own "already exists" check. Hidden collections count too.
+	var existing int
+	server.DB.QueryRow("SELECT COUNT(*) FROM collections WHERE user_id = ? AND name = ? COLLATE NOCASE", userID(request), name).Scan(&existing)
+	if existing > 0 {
+		httpx.Error(responseWriter, http.StatusConflict, "error.collection_name_taken")
+		return
+	}
 	insertResult, failure := server.DB.Exec("INSERT INTO collections (user_id, name, description) VALUES (?, ?, ?)", userID(request), name, body.Description)
 	if failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
@@ -50,7 +65,15 @@ func (server *Server) CollectionsStore(responseWriter http.ResponseWriter, reque
 	httpx.SuccessStatus(responseWriter, http.StatusCreated, row, "Collection created")
 }
 
-// CollectionsUpdate changes name/description.
+// boolToInt maps a JSON boolean to the 0/1 the schema stores.
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+// CollectionsUpdate changes name, description and whether the collection is hidden.
 func (server *Server) CollectionsUpdate(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	id, ok := pathInt(request, "id")
@@ -69,6 +92,16 @@ func (server *Server) CollectionsUpdate(responseWriter http.ResponseWriter, requ
 	// raw JSON went into the query, so an object value produced a driver error
 	// (500) and "" produced a nameless collection - exactly what CollectionsStore
 	// rejects. Same column, same rules.
+	// Hiding is a flag, not text, so it is read before the text fields below.
+	if value, present := body["is_hidden"]; present {
+		hidden, isBool := value.(bool)
+		if !isBool {
+			httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.invalid_input")
+			return
+		}
+		assignments = append(assignments, "is_hidden = ?")
+		args = append(args, boolToInt(hidden))
+	}
 	for _, field := range []string{"name", "description"} {
 		value, present := body[field]
 		if !present {

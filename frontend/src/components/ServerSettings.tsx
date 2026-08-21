@@ -1,6 +1,6 @@
 import { createSignal, createEffect, onCleanup, Show, For, JSX } from 'solid-js'
 import { api } from '../services/api'
-import type { User } from '../types'
+import type { User, QueueBlock } from '../types'
 import { useI18n } from '../i18n/index'
 import { useUnsavedChanges, resetDirty, markDirty } from '../utils/unsavedChanges'
 import { errorKey } from '../utils/errorMessage'
@@ -537,7 +537,7 @@ function TabInfo() {
           <div style={{ width: '52px', height: '52px', 'border-radius': '14px', background: 'var(--accent)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'font-size': '28px', 'flex-shrink': '0' }}>🖨️</div>
           <div>
             <div style={{ 'font-size': '20px', 'font-weight': '800', color: 'var(--text)', ...sans, 'letter-spacing': '-0.02em' }}>Mesh<span style={{ color: 'var(--accent)' }}>Depot</span></div>
-            <div style={{ 'font-size': '12px', color: 'var(--muted)', ...mono }}>Version 1.0.1</div>
+            <div style={{ 'font-size': '12px', color: 'var(--muted)', ...mono }}>Version 1.1.0</div>
           </div>
         </div>
         <div style={{ 'font-size': '12px', color: 'var(--muted)', ...mono, 'line-height': '1.8', 'border-top': '1px solid var(--border)', 'padding-top': '12px' }}>
@@ -592,8 +592,12 @@ const COOLDOWN_MIN: Record<CooldownPlatform, number> = {
   printables: 30, thingiverse: 30, makerworld: 200, thangs: 30, cults3d: 30, myminifactory: 30,
 }
 
+// Defaults for the auto-pause settings, mirroring the backend seeds.
+const BLOCK_THRESHOLD_DEFAULT = 3
+const BLOCK_HOURS_DEFAULT = 24
+
 function TabSettings(props: { showToast: (m: string, v?: string) => void }) {
-  const { translate } = useI18n()
+  const { translate, lang } = useI18n()
   const [syncHour, setSyncHour] = createSignal(3)
   const [syncEnabled, setSyncEnabled] = createSignal(true)
   const [saving, setSaving] = createSignal(false)
@@ -612,8 +616,16 @@ function TabSettings(props: { showToast: (m: string, v?: string) => void }) {
   const [cooldownSaving, setCooldownSaving] = createSignal(false)
   const [cooldownErr, setCooldownErr] = createSignal('')
 
-  api.adminGetSettings().then((r: any) => {
-    const d = r.data ?? {}
+  // Auto-pause: after N anti-bot/rate-limit hits in a row a platform's queue is
+  // paused for a number of hours and resumes on its own. queueBlocks holds the
+  // current per-platform state so the admin can see and lift an active pause.
+  const [blockThreshold, setBlockThreshold] = createSignal(BLOCK_THRESHOLD_DEFAULT)
+  const [blockHours, setBlockHours] = createSignal(BLOCK_HOURS_DEFAULT)
+  const [blockSaving, setBlockSaving] = createSignal(false)
+  const [blockErr, setBlockErr] = createSignal('')
+  const [queueBlocks, setQueueBlocks] = createSignal<QueueBlock[]>([])
+
+  const applySettings = (d: any) => {
     setSyncHour(d.library_sync_hour ?? 3)
     setSyncEnabled((d.library_sync_enabled ?? 1) === 1)
     setUpdateEnabled((d.design_update_enabled ?? 1) === 1)
@@ -626,7 +638,12 @@ function TabSettings(props: { showToast: (m: string, v?: string) => void }) {
       cults3d:       d.download_cooldown_cults3d       ?? 30,
       myminifactory: d.download_cooldown_myminifactory ?? 30,
     })
-  }).catch(() => {})
+    setBlockThreshold(d.queue_block_threshold ?? BLOCK_THRESHOLD_DEFAULT)
+    setBlockHours(d.queue_block_hours ?? BLOCK_HOURS_DEFAULT)
+    setQueueBlocks(Array.isArray(d.queue_blocks) ? d.queue_blocks : [])
+  }
+  const reloadSettings = () => api.adminGetSettings().then((r: any) => applySettings(r.data ?? {})).catch(() => {})
+  reloadSettings()
 
   const save = async () => {
     setSaving(true); setErr('')
@@ -676,6 +693,27 @@ function TabSettings(props: { showToast: (m: string, v?: string) => void }) {
     } catch (failure: unknown) { setCooldownErr(translate(errorKey(failure))) }
     finally { setCooldownSaving(false) }
   }
+
+  const saveBlockSettings = async () => {
+    setBlockSaving(true); setBlockErr('')
+    try {
+      await api.adminSaveSettings({ queue_block_threshold: blockThreshold(), queue_block_hours: blockHours() })
+      resetDirty()
+      props.showToast(translate('toast_settings_saved'))
+    } catch (failure: unknown) { setBlockErr(translate(errorKey(failure))) }
+    finally { setBlockSaving(false) }
+  }
+
+  const pausePlatform = async (platform: string) => {
+    try { await api.adminPauseQueue(platform); await reloadSettings() }
+    catch (failure: unknown) { setBlockErr(translate(errorKey(failure))) }
+  }
+  const resumePlatform = async (platform: string) => {
+    try { await api.adminResumeQueue(platform); await reloadSettings() }
+    catch (failure: unknown) { setBlockErr(translate(errorKey(failure))) }
+  }
+  const blockOf = (platform: string): QueueBlock | undefined => queueBlocks().find(block => block.platform === platform)
+  const formatWhen = (iso?: string) => iso ? formatDateTime(iso, lang()) : ''
 
   const numInp: JSX.CSSProperties = { ...inp, width: '72px', 'text-align': 'right' }
 
@@ -787,6 +825,55 @@ function TabSettings(props: { showToast: (m: string, v?: string) => void }) {
             onClick={saveCooldowns}
             loading={cooldownSaving()}
           />
+        </div>
+      </CollapsibleCard>
+
+      <CollapsibleCard label={translate('admin_queue_block_heading')}>
+        <div style={{ ...sans, 'font-size': '12px', color: 'var(--text3)', 'line-height': '1.6' }}>
+          {translate('admin_queue_block_desc')}
+        </div>
+        <Err message={blockErr()} />
+        <div style={{ display: 'flex', gap: '20px', 'flex-wrap': 'wrap', 'margin-top': '8px' }}>
+          <div>
+            <label style={lbl}>{translate('admin_queue_block_threshold_label')}</label>
+            <input type="number" min="1" max="20" style={numInp}
+              value={blockThreshold()}
+              onInput={e => setBlockThreshold(Math.max(1, parseInt(e.currentTarget.value) || 1))} />
+          </div>
+          <div>
+            <label style={lbl}>{translate('admin_queue_block_hours_label')}</label>
+            <input type="number" min="1" max="720" style={numInp}
+              value={blockHours()}
+              onInput={e => setBlockHours(Math.max(1, parseInt(e.currentTarget.value) || 1))} />
+          </div>
+        </div>
+        <div style={{ 'margin-top': '12px' }}>
+          <Btn label={translate('admin_library_sync_save')} onClick={saveBlockSettings} loading={blockSaving()} />
+        </div>
+
+        <div style={{ 'border-top': '1px solid var(--border)', 'margin-top': '16px', 'padding-top': '14px' }}>
+          <div style={{ ...sans, 'font-size': '13px', 'font-weight': '600', color: 'var(--text)', 'margin-bottom': '10px' }}>
+            {translate('admin_queue_status_heading')}
+          </div>
+          <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
+            <For each={COOLDOWN_PLATFORMS}>{platform => {
+              const block = () => blockOf(platform)
+              const suspended = () => !!block()?.paused || !!block()?.blocked
+              return (
+                <div style={{ display: 'flex', 'align-items': 'center', gap: '12px' }}>
+                  <span style={{ ...sans, 'font-size': '13px', 'text-transform': 'capitalize', width: '110px', 'flex-shrink': '0', color: PLATFORM_COLORS[platform] ?? 'var(--text)' }}>{platform}</span>
+                  <span style={{ ...mono, 'font-size': '11px', flex: '1', color: suspended() ? 'var(--danger)' : 'var(--muted)' }}>
+                    <Show when={block()?.blocked} fallback={block()?.paused ? translate('admin_queue_paused') : translate('admin_queue_active')}>
+                      {translate('admin_queue_blocked_until', { until: formatWhen(block()?.until) })}
+                    </Show>
+                  </span>
+                  <Show when={suspended()} fallback={<Btn small label={translate('admin_queue_pause')} onClick={() => pausePlatform(platform)} />}>
+                    <Btn small label={translate('admin_queue_resume')} onClick={() => resumePlatform(platform)} />
+                  </Show>
+                </div>
+              )
+            }}</For>
+          </div>
         </div>
       </CollapsibleCard>
     </div>

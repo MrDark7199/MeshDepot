@@ -677,11 +677,51 @@ func (deps Deps) myMiniFactoryCollectionObjectURLs(collectionID, apiKey string) 
 	return urls
 }
 
+// IsExcludedFromSync reports whether the user deleted this design and asked for
+// it to stay gone. A design is matched by (platform, source id) where the URL
+// yields an id, and by its URL otherwise, so an entry written from either side
+// still matches.
+func IsExcludedFromSync(db *sql.DB, userID int, platform, sourceID, designURL string) bool {
+	if sourceID != "" {
+		var id int
+		if db.QueryRow("SELECT id FROM sync_exclusions WHERE user_id=? AND source_platform=? AND source_id=? LIMIT 1",
+			userID, platform, sourceID).Scan(&id) == nil {
+			return true
+		}
+	}
+	if designURL != "" {
+		var id int
+		if db.QueryRow("SELECT id FROM sync_exclusions WHERE user_id=? AND source_url=? LIMIT 1",
+			userID, designURL).Scan(&id) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// LiftSyncExclusion removes the block for a design. Importing it by hand is the
+// way back: without this the user could never get an excluded design again, and
+// the import would appear to do nothing on the next sync.
+func LiftSyncExclusion(db *sql.DB, userID int, platform, sourceID, designURL string) {
+	if sourceID != "" {
+		dbutil.ExecLogged(db, "DELETE FROM sync_exclusions WHERE user_id=? AND source_platform=? AND source_id=?",
+			userID, platform, sourceID)
+	}
+	if designURL != "" {
+		dbutil.ExecLogged(db, "DELETE FROM sync_exclusions WHERE user_id=? AND source_url=?", userID, designURL)
+	}
+}
+
 // queueIfNew enqueues a design URL into the download_queue if it is neither in
 // the library nor already in the queue. Returns the new queue ID or 0 (skipped).
 func queueIfNew(db *sql.DB, designURL, platform string, userID int) int {
 	var id int
 	if db.QueryRow("SELECT id FROM designs WHERE user_id=? AND source_url=? LIMIT 1", userID, designURL).Scan(&id) == nil {
+		return 0
+	}
+	// A design the user deleted and excluded stays gone. Without this the sync
+	// downloaded it again on every run and the user had to delete it again.
+	if IsExcludedFromSync(db, userID, platform, extractLibSourceID(designURL, platform), designURL) {
 		return 0
 	}
 	if sourceID := extractLibSourceID(designURL, platform); sourceID != "" {

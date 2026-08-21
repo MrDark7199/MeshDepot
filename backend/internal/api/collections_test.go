@@ -91,6 +91,25 @@ func TestCollectionsStoreRejectsABlankName(t *testing.T) {
 	}
 }
 
+// Two collections of the same name (case-insensitive, trimmed) are rejected so
+// the picker and filter stay unambiguous.
+func TestCollectionsStoreRejectsADuplicateName(t *testing.T) {
+	testHarness := newHarness(t)
+	testHarness.insertCollection(testHarness.userID, "Deko")
+
+	answer := testHarness.asUser(http.MethodPost, "/api/v1/collections", map[string]any{"name": "  deko  "})
+
+	if answer.status != http.StatusConflict {
+		t.Fatalf("a duplicate name answered %d, want 409: %s", answer.status, answer.rawBody)
+	}
+	if key := answer.errorKey(t); key != "error.collection_name_taken" {
+		t.Fatalf("unexpected error key %q", key)
+	}
+	if count := testHarness.count("SELECT COUNT(*) FROM collections WHERE user_id = ?", testHarness.userID); count != 1 {
+		t.Fatalf("a second collection was created (%d total)", count)
+	}
+}
+
 func TestCollectionsUpdateChangesNameAndDescription(t *testing.T) {
 	testHarness := newHarness(t)
 	collectionID := testHarness.insertCollection(testHarness.userID, "Alt")
@@ -108,6 +127,46 @@ func TestCollectionsUpdateChangesNameAndDescription(t *testing.T) {
 	}
 	if description := testHarness.scalar("SELECT description FROM collections WHERE id = ?", collectionID); description != "Beschreibung" {
 		t.Fatalf("the description is %q", description)
+	}
+}
+
+// Issue #9: hiding a collection keeps it but removes it from the normal list;
+// the collection tab still reaches it via include_hidden, and unhiding restores
+// it to the default list.
+func TestCollectionsHideExcludesFromDefaultListButKeepsItReachable(t *testing.T) {
+	testHarness := newHarness(t)
+	collectionID := testHarness.insertCollection(testHarness.userID, "Geheim")
+
+	if hide := testHarness.asUser(http.MethodPut, fmt.Sprintf("/api/v1/collections/%d", collectionID), map[string]any{"is_hidden": true}); hide.status != http.StatusOK {
+		t.Fatalf("hiding answered %d: %s", hide.status, hide.rawBody)
+	}
+	if hidden := testHarness.count("SELECT is_hidden FROM collections WHERE id = ?", collectionID); hidden != 1 {
+		t.Fatalf("is_hidden is %d, want 1", hidden)
+	}
+	if visible := testHarness.asUser(http.MethodGet, "/api/v1/collections", nil).list(t); len(visible) != 0 {
+		t.Fatalf("the hidden collection is still in the default list (%d shown)", len(visible))
+	}
+	if all := testHarness.asUser(http.MethodGet, "/api/v1/collections?include_hidden=1", nil).list(t); len(all) != 1 {
+		t.Fatalf("include_hidden listed %d, want 1", len(all))
+	}
+
+	if unhide := testHarness.asUser(http.MethodPut, fmt.Sprintf("/api/v1/collections/%d", collectionID), map[string]any{"is_hidden": false}); unhide.status != http.StatusOK {
+		t.Fatalf("unhiding answered %d: %s", unhide.status, unhide.rawBody)
+	}
+	if visible := testHarness.asUser(http.MethodGet, "/api/v1/collections", nil).list(t); len(visible) != 1 {
+		t.Fatalf("after unhiding, the default list shows %d, want 1", len(visible))
+	}
+}
+
+// A non-boolean is_hidden is rejected like the other malformed update fields.
+func TestCollectionsUpdateRejectsNonBooleanHidden(t *testing.T) {
+	testHarness := newHarness(t)
+	collectionID := testHarness.insertCollection(testHarness.userID, "Alt")
+
+	answer := testHarness.asUser(http.MethodPut, fmt.Sprintf("/api/v1/collections/%d", collectionID), map[string]any{"is_hidden": "yes"})
+
+	if answer.status != http.StatusUnprocessableEntity {
+		t.Fatalf("a string is_hidden answered %d: %s", answer.status, answer.rawBody)
 	}
 }
 

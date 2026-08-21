@@ -436,6 +436,12 @@ func (server *Server) DesignsDestroy(responseWriter http.ResponseWriter, request
 	// design, and nothing would connect it to its blobs afterwards.
 	released := entriesToRelease(server.DB, "df.design_id = ?", designID)
 
+	// Remember the source before the row is gone, so the library sync does not
+	// hand the design straight back on its next run.
+	if request.URL.Query().Get("exclude_from_sync") == "1" {
+		server.excludeDesignFromSync(designID, currentUserID)
+	}
+
 	// The row first, the files after: a directory removed up front would be gone
 	// even if the delete failed, leaving a design that lists files it no longer
 	// has.
@@ -447,6 +453,27 @@ func (server *Server) DesignsDestroy(responseWriter http.ResponseWriter, request
 	_ = os.RemoveAll(user.Design(designID))
 	releaseEntries(user, released)
 	httpx.SuccessMessage(responseWriter, nil, "Deleted")
+}
+
+// excludeDesignFromSync notes the platform origin of a design so the library
+// sync skips it from now on. A design without an origin (uploaded by hand) has
+// nothing the sync could bring back, so there is nothing to note.
+func (server *Server) excludeDesignFromSync(designID, currentUserID int) {
+	row, found, failure := dbutil.QueryMap(server.DB,
+		"SELECT source_platform, source_id, source_url FROM designs WHERE id = ? AND user_id = ?",
+		designID, currentUserID)
+	if failure != nil || !found {
+		return
+	}
+	platform := coerce.StringOr(row["source_platform"], "")
+	sourceID := coerce.StringOr(row["source_id"], "")
+	sourceURL := coerce.StringOr(row["source_url"], "")
+	if platform == "" || platform == "manual" || (sourceID == "" && sourceURL == "") {
+		return
+	}
+	dbutil.ExecLogged(server.DB, `INSERT OR IGNORE INTO sync_exclusions
+		(user_id, source_platform, source_id, source_url) VALUES (?, ?, ?, ?)`,
+		currentUserID, platform, sourceID, sourceURL)
 }
 
 // DesignsSync puts a design into the sync_queue.
@@ -527,10 +554,18 @@ func (server *Server) DesignCollections(responseWriter http.ResponseWriter, requ
 	if !ok {
 		return
 	}
+	// The read-only view on a design hides hidden collections; the edit form asks
+	// for them with include_hidden so a design already in a hidden collection can
+	// still be seen and removed there.
+	hiddenClause := "AND c.is_hidden = 0"
+	if request.URL.Query().Get("include_hidden") == "1" {
+		hiddenClause = ""
+	}
 	rows, _ := dbutil.QueryMaps(server.DB, `
 		SELECT c.* FROM collections c
 		JOIN design_collections dc ON dc.collection_id = c.id
-		WHERE dc.design_id = ? AND c.user_id = ? ORDER BY c.name ASC`, designID, currentUserID)
+		WHERE dc.design_id = ? AND c.user_id = ? `+hiddenClause+`
+		ORDER BY c.name ASC`, designID, currentUserID)
 	httpx.Success(responseWriter, rows)
 }
 

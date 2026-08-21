@@ -29,10 +29,32 @@ func (server *Server) accountView(row map[string]any, currentUserID int) map[str
 		// Seconds the "sync now" button of this account has to stay disabled;
 		// the client would otherwise offer a call the server only rejects.
 		"sync_cooldown_seconds": syncCooldownRemaining(coerce.StringOr(row["library_last_synced_at"], "")),
+		// Stored but unreadable credentials would otherwise look like an
+		// account that was never finished setting up.
+		"credentials_unreadable": server.credentialsUnreadable(row, currentUserID),
 	}
 	view["token"] = server.decryptField(row["token"], currentUserID)
 	view["username"] = server.decryptField(row["username"], currentUserID)
 	return view
+}
+
+// credentialsUnreadable reports whether the row holds a credential that is
+// present but cannot be decrypted, which is what an APP_KEY change leaves
+// behind. Without this flag the UI cannot tell "never entered" apart from
+// "entered but unreadable": the account shows up as not configured, and a
+// validation run silently checks the platform with an empty password and
+// blames the credentials the user just typed.
+func (server *Server) credentialsUnreadable(row map[string]any, currentUserID int) bool {
+	for _, column := range []string{"token", "username", "password_encrypted", "totp_secret"} {
+		stored := coerce.StringOr(row[column], "")
+		if stored == "" {
+			continue
+		}
+		if _, ok := server.Crypto.Decrypt(stored, currentUserID); !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // decryptField decrypts an optional field (nil on empty/error).
@@ -219,12 +241,17 @@ func syncCooldownRemaining(lastSync string) int {
 // closely. platform empty = all accounts of the member, which is blocked by the
 // most recent sync of any of them.
 func (server *Server) guardSyncCooldown(responseWriter http.ResponseWriter, userID int, platform string) bool {
-	// The account-wide stamp first: it exists even when no platform account does.
-	var lastManual string
-	if server.DB.QueryRow("SELECT COALESCE(last_manual_sync_at, '') FROM users WHERE id = ?", userID).Scan(&lastManual) == nil {
-		if syncCooldownRemaining(lastManual) > 0 {
-			httpx.Error(responseWriter, http.StatusTooManyRequests, "error.sync_cooldown")
-			return false
+	// The account-wide stamp guards "sync all" only (and covers a member with no
+	// platform account, where no per-account row exists to carry the cooldown). A
+	// single-platform sync must NOT be blocked by it - otherwise syncing one
+	// platform puts every other platform's "sync now" on cooldown too.
+	if platform == "" {
+		var lastManual string
+		if server.DB.QueryRow("SELECT COALESCE(last_manual_sync_at, '') FROM users WHERE id = ?", userID).Scan(&lastManual) == nil {
+			if syncCooldownRemaining(lastManual) > 0 {
+				httpx.Error(responseWriter, http.StatusTooManyRequests, "error.sync_cooldown")
+				return false
+			}
 		}
 	}
 	query := "SELECT COALESCE(MAX(library_last_synced_at), '') FROM platform_accounts WHERE user_id = ? AND state = 'active'"
@@ -310,13 +337,22 @@ func (server *Server) PlatformAccountsValidate(responseWriter http.ResponseWrite
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 		return
 	}
+	// A stored value that will not decrypt must not fall back to "": that turns
+	// into a login attempt with an empty password, and the user is told their
+	// credentials are wrong when the real problem is an unreadable secret.
+	storedUnreadable := false
 	decryptSaved := func(key string) string {
 		if !hasSaved {
 			return ""
 		}
-		if value, ok := server.Crypto.Decrypt(coerce.StringOr(saved[key], ""), currentUserID); ok {
+		stored := coerce.StringOr(saved[key], "")
+		if stored == "" {
+			return ""
+		}
+		if value, ok := server.Crypto.Decrypt(stored, currentUserID); ok {
 			return value
 		}
+		storedUnreadable = true
 		return ""
 	}
 	// Resolve empty/masked fields from the stored (encrypted) data.
@@ -331,6 +367,13 @@ func (server *Server) PlatformAccountsValidate(responseWriter http.ResponseWrite
 	}
 	if totp == "" || totp == "***" {
 		totp = decryptSaved("totp_secret")
+	}
+	if storedUnreadable {
+		httpx.Success(responseWriter, map[string]any{
+			"ok":    false,
+			"error": "error.platform_credentials_unreadable",
+		})
+		return
 	}
 
 	// Downloaders with a validator check the credentials; otherwise save-only.
@@ -395,9 +438,11 @@ func (server *Server) markSyncStarted(userID int, platform string) {
 		args = append(args, platform)
 	}
 	dbutil.ExecLogged(server.DB, query, args...)
-	// Also on the account itself. The per-platform timestamps are the ones the
-	// UI shows, but they only exist where a platform account does: a member
-	// without any could trigger the run as fast as they could click, because
-	// there was no row to carry the cooldown.
-	dbutil.ExecLogged(server.DB, "UPDATE users SET last_manual_sync_at = CURRENT_TIMESTAMP WHERE id = ?", userID)
+	// The account-wide stamp is only for "sync all": setting it on a
+	// single-platform sync would put every other platform's "sync now" on
+	// cooldown too (issue #4). For "sync all" it also covers a member with no
+	// platform account, where the per-account UPDATE above matches no row.
+	if platform == "" {
+		dbutil.ExecLogged(server.DB, "UPDATE users SET last_manual_sync_at = CURRENT_TIMESTAMP WHERE id = ?", userID)
+	}
 }

@@ -1,6 +1,6 @@
 import type {
   Collection, Design, DesignFile, DesignShare, Filters, PlatformAccount, QueueItem,
-  DesignID, ShareLink, SyncJob, SyncState, Tag, UrlCheckResult, User, UserShareLink,
+  QueueBlock, DesignID, ShareLink, SyncJob, SyncState, Tag, UrlCheckResult, User, UserShareLink,
 } from '../types'
 
 const BASE = '/api/v1'
@@ -100,7 +100,8 @@ export const api = {
   getDesign:     (designId: DesignID) => request<Design>('GET', `/designs/${designId}`),
   createDesign:  (data: Record<string, unknown>) => request<Design>('POST', '/designs', data),
   updateDesign:  (designId: DesignID, data: Record<string, unknown>) => request<Design>('PUT', `/designs/${designId}`, data),
-  deleteDesign:  (designId: DesignID) => request('DELETE', `/designs/${designId}`),
+  deleteDesign:  (designId: DesignID, excludeFromSync = false) =>
+    request('DELETE', `/designs/${designId}` + (excludeFromSync ? '?exclude_from_sync=1' : '')),
   fetchCover:    (designId: DesignID) => request('POST', `/designs/${designId}/fetch-cover`),
   setDesignTags: (designId: DesignID, tagIds: number[]) => request('PUT', `/designs/${designId}/tags`, { tag_ids: tagIds }),
   syncDesign:    (designId: DesignID) => request('POST', `/designs/${designId}/sync`),
@@ -139,7 +140,7 @@ export const api = {
   deleteTag: (tagId: number) => request('DELETE', `/tags/${tagId}`),
 
   // ── Collections ───────────────────────────────────────────────────────────
-  getCollections:      () => request<Collection[]>('GET', '/collections'),
+  getCollections:      (includeHidden = false) => request<Collection[]>('GET', `/collections${includeHidden ? '?include_hidden=1' : ''}`),
   createCollection:    (data: Record<string, unknown>) => request<Collection>('POST', '/collections', data),
   updateCollection:    (collectionId: number, data: Record<string, unknown>) => request('PUT', `/collections/${collectionId}`, data),
   deleteCollection:    (collectionId: number) => request('DELETE', `/collections/${collectionId}`),
@@ -148,7 +149,7 @@ export const api = {
     request('GET', `/collections/${collectionId}/addable-designs?search=${encodeURIComponent(search)}&page=${page}&per_page=${perPage}`),
   addToCollection:     (collectionId: number, designIds: DesignID[]) => request('POST', `/collections/${collectionId}/designs`, { design_ids: designIds }),
   removeFromCollection:(collectionId: number, designId: DesignID) => request('DELETE', `/collections/${collectionId}/designs/${designId}`),
-  getDesignCollections:(designId: DesignID) => request<Collection[]>('GET', `/designs/${designId}/collections`),
+  getDesignCollections:(designId: DesignID, includeHidden = false) => request<Collection[]>('GET', `/designs/${designId}/collections${includeHidden ? '?include_hidden=1' : ''}`),
 
   // ── Share links (a design handed to someone without an account) ───────────
   getShareLinks:    (designId: DesignID) => request<ShareLink[]>('GET', `/designs/${designId}/links`),
@@ -186,6 +187,8 @@ export const api = {
   retryDownload:    (queueId: number) => request('POST', `/download/${queueId}/retry`),
   cancelDownload:   (queueId: number) => request('DELETE', `/download/${queueId}`),
   dismissDownload:  (queueId: number) => request('DELETE', `/download/${queueId}/dismiss`),
+  /** Platforms whose download queue is currently paused or auto-blocked. */
+  getQueueBlocks:   () => request<QueueBlock[]>('GET', '/queue/blocks'),
 
   // ── Admin ─────────────────────────────────────────────────────────────────
   adminStats:         () => request('GET', '/admin/stats'),
@@ -199,6 +202,8 @@ export const api = {
   adminGetSettings:    () => request('GET', '/admin/settings'),
   adminSaveSettings:   (data: Record<string, unknown>) => request('PUT', '/admin/settings', data),
   adminRunLibrarySync: () => request('POST', '/admin/library-sync/run'),
+  adminPauseQueue:     (platform: string) => request('POST', `/admin/queue/${encodeURIComponent(platform)}/pause`),
+  adminResumeQueue:    (platform: string) => request('POST', `/admin/queue/${encodeURIComponent(platform)}/resume`),
   adminTranslationBackfill: () => request('POST', '/admin/translations/backfill'),
   getPublicSettings:   () => request('GET', '/settings/public'),
 

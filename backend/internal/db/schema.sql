@@ -65,6 +65,24 @@ CREATE TABLE IF NOT EXISTS tags (
     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
+-- Designs the user deleted and does not want back. The library sync inserts
+-- whatever the platform lists, so without this table a deleted design returned
+-- on the next run and had to be deleted again after every sync.
+--
+-- A design is pinned by (platform, source_id) where the URL yields one, and by
+-- its URL otherwise; both are stored so either can match. Importing the same
+-- design by hand removes the entry again - that is the way back.
+CREATE TABLE IF NOT EXISTS sync_exclusions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL,
+    source_platform TEXT    NOT NULL,
+    source_id       TEXT    NOT NULL DEFAULT '',
+    source_url      TEXT    NOT NULL DEFAULT '',
+    created_at      TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, source_platform, source_id, source_url),
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS designs (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     -- Outward identifier. The API addresses a design by this and never by the
@@ -160,6 +178,10 @@ CREATE TABLE IF NOT EXISTS collections (
     -- `name` still reads "[Label] source_name", nobody has touched it here and
     -- the sync may follow along.
     source_name                   TEXT    DEFAULT NULL,
+    -- Hidden collections stay in the library but are left out of the collection
+    -- list, the filter and a design's details. The collection tab can show them
+    -- on request, which is the only way back to unhiding one.
+    is_hidden                     INTEGER NOT NULL DEFAULT 0,
     created_at                    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at                    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
@@ -373,4 +395,6 @@ INSERT OR IGNORE INTO app_settings (key, value) VALUES
     ('download_cooldown_thangs', '30'),
     ('download_cooldown_cults3d', '45'),
     ('download_cooldown_myminifactory', '30'),
-    ('translation_enabled', '1');
+    ('translation_enabled', '1'),
+    ('queue_block_threshold', '3'),
+    ('queue_block_hours', '24');

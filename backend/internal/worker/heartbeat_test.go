@@ -76,6 +76,48 @@ func TestDownloadWorkerIsBusyWhileAJobRuns(t *testing.T) {
 	})
 }
 
+// Issue #8: each platform has its own runner, so a slow download on one platform
+// must not hold up another. Here thingiverse is stuck mid-download while
+// printables still has to finish - which it cannot if a single loop processes
+// one job at a time.
+func TestPlatformsDownloadInParallel(t *testing.T) {
+	database := newTestDB(t)
+	enqueue(t, database, "thingiverse")
+	enqueue(t, database, "printables")
+
+	thingiverseInJob := make(chan struct{})
+	releaseThingiverse := make(chan struct{})
+	printablesDone := make(chan struct{})
+
+	downloadWorker := NewDownloadWorker(database, func(job Job) (int, error) {
+		switch job.Platform {
+		case "thingiverse":
+			close(thingiverseInJob)
+			<-releaseThingiverse
+			return 1, nil
+		case "printables":
+			close(printablesDone)
+			return 2, nil
+		}
+		return 0, nil
+	}, func(string) int { return 0 })
+	downloadWorker.Heartbeat = health.New()
+	stop := make(chan struct{})
+	downloadWorker.Start(stop)
+	defer func() { close(stop); close(releaseThingiverse); downloadWorker.Wait(30 * time.Second) }()
+
+	select {
+	case <-thingiverseInJob:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the thingiverse job never started")
+	}
+	select {
+	case <-printablesDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("printables was blocked behind the stuck thingiverse download (issue #8)")
+	}
+}
+
 // Without a registry the worker must simply keep working - that is the state in
 // every other test.
 func TestDownloadWorkerWithoutHeartbeat(t *testing.T) {

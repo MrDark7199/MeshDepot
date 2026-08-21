@@ -838,6 +838,7 @@ function PlatformWizardModal(props: {
       else {
         // The backend names which half was wrong (token vs. username).
         const reason: Record<string, string> = {
+          'error.platform_credentials_unreadable':  t('error.platform_credentials_unreadable'),
           'error.platform_invalid_token':           t('platform_err_token_invalid'),
           'error.platform_invalid_username':        t('platform_err_username_invalid'),
           'error.myminifactory_invalid_api_key':    t('platform_err_api_key_invalid'),
@@ -867,7 +868,6 @@ function PlatformWizardModal(props: {
         sync_collections:  syncCollections(),
         auto_library_sync: autoSync(),
       })
-      resetDirty()
       props.showToast(res.data?.auto_synced ? t('platform_wizard_saved_synced') : t('toast_platform_saved'))
       props.onSaved()
       props.onClose()
@@ -884,7 +884,12 @@ function PlatformWizardModal(props: {
   return (
     <div onClick={props.onClose}
       style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.8)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'z-index': '2100', 'backdrop-filter': 'blur(6px)' }}>
+      {/* The wizard renders inside the account settings modal body, which marks
+          itself dirty on every input event that bubbles up to it. This dialog
+          has its own save button, so what is typed here is never an unsaved
+          change of that form - keep the events from reaching it. */}
       <div onClick={e => e.stopPropagation()}
+        onInput={e => e.stopPropagation()} onChange={e => e.stopPropagation()}
         style={{ background: 'var(--bg)', 'border-radius': '18px', width: '520px', 'max-width': '94vw', 'max-height': '92vh', overflow: 'auto', border: '1px solid var(--border)', 'box-shadow': '0 40px 100px rgba(0,0,0,0.5)' }}>
         {/* Header + stepper */}
         <div style={{ padding: '18px 22px', 'border-bottom': '1px solid var(--border)' }}>
@@ -1024,9 +1029,13 @@ function PlatformStatusRow(props: {
   // Seeded from the account, which the parent reloads after a triggered sync -
   // the server decides how long the button stays closed, not the click.
   createEffect(() => cooldown.start(props.account()?.sync_cooldown_seconds ?? 0))
+  // Credentials that are stored but no longer decryptable (APP_KEY changed
+  // after they were saved). They read as "not configured" everywhere, which
+  // gives the user nothing to act on - so they get their own state.
+  const credentialsUnreadable = () => !!props.account()?.credentials_unreadable
   const fullyConfigured = () => {
     const acc = props.account()
-    if (!acc) return false
+    if (!acc || credentialsUnreadable()) return false
     const hasUser = !!acc.username, hasPw = !!acc.has_password, hasTok = !!acc.token, hasTotp = !!acc.has_totp_secret
     if (info.requiresTotpSeed) return hasUser && hasPw && hasTotp
     if (!info.supportsAutoLogin) return hasTok && (!info.requiresUsername || hasUser)
@@ -1036,8 +1045,8 @@ function PlatformStatusRow(props: {
 
   return (
     <div style={{ border: '1px solid var(--border)', 'border-radius': '12px', padding: '12px 16px', display: 'flex', 'align-items': 'center', gap: '12px', background: 'var(--surface)' }}>
-      <div title={t(fullyConfigured() ? 'platform_configured_short' : 'platform_not_configured_short')}
-        style={{ width: '10px', height: '10px', 'border-radius': '50%', background: fullyConfigured() ? '#22c55e' : 'var(--border)', 'flex-shrink': '0', cursor: 'help' }} />
+      <div title={t(credentialsUnreadable() ? 'platform_unreadable_short' : fullyConfigured() ? 'platform_configured_short' : 'platform_not_configured_short')}
+        style={{ width: '10px', height: '10px', 'border-radius': '50%', background: credentialsUnreadable() ? 'var(--danger)' : fullyConfigured() ? '#22c55e' : 'var(--border)', 'flex-shrink': '0', cursor: 'help' }} />
       <span style={{ ...mono, 'font-size': '12px', background: color + '22', color: color, 'border-radius': '5px', padding: '2px 9px', 'flex-shrink': '0' }}>
         {props.platform.charAt(0).toUpperCase() + props.platform.slice(1)}
       </span>

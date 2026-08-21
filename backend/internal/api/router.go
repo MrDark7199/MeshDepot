@@ -61,6 +61,7 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("POST /api/v1/download/{id}/retry", server.Auth.Require(http.HandlerFunc(server.DownloadRetry)))
 	mux.Handle("DELETE /api/v1/download/{id}", server.Auth.Require(http.HandlerFunc(server.DownloadCancel)))
 	mux.Handle("DELETE /api/v1/download/{id}/dismiss", server.Auth.Require(http.HandlerFunc(server.DownloadDismiss)))
+	mux.Handle("GET /api/v1/queue/blocks", server.Auth.Require(http.HandlerFunc(server.QueueBlocks)))
 	mux.Handle("POST /api/v1/designs/sync-all", server.Auth.Require(http.HandlerFunc(server.SyncAll)))
 	mux.Handle("GET /api/v1/designs/sync-status", server.Auth.Require(http.HandlerFunc(server.SyncStatus)))
 
@@ -140,6 +141,8 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("GET /api/v1/admin/settings", server.Auth.RequireAdmin(http.HandlerFunc(server.GetSettings)))
 	mux.Handle("PUT /api/v1/admin/settings", server.Auth.RequireAdmin(http.HandlerFunc(server.SaveSettings)))
 	mux.Handle("POST /api/v1/admin/library-sync/run", server.Auth.RequireAdmin(http.HandlerFunc(server.RunLibrarySync)))
+	mux.Handle("POST /api/v1/admin/queue/{platform}/pause", server.Auth.RequireAdmin(http.HandlerFunc(server.QueuePause)))
+	mux.Handle("POST /api/v1/admin/queue/{platform}/resume", server.Auth.RequireAdmin(http.HandlerFunc(server.QueueResume)))
 	mux.Handle("GET /api/v1/settings/public", server.Auth.Require(http.HandlerFunc(server.GetPublicSettings)))
 
 	// ── Embedded SPA (catch-all; /api/* stays unaffected) ──

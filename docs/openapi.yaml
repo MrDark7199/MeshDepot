@@ -147,6 +147,16 @@ components:
         done_at:     { type: string, format: date-time, nullable: true }
         design_name: { type: string, nullable: true }
 
+    QueueBlock:
+      type: object
+      properties:
+        platform: { type: string }
+        paused:   { type: boolean, description: Manual admin pause }
+        blocked:  { type: boolean, description: Automatic anti-bot/rate-limit pause currently in effect }
+        until:    { type: string, format: date-time, description: When the automatic block lifts }
+        reason:   { type: string, description: Error key that triggered the automatic block }
+        since:    { type: string, format: date-time, description: When the automatic block started }
+
     Notification:
       type: object
       properties:
@@ -1198,6 +1208,19 @@ paths:
         '200':
           description: Removed
 
+  /queue/blocks:
+    get:
+      tags: [Downloads]
+      summary: List platforms whose download queue is currently paused or auto-blocked
+      responses:
+        '200':
+          description: Active pause/block states
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/QueueBlock' }
+
   # ── Shares ───────────────────────────────────────────────────────────────────
 
   /designs/{id}/shares:
@@ -1955,6 +1978,32 @@ paths:
       responses:
         '200':
           description: Sync triggered
+
+  /admin/queue/{platform}/pause:
+    parameters:
+      - { name: platform, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Admin]
+      summary: Manually pause a platform's download queue
+      responses:
+        '200':
+          description: Updated queue state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueueBlock' }
+
+  /admin/queue/{platform}/resume:
+    parameters:
+      - { name: platform, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Admin]
+      summary: Clear a platform's manual pause and any automatic block
+      responses:
+        '200':
+          description: Updated queue state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueueBlock' }
 
   /settings/public:
     get:

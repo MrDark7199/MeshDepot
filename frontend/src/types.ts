@@ -147,6 +147,9 @@ export interface Collection {
   design_count?: number
   /** Set when the collection mirrors one on a platform, empty for own ones. */
   source_platform?: string
+  /** Hidden collections are kept out of the filter and design details; the
+   *  collection tab still shows them so they can be unhidden. 0/1 from SQLite. */
+  is_hidden?: boolean
   created_at?: string
   updated_at?: string
 }
@@ -207,6 +210,20 @@ export interface QueueItem {
  * carry no `retry_count` yet.
  */
 export type DownloadJob = Omit<QueueItem, 'retry_count'> & { retry_count?: number }
+
+/**
+ * Pause/block state of one platform's download queue (GET /queue/blocks and the
+ * admin settings `queue_blocks`). `paused` is the manual admin switch; `blocked`
+ * is the automatic anti-bot/rate-limit pause that lifts by itself at `until`.
+ */
+export interface QueueBlock {
+  platform: string
+  paused: boolean
+  blocked: boolean
+  until?: string
+  reason?: string
+  since?: string
+}
 
 /** A stored credential set for one source platform (GET /users/{id}/platform-accounts). */
 export interface PlatformAccount {

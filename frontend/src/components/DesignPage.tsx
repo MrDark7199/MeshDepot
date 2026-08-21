@@ -427,6 +427,9 @@ export function DesignPage(props: DesignPageProps) {
 
   const [confirmDelete, setConfirmDelete] = createSignal(false)
   const [isDeleting, setIsDeleting] = createSignal(false)
+  // Preselected: a design deleted on purpose is one the user does not want
+  // back, and the sync would otherwise hand it over again on its next run.
+  const [excludeFromSync, setExcludeFromSync] = createSignal(true)
 
   // syncTick: reload design+files when a background sync finishes
   createEffect(() => {
@@ -490,16 +493,21 @@ export function DesignPage(props: DesignPageProps) {
   const [colQuery, setColQuery] = createSignal('')
   const [colOpen, setColOpen] = createSignal(false)
   const [isCreatingCol, setIsCreatingCol] = createSignal(false)
+  // The picker offers hidden collections too, so a design can still be put into
+  // one. The read-only view further down keeps hiding them (it intersects
+  // props.allCollections, which never contains hidden ones).
+  const [pickerCollections, setPickerCollections] = createSignal<Collection[]>([])
 
   const notColSelected = (c: Collection) => !designCollectionIds().includes(c.id)
   const colResults = () => {
     const q = colQuery().trim().toLowerCase()
-    return props.allCollections.filter(c => notColSelected(c) && (q === '' || c.name.toLowerCase().includes(q)))
+    return pickerCollections().filter(c => notColSelected(c) && (q === '' || c.name.toLowerCase().includes(q)))
   }
-  // Only offer the create row when the input is not an exact name match.
+  // Only offer the create row when the input is not an exact name match (hidden
+  // collections included, since the backend rejects a duplicate name).
   const showCreateCol = () => {
     const q = colQuery().trim().toLowerCase()
-    return q !== '' && !props.allCollections.some(c => c.name.toLowerCase() === q)
+    return q !== '' && !pickerCollections().some(c => c.name.toLowerCase() === q)
   }
   const onColKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -720,8 +728,12 @@ export function DesignPage(props: DesignPageProps) {
         is_hidden:          loaded.is_hidden ? 1 : 0,
       })
       setSelectedTags(loaded.tags || [])
-      const colResponse = await api.getDesignCollections(props.designId)
+      const [colResponse, pickerResponse]: [any, any] = await Promise.all([
+        api.getDesignCollections(props.designId, true),
+        api.getCollections(true),
+      ])
       setSelectedCollections(colResponse.data)
+      setPickerCollections(pickerResponse.data || [])
       if (props.initialEditMode && !initialEditModeDone) { initialEditModeDone = true; enterEditMode() }
     } catch (failure: unknown) {
       // The server's own reason, not a blanket "not found": a rejected session
@@ -873,7 +885,7 @@ export function DesignPage(props: DesignPageProps) {
   const deleteDesign = async () => {
     setIsDeleting(true)
     try {
-      await api.deleteDesign(props.designId)
+      await api.deleteDesign(props.designId, excludeFromSync() && !!design()?.source_url)
       props.showToast(translate('toast_design_deleted'))
       props.onBack()
     } catch (err: unknown) {
@@ -1018,7 +1030,7 @@ export function DesignPage(props: DesignPageProps) {
       setSelectedCollections(cs => [...cs, col])
       props.showToast(translate('toast_collection_created'))
       props.onCollectionsChanged()
-    } catch {}
+    } catch (failure: unknown) { props.showToast(translate(errorKey(failure)), 'error') }
     finally { setIsCreatingCol(false); setColQuery(''); setColOpen(false) }
   }
 
@@ -1384,6 +1396,15 @@ export function DesignPage(props: DesignPageProps) {
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                         {col.name}
                       </button>
+                    )}</For>
+                    {/* A collection the design is in but that is hidden: show a
+                        neutral placeholder instead of its name, so the design
+                        still reads as "in a collection" without revealing which. */}
+                    <For each={selectedCollections().filter(c => c.is_hidden)}>{() => (
+                      <span style={{ 'font-size': '12px', padding: '4px 11px', 'border-radius': '7px', background: 'var(--bg3)', color: 'var(--muted)', ...sansFont, 'font-weight': '600', 'font-style': 'italic', display: 'flex', 'align-items': 'center', gap: '5px' }}>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                        {translate('col_hidden_placeholder')}
+                      </span>
                     )}</For>
                   </div>
                 </div>
@@ -1947,6 +1968,15 @@ export function DesignPage(props: DesignPageProps) {
             <div style={{ ...sansFont, 'font-size': '18px', 'font-weight': '700', color: 'var(--text)', 'margin-bottom': '10px' }}>{translate('btn_delete_design')}</div>
             <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--text2)', 'margin-bottom': '24px', 'line-height': '1.6' }}
               innerHTML={translate('confirm_delete_design_body').replace('{name}', design() ? escapeHtml(displayName(design()!, lang(), translateDesigns())) : '')} />
+            <Show when={design()?.source_url}>
+              <label style={{ display: 'flex', 'align-items': 'flex-start', gap: '9px', cursor: 'pointer', 'margin': '-12px 0 20px',
+                ...sansFont, 'font-size': '13px', color: 'var(--text2)', 'line-height': '1.5' }}>
+                <input type="checkbox" checked={excludeFromSync()}
+                  onChange={e => setExcludeFromSync(e.currentTarget.checked)}
+                  style={{ 'margin-top': '2px', cursor: 'pointer', 'accent-color': 'var(--accent)' }} />
+                <span>{translate('delete_exclude_from_sync')}</span>
+              </label>
+            </Show>
             <div style={{ display: 'flex', gap: '11px', 'justify-content': 'flex-end' }}>
               <button onClick={() => setConfirmDelete(false)}
                 style={{ padding: '9px 20px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '10px', color: 'var(--muted)', 'font-size': '14px', cursor: 'pointer', ...sansFont }}>
