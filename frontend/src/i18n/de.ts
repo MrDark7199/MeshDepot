@@ -808,6 +808,7 @@ export default {
   admin_queue_blocked_until:           'Automatisch pausiert bis {until}',
   admin_queue_pause:                   'Pausieren',
   admin_queue_resume:                  'Fortsetzen',
+  queue_block_notif_title:             '{platform}-Downloads pausiert',
   queue_block_alert_blocked:           'Downloads nach wiederholten Anti-Bot-Sperren pausiert – automatischer Neuversuch nach {until}.',
   queue_block_alert_paused:            'Downloads manuell pausiert.',
   'error.invalid_platform':            'Unbekannte Plattform.',

@@ -281,6 +281,8 @@ export interface AppNotification {
   created_at: string
   read_at?: string | null
   local?: boolean
+  /** Severity, used by the bell badge and list styling. Defaults to info. */
+  level?: 'info' | 'error'
 }
 
 /** Live sync phase of one design, shown as a category label on the card. */

@@ -1440,34 +1440,6 @@ type AppView = 'grid' | 'design' | 'collections'
  * retries on its own; a manually paused one just says it is paused. Empty when
  * nothing is suspended, so it costs nothing in the normal case.
  */
-function QueueBlockAlerts(props: { blocks: QueueBlock[]; translate: (key: string, vars?: Record<string, string | number>) => string; locale: string }) {
-  const whenText = (iso?: string) => {
-    if (!iso) return ''
-    const parsed = new Date(iso)
-    if (isNaN(parsed.getTime())) return ''
-    return parsed.toLocaleString(props.locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-  }
-  return (
-    <Show when={props.blocks.length > 0}>
-      <div style={{ position: 'fixed', top: '76px', right: '20px', 'z-index': '300', display: 'flex', 'flex-direction': 'column', gap: '10px', 'max-width': '340px', 'pointer-events': 'none' }}>
-        <For each={props.blocks}>{block => (
-          <div style={{ background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '14px', padding: '12px 15px', color: 'var(--danger)', 'font-family': "'DM Sans',sans-serif", 'font-size': '13px', 'line-height': '1.45', 'box-shadow': '0 8px 30px rgba(0,0,0,0.35)' }}>
-            <div style={{ 'font-weight': '700', 'margin-bottom': '3px', display: 'flex', 'align-items': 'center', gap: '7px' }}>
-              <span>⏸</span>
-              <span style={{ 'text-transform': 'capitalize' }}>{block.platform}</span>
-            </div>
-            <div>
-              {block.blocked
-                ? props.translate('queue_block_alert_blocked', { until: whenText(block.until) })
-                : props.translate('queue_block_alert_paused')}
-            </div>
-          </div>
-        )}</For>
-      </div>
-    </Show>
-  )
-}
-
 function MainApp() {
   const {user, updateUser, logout} = useAuth()
   const {translate, lang, translateDesigns} = useI18n()
@@ -1515,6 +1487,36 @@ function MainApp() {
   const notifs = createNotificationsStore({
     userId: () => user()?.id,
     translate,
+  })
+  // Platform queue blocks/pauses surface as error entries in the notification
+  // bell instead of a permanent top-right banner. One notification per newly
+  // seen block; a block that clears is forgotten so a later re-block notifies
+  // again. The date is formatted DD/MM/YYYY.
+  const notifiedBlockKeys = new Set<string>()
+  const blockKey = (block: QueueBlock) => `${block.platform}|${block.blocked ? (block.until || 'blocked') : 'paused'}`
+  const formatBlockUntil = (iso?: string) => {
+    if (!iso) return ''
+    const date = new Date(iso)
+    if (isNaN(date.getTime())) return ''
+    const pad = (value: number) => String(value).padStart(2, '0')
+    return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  }
+  createEffect(() => {
+    const active = queueBlocks()
+    const activeKeys = new Set(active.map(blockKey))
+    for (const block of active) {
+      const key = blockKey(block)
+      if (notifiedBlockKeys.has(key)) continue
+      notifiedBlockKeys.add(key)
+      const platformName = block.platform.charAt(0).toUpperCase() + block.platform.slice(1)
+      const body = block.blocked
+        ? translate('queue_block_alert_blocked', { until: formatBlockUntil(block.until) })
+        : translate('queue_block_alert_paused')
+      notifs.pushError(translate('queue_block_notif_title', { platform: platformName }), body)
+    }
+    for (const key of [...notifiedBlockKeys]) {
+      if (!activeKeys.has(key)) notifiedBlockKeys.delete(key)
+    }
   })
   const sync = createSyncProgressStore({
     onJobFinished: job => {
@@ -2125,7 +2127,6 @@ function MainApp() {
         <Show when={downloads.panelOpen()}>
           <QueuePanel queue={downloads.queue} onClose={() => downloads.setPanelOpen(false)} onCancel={downloads.cancel} onRetry={downloads.retry} onRetryAll={() => downloads.retryAll(visibleDownloadJobs().filter(job => job.status === 'failed'))} onDismiss={downloads.dismiss} onOpenSettings={() => { setAccountSettingsTab('platforms'); setShowAccountSettings(true) }} />
         </Show>
-        <QueueBlockAlerts blocks={queueBlocks()} translate={translate} locale={lang()} />
         {commonModals()}
       </Show>
     </div>
