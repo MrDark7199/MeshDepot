@@ -13,16 +13,13 @@
 services:
 
   app:
-    # The image is published to GHCR by .github/workflows/docker-publish.yml on
-    # every push to main, so registry-based deploys (Portainer etc.) can just
-    # pull it. The build section stays as a local fallback (`docker compose
-    # build`): the build compiles the Go binary and bakes the SPA into it, so a
-    # frontend change needs a fresh image (a new GHCR build, or `up --build`
-    # locally), not just a restart.
+    # No image is published, so the container is built from this checkout. The
+    # build compiles the Go binary and bakes the SPA into it, which is why any
+    # frontend change needs `up --build`, not just a restart.
     build:
       context: .
       dockerfile: backend/Dockerfile
-    image: ghcr.io/mrdark7199/meshdepot:latest
+    image: meshdepot:latest
     container_name: meshdepot
     restart: unless-stopped
 
