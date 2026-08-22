@@ -107,3 +107,83 @@ func (runner *Runner) WithPage(timeout time.Duration, action func(*rod.Page) err
 	page = page.Timeout(timeout)
 	return action(page)
 }
+
+// Session is a long-lived browser + stealth page kept open across calls, for the
+// rare flow that benefits from REUSING cookies (MakerWorld's geetest cookies are
+// domain-wide, so one session can resolve many downloads without reloading a
+// page each time). This is the deliberate exception to WithPage's "fresh every
+// time" rule, so the caller owns the lifecycle and MUST call Close - a Session
+// holds one browser slot until then. No per-page timeout is set here; callers
+// scope each operation with page.Timeout(...).
+type Session struct {
+	page     *rod.Page
+	browser  *rod.Browser
+	launcher *launcher.Launcher
+	release  func()
+	closed   bool
+}
+
+// OpenSession launches a browser + stealth page and returns it as a Session. It
+// blocks for a free slot (ErrBusy after slotWait). The caller must Close it.
+func (runner *Runner) OpenSession() (session *Session, failure error) {
+	select {
+	case runner.slots <- struct{}{}:
+	case <-time.After(slotWait):
+		return nil, ErrBusy
+	}
+	release := func() { <-runner.slots }
+	defer func() {
+		if failure != nil {
+			release()
+		}
+	}()
+
+	browserLauncher := launcher.New().
+		Headless(true).
+		Set("no-sandbox").
+		Set("disable-setuid-sandbox").
+		Set("disable-dev-shm-usage")
+	if runner.chromiumBin != "" {
+		browserLauncher = browserLauncher.Bin(runner.chromiumBin)
+	}
+	controlURL, failure := browserLauncher.Launch()
+	if failure != nil {
+		return nil, fmt.Errorf("launch chromium: %w", failure)
+	}
+	rodBrowser := rod.New().ControlURL(controlURL)
+	if failure = rodBrowser.Connect(); failure != nil {
+		browserLauncher.Cleanup()
+		return nil, fmt.Errorf("connect: %w", failure)
+	}
+	page, failure := stealth.Page(rodBrowser)
+	if failure != nil {
+		rodBrowser.Close()
+		browserLauncher.Cleanup()
+		return nil, fmt.Errorf("stealth page: %w", failure)
+	}
+	if runner.OnRequest != nil {
+		if (proto.NetworkEnable{}).Call(page) == nil {
+			go page.EachEvent(func(event *proto.NetworkRequestWillBeSent) {
+				runner.OnRequest(event.Request.URL)
+			})()
+		}
+	}
+	return &Session{page: page, browser: rodBrowser, launcher: browserLauncher, release: release}, nil
+}
+
+// Page returns the session's live page. Scope each operation with
+// page.Timeout(...) - the page itself carries no deadline.
+func (session *Session) Page() *rod.Page { return session.page }
+
+// Close tears the session down and frees its slot. Safe to call more than once;
+// a dead page/browser only produces a recovered panic, never a crash.
+func (session *Session) Close() {
+	if session == nil || session.closed {
+		return
+	}
+	session.closed = true
+	func() { defer func() { _ = recover() }(); session.page.Close() }()
+	func() { defer func() { _ = recover() }(); session.browser.Close() }()
+	session.launcher.Cleanup()
+	session.release()
+}
