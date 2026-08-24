@@ -193,8 +193,8 @@ func validateConfig(configuration config.Config) error {
 	if configuration.HTTPAddr == "" {
 		return errors.New("HTTP_ADDR is unset - refusing to start. " +
 			"It is the listen address of the HTTP server and comes from the deployment " +
-			"(see the environment block of docker-compose.single.yml, where it follows APP_CONTAINER_PORT). " +
-			"Set it to an address of the form \":8080\" and restart.")
+			"(see the environment block of docker-compose.yml, where it follows APP_PORT). " +
+			"Set it to an address of the form \":9000\" and restart.")
 	}
 	return nil
 }

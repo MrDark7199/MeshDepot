@@ -7,7 +7,7 @@
 #   echo "APP_KEY=$(openssl rand -base64 32)" >> .env
 #   docker compose up --build -d
 #
-# The app is then served on http://localhost:3100 (default admin: admin/admin -
+# The app is then served on http://localhost:9000 (default admin: admin/admin -
 # it asks for a new password on the first login).
 
 services:
@@ -23,16 +23,17 @@ services:
     container_name: meshdepot
     restart: unless-stopped
 
-    ports:
-      # Host:container. APP_PORT is the host side, APP_CONTAINER_PORT the one
-      # inside - and the latter is the single source for the mapping, HTTP_ADDR
-      # and the healthcheck below, so changing the port cannot leave one of the
-      # three behind. Leave APP_CONTAINER_PORT alone unless the port collides
-      # with something else in the container; from the outside APP_PORT is the
-      # only one that matters. Behind a reverse proxy, bind to loopback instead
-      # so the app is not reachable directly:
-      #   "127.0.0.1:${APP_PORT:-3100}:${APP_CONTAINER_PORT:-8080}"
-      - "${APP_PORT:-3100}:${APP_CONTAINER_PORT:-8080}"
+    # The container shares the host's network stack: no bridge, no NAT, no port
+    # mapping. `ports:` is therefore gone - Compose rejects it together with
+    # network_mode, and there would be nothing left to map. There is no separate
+    # container-side port either: every port below is a host port.
+    #
+    # What this exposes: the container's own loopback services are now the
+    # host's. All four sit in one contiguous block from 9000 so they are easy to
+    # keep clear, and each can be moved on its own if something is already there.
+    # The three internal ones stay on loopback, so nothing outside this machine
+    # reaches them.
+    network_mode: host
 
     # Values from .env are read automatically. The file is optional: everything
     # below has a default or a value of its own, except APP_KEY.
@@ -54,11 +55,15 @@ services:
       - APP_KEY=${APP_KEY:?APP_KEY must be set in .env (>= 32 random characters, e.g. openssl rand -base64 32)}
 
       # Listen address of the HTTP server. The image sets no default on purpose:
-      # this is the deployment's decision, and the port mapping above plus the
-      # healthcheck below are derived from the same APP_CONTAINER_PORT. Delete
-      # this line and the app logs a fatal and stops - better than listening on
-      # a port nothing is mapped to, which looks like a broken container.
-      - HTTP_ADDR=:${APP_CONTAINER_PORT:-8080}
+      # this is the deployment's decision. With host networking this binds
+      # straight onto the host, so APP_PORT is both the listen port and the one
+      # you browse to. Delete this line and the app logs a fatal and stops -
+      # better than a container that looks broken for no visible reason.
+      #
+      # Behind a reverse proxy, bind to loopback so the app is not reachable
+      # from the network directly:
+      #   - HTTP_ADDR=127.0.0.1:${APP_PORT:-9000}
+      - HTTP_ADDR=:${APP_PORT:-9000}
 
       # ── Optional: reverse proxy / TLS ───────────────────────────────────────
       # Default false. Set to true when a TLS-terminating proxy sits in front:
@@ -82,23 +87,41 @@ services:
 
       # Optional, but set it as soon as a reverse proxy sits in front: otherwise
       # every request carries the proxy's address, and the login rate limit counts
-      # all users as a single client. Comma-separated IPs or CIDRs.
-      #   - TRUSTED_PROXIES=172.18.0.0/16
+      # all users as a single client. Comma-separated IPs or CIDRs. With host
+      # networking a proxy on this machine arrives as 127.0.0.1, not as a Docker
+      # bridge address.
+      #   - TRUSTED_PROXIES=127.0.0.1/32
+
+      # ── Optional: the three internal ports ──────────────────────────────────
+      # These are the services that run inside the container and, because it
+      # shares the host's network stack, bind on the host. They are kept on
+      # 127.0.0.1 deliberately: nothing outside this machine may reach them.
+      # Change one only when the port is already taken on the host.
+
+      # The Firefox resolver that fetches captcha-gated download URLs. It ships
+      # in the image (this used to be a separate `playwright` service); the
+      # entrypoint starts it on this address and generates its token, and the app
+      # refuses to start if it does not answer. This one value moves both ends -
+      # an *empty* value aborts the container. Point it at a host other than
+      # 127.0.0.1 only to use a resolver of your own, and then set
+      # PLAYWRIGHT_TOKEN to match it.
+      - PLAYWRIGHT_URL=http://127.0.0.1:${RESOLVER_PORT:-9001}
+
+      # The bundled Tor daemon: SOCKS5 proxy and control port. Only Printables
+      # downloads use them. The defaults deliberately avoid Tor's usual
+      # 9050/9051, which would collide with a Tor already running on the host.
+      - TOR_SOCKS_ADDR=127.0.0.1:${TOR_SOCKS_PORT:-9002}
+      - TOR_CONTROL_ADDR=127.0.0.1:${TOR_CONTROL_PORT:-9003}
+
+      # How long the MakerWorld resolver keeps its warm Firefox alive with no
+      # work, in milliseconds. Default 15 minutes. Lower it to free the memory
+      # sooner, raise it if a long queue keeps re-warming the browser.
+      - MAKERWORLD_IDLE_MS=${MAKERWORLD_IDLE_MS:-900000}
 
       # ── Nothing to configure here ───────────────────────────────────────────
       # Nothing to configure for the platforms: every token and login belongs to
       # a user and is entered in the web UI, not here. There is no server-wide
       # fallback token (see PlatformToken in internal/platforms/helpers.go).
-      #
-      # Nothing to configure for the Firefox resolver either: it ships in the image
-      # (this used to be a separate `playwright` service), the entrypoint starts
-      # it on the address in PLAYWRIGHT_URL and generates its token, and the app
-      # refuses to start if it does not answer.
-      #
-      # Setting PLAYWRIGHT_URL moves both the app and the resolver to that
-      # address, so an *empty* value here aborts the container. Point it
-      # elsewhere only to use a resolver of your own - then set PLAYWRIGHT_TOKEN
-      # to match it.
 
     # Required. Everything that must survive a rebuild lives here: the SQLite
     # database, model files, blobs, covers, thumbnails, avatars. Without it every
@@ -114,9 +137,9 @@ services:
     # Optional: it only decides whether Docker calls the container healthy.
     healthcheck:
       # Hits the SPA root rather than /api/v1/health: it proves the HTTP server
-      # is up without depending on the API's auth layer. Same APP_CONTAINER_PORT
-      # as the mapping and HTTP_ADDR above.
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:${APP_CONTAINER_PORT:-8080}/"]
+      # is up without depending on the API's auth layer. Same APP_PORT as
+      # HTTP_ADDR above.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:${APP_PORT:-9000}/"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -17,6 +17,7 @@ import (
 	"meshdepot/internal/dbutil"
 	"meshdepot/internal/health"
 	"meshdepot/internal/httpx"
+	"meshdepot/internal/platforms/tor"
 	"meshdepot/internal/publicid"
 	"meshdepot/internal/queuestate"
 	"meshdepot/internal/scheduler"
@@ -365,7 +366,7 @@ func (server *Server) AdminHealth(responseWriter http.ResponseWriter, request *h
 	checks["scheduler"] = schedulerCheck
 
 	// 5) Tor - SOCKS port reachable?
-	if conn, failure := net.DialTimeout("tcp", "127.0.0.1:9050", time.Second); failure == nil {
+	if conn, failure := net.DialTimeout("tcp", tor.SocksAddr, time.Second); failure == nil {
 		conn.Close()
 		checks["tor"] = map[string]any{"label_key": "health_tor_label", "status": "ok", "message_key": "health_tor_ok"}
 	} else {

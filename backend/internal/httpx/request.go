@@ -23,7 +23,7 @@ func DecodeJSON(request *http.Request, target any) error {
 
 // trustedProxies are the networks whose X-Real-IP header ClientIP believes.
 // Empty by default: the standard deployment publishes the app port directly
-// (docker-compose.single.yml), and there any client can set the header itself.
+// (docker-compose.yml), and there any client can set the header itself.
 var trustedProxies []*net.IPNet
 
 // SetTrustedProxies configures the reverse proxies whose X-Real-IP header is

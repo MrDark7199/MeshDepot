@@ -1491,8 +1491,12 @@ function MainApp() {
   // Platform queue blocks/pauses surface as error entries in the notification
   // bell instead of a permanent top-right banner. One notification per newly
   // seen block; a block that clears is forgotten so a later re-block notifies
-  // again. The date is formatted DD/MM/YYYY.
+  // again, and its bell entry is withdrawn - see below. Date format DD/MM/YYYY.
   const notifiedBlockKeys = new Set<string>()
+  // Title of the bell entry each platform currently has, so it can be taken back
+  // once that platform runs again. Keyed by platform rather than by block key:
+  // the key carries the block's expiry, which changes on a re-block.
+  const blockNotificationTitles = new Map<string, string>()
   const blockKey = (block: QueueBlock) => `${block.platform}|${block.blocked ? (block.until || 'blocked') : 'paused'}`
   const formatBlockUntil = (iso?: string) => {
     if (!iso) return ''
@@ -1504,18 +1508,31 @@ function MainApp() {
   createEffect(() => {
     const active = queueBlocks()
     const activeKeys = new Set(active.map(blockKey))
+    const activePlatforms = new Set(active.map(block => block.platform))
     for (const block of active) {
       const key = blockKey(block)
       if (notifiedBlockKeys.has(key)) continue
       notifiedBlockKeys.add(key)
       const platformName = block.platform.charAt(0).toUpperCase() + block.platform.slice(1)
+      const title = translate('queue_block_notif_title', { platform: platformName })
       const body = block.blocked
         ? translate('queue_block_alert_blocked', { until: formatBlockUntil(block.until) })
         : translate('queue_block_alert_paused')
-      notifs.pushError(translate('queue_block_notif_title', { platform: platformName }), body)
+      blockNotificationTitles.set(block.platform, title)
+      notifs.pushError(title, body)
     }
     for (const key of [...notifiedBlockKeys]) {
       if (!activeKeys.has(key)) notifiedBlockKeys.delete(key)
+    }
+    // A platform that no longer appears in the active list is running again -
+    // an admin lifted the pause or the automatic block expired. Its bell entry
+    // says downloads are paused, which is now false, so it goes. This runs in
+    // every user's tab on the next poll, which is what makes the message
+    // disappear for everyone rather than only for the admin.
+    for (const [platform, title] of [...blockNotificationTitles]) {
+      if (activePlatforms.has(platform)) continue
+      notifs.removeLocalByTitle(title)
+      blockNotificationTitles.delete(platform)
     }
   })
   const sync = createSyncProgressStore({

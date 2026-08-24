@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -18,12 +19,35 @@ import (
 )
 
 const (
-	socksAddr   = "127.0.0.1:9050"
-	controlAddr = "127.0.0.1:9051"
 	// controlPassword + matching hash (as in the previous tor container).
 	controlPassword = "meshdepot"
 	hashedPassword  = "16:C9A55C897571F08260917354D70C4C1154427E7F361B74FF64DCA19B37"
 )
+
+// SocksAddr and controlAddr are where the supervised tor daemon listens. The
+// container shares the host's network stack, so these are host ports: they sit
+// in one contiguous block with the app (9000) and the Firefox resolver (9001)
+// rather than on Tor's defaults, which would collide with a Tor already running
+// on the machine. Both are overridable so a deployment that does have such a
+// collision can move them without a rebuild.
+//
+// SocksAddr is exported because the admin health check dials it to report
+// whether Tor is up; a second copy of the literal there would drift the first
+// time this moves.
+var (
+	SocksAddr   = addressFromEnvironment("TOR_SOCKS_ADDR", "127.0.0.1:9002")
+	controlAddr = addressFromEnvironment("TOR_CONTROL_ADDR", "127.0.0.1:9003")
+)
+
+// addressFromEnvironment reads one address, falling back when it is unset or
+// blank. A blank value is treated as unset rather than as "listen on any port":
+// an empty variable in a compose file is a mistake, not an instruction.
+func addressFromEnvironment(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
 
 // Supervisor starts and supervises the tor daemon.
 type Supervisor struct {
@@ -56,7 +80,7 @@ func (supervisor *Supervisor) supervise(ctx context.Context) {
 			return
 		}
 		command := exec.CommandContext(ctx, supervisor.binaryPath,
-			"--SocksPort", socksAddr,
+			"--SocksPort", SocksAddr,
 			"--ControlPort", controlAddr,
 			"--HashedControlPassword", hashedPassword,
 			"--DataDirectory", supervisor.dataDir,
@@ -78,19 +102,19 @@ func (supervisor *Supervisor) supervise(ctx context.Context) {
 func (supervisor *Supervisor) waitBootstrap(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		conn, failure := net.DialTimeout("tcp", socksAddr, time.Second)
+		conn, failure := net.DialTimeout("tcp", SocksAddr, time.Second)
 		if failure == nil {
 			conn.Close()
 			return nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("tor: SOCKS port %s not reachable after %s", socksAddr, timeout)
+	return fmt.Errorf("tor: SOCKS port %s not reachable after %s", SocksAddr, timeout)
 }
 
 // HTTPClient returns an HTTP client that goes through the Tor SOCKS5 proxy.
 func (supervisor *Supervisor) HTTPClient(timeout time.Duration) (*http.Client, error) {
-	dialer, failure := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
+	dialer, failure := proxy.SOCKS5("tcp", SocksAddr, nil, proxy.Direct)
 	if failure != nil {
 		return nil, failure
 	}

@@ -52,6 +52,50 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update \
  && useradd -u 10001 -r -g meshdepot -m -d /home/meshdepot meshdepot \
  && mkdir -p /data \
  && chown -R meshdepot:meshdepot /data /home/meshdepot
+# ── Fonts ───────────────────────────────────────────────────────────────────
+# The base image ships Liberation, which fontconfig already aliases for Arial,
+# Times New Roman and Courier New - those three resolve correctly and are
+# metric-compatible. Everything else a Windows UA implies did NOT resolve:
+# Verdana, Georgia, Tahoma, Trebuchet MS, Impact and Segoe UI all fell through
+# to WenQuanYi Zen Hei, a CJK face with entirely different metrics.
+#
+# That matters because the resolver claims to be Chrome on Windows 10. A script
+# that measures rendered text width finds those fonts present but shaped like a
+# Chinese font - a mismatch between the claimed platform and the actual one, and
+# exactly the kind of signal an anti-bot check scores against.
+#
+# carlito and caladea are metric-compatible stand-ins for Calibri and Cambria,
+# dejavu covers the remaining sans requests. All from the Ubuntu archive.
+# cabextract unpacks the Microsoft archives in the next step.
+RUN DEBIAN_FRONTEND=noninteractive apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      fonts-liberation fonts-liberation2 \
+      fonts-crosextra-carlito fonts-crosextra-caladea \
+      fonts-dejavu-core \
+      cabextract \
+ && rm -rf /var/lib/apt/lists/*
+
+# The genuine Arial, Verdana, Georgia, Trebuchet MS, Impact and friends. The
+# archives are committed under docker/fonts/msttcorefonts rather than fetched by
+# ttf-mscorefonts-installer, which downloads them from SourceForge during the
+# build - that made every rebuild a bet on a third party staying reachable.
+#
+# They are kept in their original self-extracting form because the EULA permits
+# redistribution only that way; see the README next to them. Hence cabextract
+# here instead of committing the .ttf files directly.
+#
+# The checksums are verified before anything is unpacked, so a corrupted or
+# swapped archive fails the build instead of silently changing the font set.
+COPY docker/fonts/msttcorefonts /tmp/msttcorefonts
+RUN cd /tmp/msttcorefonts \
+ && sha256sum -c sha256sums \
+ && mkdir -p /usr/share/fonts/truetype/msttcorefonts \
+ && for archive in *.exe; do \
+      cabextract -L -F '*.ttf' -d /usr/share/fonts/truetype/msttcorefonts "$archive" >/dev/null; \
+    done \
+ && fc-cache -f \
+ && rm -rf /tmp/msttcorefonts
+
 # rod uses the Chromium from the Playwright bundle rather than a second browser
 # from apt: one less browser in the image, and the same version pin as Firefox.
 # The revision directory changes with the Playwright version, so resolve it at
@@ -81,14 +125,13 @@ ENV CHROMIUM_BIN=/usr/local/bin/chromium \
 # the resolver, and server.js parses the same value to decide what to listen on.
 # Changing it here or in Compose moves both ends together. Loopback on purpose -
 # no EXPOSE, no port mapping, nothing outside the container can reach it.
-ENV PLAYWRIGHT_URL=http://127.0.0.1:3200 \
+ENV PLAYWRIGHT_URL=http://127.0.0.1:9001 \
     DISPLAY=:99
 ENV HOME=/home/meshdepot
-# No HTTP_ADDR here on purpose: the listen address belongs to the deployment, which
-# derives it from the same value as its port mapping and healthcheck (see the
-# environment block of docker-compose.yml). Without it the app logs a fatal
-# and stops instead of listening on a port nothing is mapped to. EXPOSE only
-# documents the conventional port that APP_CONTAINER_PORT defaults to.
-EXPOSE 8080
+# No HTTP_ADDR here on purpose: the listen address belongs to the deployment,
+# which derives it and the healthcheck from APP_PORT (see the environment block
+# of docker-compose.yml). Without it the app logs a fatal and stops instead of
+# coming up on a port nobody expects. No EXPOSE: the deployment shares the
+# host's network stack, so there is no container port to publish.
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["meshdepot"]

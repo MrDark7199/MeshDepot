@@ -107,6 +107,15 @@ export function createNotificationsStore(deps: NotificationsDeps) {
     if (userId) api.deleteAllNotifications(userId).catch(() => {})
   }
 
+  /**
+   * Removes every local entry with this exact title. Used when the condition
+   * that produced them stops holding - a platform queue block that an admin
+   * lifted must not keep claiming downloads are paused.
+   */
+  const removeLocalByTitle = (title: string) => {
+    setNotifications(prev => prev.filter(notification => !(notification.local && notification.title === title)))
+  }
+
   /** Removes one entry - local ones client-side only, server rows via the API. */
   const remove = (notification: AppNotification) => {
     if (notification.local) {
@@ -136,5 +145,6 @@ export function createNotificationsStore(deps: NotificationsDeps) {
     pushError,
     clearAll,
     remove,
+    removeLocalByTitle,
   }
 }

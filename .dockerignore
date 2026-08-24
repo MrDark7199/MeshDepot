@@ -6,9 +6,12 @@
 **/node_modules
 data/
 backend/testdata/
-# docker/ is excluded wholesale, then the resolver is allowed back in: stage 4
-# of backend/Dockerfile installs it into the image.
+# docker/ is excluded wholesale, then the two directories the image needs are
+# allowed back in: stage 4 of backend/Dockerfile installs the resolver and
+# unpacks the vendored Microsoft font archives (3.8 MB, so the context stays
+# small).
 docker/*
 !docker/playwright
+!docker/fonts
 docs/
 *.log
