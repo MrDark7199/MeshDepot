@@ -2,24 +2,23 @@ package platforms
 
 // MakerWorld downloader. Login runs purely over the Bambu Lab API (optional TOTP
 // 2FA, no browser, no Tor). Metadata comes from the public design service. The
-// f3mf download URLs are geetest-gated and are therefore fetched from the page
-// context of a real (stealth) rod browser; the returned presigned CDN URLs are
-// loaded directly by the server.
+// f3mf download URLs are geetest-gated and are therefore fetched by the
+// Playwright/Firefox sidecar (POST /resolve-makerworld), which holds a warm
+// browser with the GeeTest cookies; the presigned CDN URLs it returns are then
+// loaded directly by the server. No browser is driven from this process.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
-	"github.com/go-rod/rod/lib/proto"
-
-	"meshdepot/internal/browser"
 )
 
 var (
@@ -39,21 +38,6 @@ var (
 // fingerprint the browser session impersonates.
 const bambuBrowserUserAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:117.0) Gecko/20100101 Firefox/117.0"
 
-// stealthJS patches the classic headless markers before page scripts run
-// (geetest evasion, port of the Playwright addInitScript).
-const stealthJS = `
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-window.chrome = window.chrome || { runtime: {} };
-const __origQuery = window.navigator.permissions.query;
-window.navigator.permissions.query = (p) => p && p.name === 'notifications'
-	? Promise.resolve({ state: Notification.permission })
-	: __origQuery(p);
-`
-
-const makerWorldChromeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-
 // Makerworld implements Downloader for makerworld.com.
 type Makerworld struct{ Deps }
 
@@ -63,7 +47,7 @@ type makerWorldInstance struct {
 	title string
 }
 
-// resolvedFile is a presigned download URL resolved by the browser.
+// resolvedFile is a presigned download URL resolved by the sidecar.
 type resolvedFile struct {
 	name string
 	url  string
@@ -355,119 +339,79 @@ func makerworldAutoLogin(email, password, totpSecret string) string {
 	return token
 }
 
-// mwBlockedSubresources are the request patterns blocked in the MakerWorld
-// browser: a model page otherwise pulls ~120 image/font/media requests that only
-// look like scraping. GeeTest itself is JS/XHR and is left through.
-var mwBlockedSubresources = []string{
-	"*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif", "*.svg", "*.ico",
-	"*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot",
-	"*.mp4", "*.webm", "*.mov", "*.m4v",
+// mwSidecarTimeout covers a cold sidecar: the first call there starts Firefox
+// and does the GeeTest warm-up visit before it can answer at all.
+const mwSidecarTimeout = 180 * time.Second
+
+// mwSidecarResponse is what POST /resolve-makerworld answers with. Status and
+// body are the f3mf call's own, passed through unchanged so the captcha
+// detection below stays the same one the in-process browser used; url is the
+// sidecar's parsed convenience field.
+type mwSidecarResponse struct {
+	Status int    `json:"status"`
+	Body   string `json:"body"`
+	URL    string `json:"url"`
+
+	// BotWall is set when the sidecar was served a Cloudflare bot-verification
+	// page ("Just a moment") instead of MakerWorld. Reported, never solved.
+	BotWall bool `json:"botWall"`
 }
 
-// Warm MakerWorld browser session. GeeTest's cookies are domain-wide, so a
-// single session established once on the site can resolve many downloads with
-// one lightweight fetch each, instead of reloading a model page per job (the
-// per-job page loads are what looked like bulk scraping and tripped the anti-
-// bot). MakerWorld downloads run on one serial per-platform runner, so a single
-// mutex-guarded session is enough.
-var (
-	mwWarmMu         sync.Mutex
-	mwWarmSession    *browser.Session
-	mwWarmLastUsed   time.Time
-	mwWarmReaperOnce sync.Once
-)
-
-// mwWarmIdle is how long an unused warm session is kept before the reaper closes
-// it to free the browser slot - longer than the per-download cooldown so a
-// running queue keeps reusing it, short enough that an idle queue lets go.
-const mwWarmIdle = 15 * time.Minute
-
-// mwWarmStartReaper starts the single background goroutine that closes an idle
-// warm session so it does not hold a browser slot after the queue drains.
-func mwWarmStartReaper() {
-	mwWarmReaperOnce.Do(func() {
-		go func() {
-			ticker := time.NewTicker(time.Minute)
-			defer ticker.Stop()
-			for range ticker.C {
-				mwWarmMu.Lock()
-				if mwWarmSession != nil && time.Since(mwWarmLastUsed) >= mwWarmIdle {
-					mwWarmSession.Close()
-					mwWarmSession = nil
-					log.Printf("[mw-dl] warm browser session closed (idle)")
-				}
-				mwWarmMu.Unlock()
-			}
-		}()
+// mwResolveOne asks the sidecar for one instance's presigned f3mf URL. The
+// browser lives in the sidecar, which keeps a warm Firefox with the domain-wide
+// GeeTest cookies, so consecutive instances cost one navigation each instead of
+// a browser start. reachable=false means the sidecar itself did not answer,
+// which is retryable; a captcha is not.
+func (makerworld Makerworld) mwResolveOne(modelID, instanceID, token string) (parsed mwSidecarResponse, reachable bool) {
+	requestBody, _ := json.Marshal(map[string]any{
+		"modelID":    modelID,
+		"instanceID": instanceID,
+		"token":      token,
 	})
-}
-
-// mwWarmCloseLocked closes the warm session. Caller holds mwWarmMu.
-func mwWarmCloseLocked() {
-	if mwWarmSession != nil {
-		mwWarmSession.Close()
-		mwWarmSession = nil
-	}
-}
-
-// mwWarmEnsureLocked returns a live warm session with GeeTest cookies, creating
-// one (browser + a single navigation to the site) if there is none. Caller holds
-// mwWarmMu. No token is bound here: the token is user-specific and passed per
-// fetch, the cookies are domain-wide, so one session serves every user.
-func (makerworld Makerworld) mwWarmEnsureLocked() (*browser.Session, error) {
-	if mwWarmSession != nil {
-		return mwWarmSession, nil
-	}
-	session, failure := makerworld.Browser.OpenSession()
+	endpoint := strings.TrimRight(makerworld.Cfg.PlaywrightURL, "/") + "/resolve-makerworld"
+	request, failure := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(requestBody))
 	if failure != nil {
-		return nil, failure
+		return mwSidecarResponse{}, false
 	}
-	page := session.Page()
-	_ = proto.NetworkEnable{}.Call(page)
-	_ = proto.NetworkSetBlockedURLs{Urls: mwBlockedSubresources}.Call(page)
-	_ = proto.NetworkSetUserAgentOverride{
-		UserAgent:      makerWorldChromeUserAgent,
-		AcceptLanguage: "en-US,en;q=0.9",
-	}.Call(page)
-	_, _ = page.EvalOnNewDocument(stealthJS)
+	request.Header.Set("Content-Type", "application/json")
+	applyPlaywrightAuth(request)
 
-	// One navigation to the site (not a specific model) is enough for GeeTest to
-	// assign its domain-wide cookies; every later f3mf fetch reuses them.
-	if failure := page.Timeout(90 * time.Second).Navigate("https://makerworld.com/en"); failure != nil {
-		session.Close()
-		return nil, failure
+	client := &http.Client{Timeout: mwSidecarTimeout}
+	response, failure := client.Do(request)
+	if failure != nil {
+		log.Printf("[mw-dl] model=%s instance=%s: sidecar unreachable: %v", modelID, instanceID, failure)
+		return mwSidecarResponse{}, false
 	}
-	_ = page.Timeout(90 * time.Second).WaitLoad()
-	time.Sleep(2 * time.Second)
+	defer response.Body.Close()
 
-	mwWarmSession = session
-	log.Printf("[mw-dl] warm browser session established")
-	return session, nil
+	if response.StatusCode != http.StatusOK {
+		log.Printf("[mw-dl] model=%s instance=%s: sidecar answered HTTP %d", modelID, instanceID, response.StatusCode)
+		return mwSidecarResponse{}, false
+	}
+	if json.NewDecoder(response.Body).Decode(&parsed) != nil {
+		log.Printf("[mw-dl] model=%s instance=%s: sidecar sent no usable JSON", modelID, instanceID)
+		return mwSidecarResponse{}, false
+	}
+	return parsed, true
 }
 
-// resolvePresigned fetches the presigned f3mf URL per instance from the warm,
-// reused browser session. A session that looks dead is re-established once; a
-// genuine 418/captcha drops the session so the next model starts fresh.
+// resolvePresigned resolves the presigned f3mf URL per instance through the
+// Playwright/Firefox sidecar (POST /resolve-makerworld). The f3mf endpoint is
+// GeeTest-gated and answers 418 to anything outside a browser, so the call is
+// made from the sidecar's page context; the returned CDN URL is then streamed by
+// this process directly.
+//
+// A sidecar that does not answer is retried once. A captcha is not retried: it
+// means the cookies are flagged, and one 418 blocks the whole run.
 func (makerworld Makerworld) resolvePresigned(modelID string, instances []makerWorldInstance, token string) (files []resolvedFile, captcha bool) {
-	if makerworld.Browser == nil {
+	if makerworld.Cfg.PlaywrightURL == "" {
+		log.Printf("[mw-dl] model=%s: no resolver configured (PLAYWRIGHT_URL is empty)", modelID)
 		return nil, false
 	}
-	mwWarmStartReaper()
-	mwWarmMu.Lock()
-	defer mwWarmMu.Unlock()
 
-	// attempt runs one pass over all instances on the current warm session.
-	// transient=true means the session looked dead (launch/eval failure); the
-	// caller then re-establishes a fresh session and retries once.
-	attempt := func() (found []resolvedFile, blocked, transient bool) {
-		session, failure := makerworld.mwWarmEnsureLocked()
-		if failure != nil {
-			log.Printf("[mw-dl] model=%s: warm session unavailable: %v", modelID, failure)
-			return nil, false, true
-		}
-		page := session.Page()
-		mwWarmLastUsed = time.Now()
-
+	// attempt runs one pass over all instances. unreachable=true means the
+	// sidecar did not answer, so the caller retries the pass once.
+	attempt := func() (found []resolvedFile, blocked, unreachable bool) {
 		for _, instance := range instances {
 			if instance.id == "" {
 				continue
@@ -478,42 +422,37 @@ func (makerworld Makerworld) resolvePresigned(modelID string, instances []makerW
 			}
 			name += ".3mf"
 
-			apiPath := "/api/v1/design-service/instance/" + instance.id + "/f3mf?type=download&fileType="
-			fetchResult, failure := page.Timeout(45*time.Second).Eval(`async (api, token) => {
-				try {
-					const r = await fetch(api, { headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' } });
-					return { status: r.status, body: await r.text() };
-				} catch (e) { return { status: -1, body: String(e) }; }
-			}`, apiPath, token)
-			if failure != nil {
-				return nil, false, true // page/browser gone - re-establish
+			parsed, reachable := makerworld.mwResolveOne(modelID, instance.id, token)
+			if !reachable {
+				return found, false, true
 			}
-			statusCode := fetchResult.Value.Get("status").Int()
-			bodyText := fetchResult.Value.Get("body").Str()
-			if statusCode == 418 || strings.Contains(bodyText, "captchaId") || strings.Contains(bodyText, "not a robot") {
-				log.Printf("[mw-dl] model=%s instance=%s: MakerWorld captcha (HTTP %d)", modelID, instance.id, statusCode)
-				return found, true, false // one 418 blocks the whole session
+			if parsed.BotWall {
+				log.Printf("[mw-dl] STOP: MakerWorld served a Cloudflare bot-check (\"Just a moment\"). " +
+					"The automated headless download cannot get past this - it is a bot-verification, " +
+					"not something the app solves. Download it manually in a normal browser, or run from " +
+					"a non-flagged network.")
+				return found, true, false // blocked, not a dead sidecar: do not retry-storm
 			}
-			var parsed struct {
-				URL string `json:"url"`
+			if parsed.Status == 418 ||
+				strings.Contains(parsed.Body, "captchaId") ||
+				strings.Contains(parsed.Body, "not a robot") {
+				log.Printf("[mw-dl] model=%s instance=%s: MakerWorld captcha (HTTP %d)", modelID, instance.id, parsed.Status)
+				return found, true, false // one 418 blocks the whole run
 			}
-			if json.Unmarshal([]byte(bodyText), &parsed) == nil && parsed.URL != "" {
+			if parsed.URL != "" {
 				found = append(found, resolvedFile{name: name, url: parsed.URL})
 			} else {
-				log.Printf("[mw-dl] model=%s instance=%s: no URL (HTTP %d, body=%.160s)", modelID, instance.id, statusCode, bodyText)
+				log.Printf("[mw-dl] model=%s instance=%s: no URL (HTTP %d, body=%.160s)",
+					modelID, instance.id, parsed.Status, parsed.Body)
 			}
 		}
 		return found, false, false
 	}
 
-	var transient bool
-	files, captcha, transient = attempt()
-	if transient {
-		mwWarmCloseLocked()
+	var unreachable bool
+	files, captcha, unreachable = attempt()
+	if unreachable {
 		files, captcha, _ = attempt()
-	}
-	if captcha {
-		mwWarmCloseLocked() // flagged cookies - next model re-establishes fresh
 	}
 	return files, captcha
 }

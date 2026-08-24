@@ -50,6 +50,21 @@ func New(chromiumBin string) *Runner {
 	}
 }
 
+// newLauncher builds the launcher configuration every browser in this package
+// starts from. The sandbox switches are needed because the container runs as
+// root, and its /dev/shm is too small for Chromium's default use of it.
+func (runner *Runner) newLauncher() *launcher.Launcher {
+	browserLauncher := launcher.New().
+		Headless(true).
+		Set("no-sandbox").
+		Set("disable-setuid-sandbox").
+		Set("disable-dev-shm-usage")
+	if runner.chromiumBin != "" {
+		browserLauncher = browserLauncher.Bin(runner.chromiumBin)
+	}
+	return browserLauncher
+}
+
 // WithPage starts a fresh headless browser with a stealth page, calls action and
 // cleans up afterwards. Each call is its own browser subprocess - a crash only
 // returns an error, it does not kill the app process. Callers block until a slot
@@ -68,14 +83,7 @@ func (runner *Runner) WithPage(timeout time.Duration, action func(*rod.Page) err
 		}
 	}()
 
-	browserLauncher := launcher.New().
-		Headless(true).
-		Set("no-sandbox").
-		Set("disable-setuid-sandbox").
-		Set("disable-dev-shm-usage")
-	if runner.chromiumBin != "" {
-		browserLauncher = browserLauncher.Bin(runner.chromiumBin)
-	}
+	browserLauncher := runner.newLauncher()
 	controlURL, failure := browserLauncher.Launch()
 	if failure != nil {
 		return fmt.Errorf("launch chromium: %w", failure)
@@ -138,14 +146,18 @@ func (runner *Runner) OpenSession() (session *Session, failure error) {
 		}
 	}()
 
-	browserLauncher := launcher.New().
-		Headless(true).
-		Set("no-sandbox").
-		Set("disable-setuid-sandbox").
-		Set("disable-dev-shm-usage")
-	if runner.chromiumBin != "" {
-		browserLauncher = browserLauncher.Bin(runner.chromiumBin)
-	}
+	browserLauncher := runner.newLauncher().
+		// Anti-detection hardening for the MakerWorld GeeTest flow, which is the
+		// only caller of OpenSession. Blink's AutomationControlled feature is what
+		// exposes navigator.webdriver at engine level - go-rod/stealth only patches
+		// that property from JavaScript, which a fingerprinter can detect. Deleting
+		// enable-automation (rod sets it by default) removes the "controlled by
+		// automated software" infobar and the bot flags that come with it. The new
+		// headless mode runs the same code path as headful Chrome rather than the
+		// old, separately maintained one.
+		Set("disable-blink-features", "AutomationControlled").
+		Delete("enable-automation").
+		HeadlessNew(true)
 	controlURL, failure := browserLauncher.Launch()
 	if failure != nil {
 		return nil, fmt.Errorf("launch chromium: %w", failure)

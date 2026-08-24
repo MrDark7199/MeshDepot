@@ -466,6 +466,273 @@ app.post('/download/cults3d-url', limited(async (req, res) => {
     }
 }))
 
+// ── Warm MakerWorld Firefox ──────────────────────────────────────────────────
+// The other endpoints launch a browser per request and throw it away. MakerWorld
+// is the exception: its GeeTest cookies are domain-wide and are handed out on the
+// first visit, so a browser that stays open resolves many downloads off one visit
+// - whereas a fresh browser per job means a fresh first visit per job, which is
+// what reads as bulk scraping and trips the anti-bot.
+//
+// Because the point is to SHARE those cookies, all callers use one context and
+// one page, and requests are serialised onto it rather than run in parallel.
+const MAKERWORLD_IDLE_MS = Math.max(60000, parseInt(process.env.MAKERWORLD_IDLE_MS || '900000', 10) || 900000)
+
+const MAKERWORLD_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; rv:122.0) Gecko/20100101 Firefox/122.0'
+
+let makerworldBrowser  = null
+let makerworldContext  = null
+let makerworldPage     = null
+let makerworldLastUsed = 0
+let makerworldReaper   = null
+
+// Serialises access to the single shared page. The concurrency guard allows
+// MAX_CONCURRENCY handlers at once, and two of them driving the same page would
+// interleave navigations.
+let makerworldChain = Promise.resolve()
+
+function makerworldSerial(task) {
+    const run = makerworldChain.then(task, task)
+    // Keep the chain alive after a failed task, or every later call inherits the
+    // rejection and never runs.
+    makerworldChain = run.catch(() => {})
+    return run
+}
+
+/**
+ * Closes the warm instance and clears the module state. Safe to call twice, and
+ * safe to call on an already-dead browser.
+ */
+async function makerworldDispose() {
+    const browser = makerworldBrowser
+    makerworldBrowser = null
+    makerworldContext = null
+    makerworldPage    = null
+    if (browser) {
+        await browser.close().catch(() => {})
+        console.log('[playwright] makerworld: warm browser closed')
+    }
+}
+
+function makerworldStartReaper() {
+    if (makerworldReaper) return
+    makerworldReaper = setInterval(() => {
+        if (!makerworldBrowser) return
+        if (Date.now() - makerworldLastUsed < MAKERWORLD_IDLE_MS) return
+        console.log('[playwright] makerworld: warm browser idle - closing')
+        makerworldSerial(() => makerworldDispose())
+    }, 60000)
+    // Do not hold the process open just for the reaper.
+    makerworldReaper.unref()
+}
+
+/**
+ * True when the page is a Cloudflare bot-verification wall rather than
+ * MakerWorld. Ported from the Go warm session it used to live in. This only
+ * DETECTS the wall - it is never solved or clicked through.
+ */
+async function makerworldIsBotWall(page) {
+    try {
+        return await page.evaluate(() => {
+            const title = (document.title || '').toLowerCase()
+            return title.includes('just a moment') ||
+                   title.includes('security verification') ||
+                   title.includes('attention required') ||
+                   !!document.querySelector('iframe[src*="challenges.cloudflare.com"]')
+        })
+    } catch (_) {
+        return false
+    }
+}
+
+/**
+ * Waits a randomised moment. GeeTest scores how quickly a page goes from loaded
+ * to acting on it, and a constant delay is itself a pattern - so the wait has a
+ * floor plus jitter rather than one fixed value.
+ */
+function makerworldHumanPause(page, minimumMs, jitterMs) {
+    return page.waitForTimeout(minimumMs + Math.floor(Math.random() * jitterMs))
+}
+
+/**
+ * Returns the warm page, launching Firefox and doing the one warm-up visit if
+ * there is none. Caller must be inside makerworldSerial().
+ */
+async function makerworldEnsurePage() {
+    if (makerworldPage && !makerworldPage.isClosed()) return makerworldPage
+
+    await makerworldDispose()
+    // Headless: unlike the Cloudflare-gated sites in this file, GeeTest let a
+    // headless request through in testing, and this instance is long-lived - so
+    // it keeps holding whatever a headful Firefox costs for as long as it runs.
+    makerworldBrowser = await firefox.launch({
+        headless: true,
+        firefoxUserPrefs: {
+            // Firefox exposes navigator.webdriver from this pref; turning it off
+            // removes the marker at the engine, not from a page script that a
+            // fingerprinter can notice has been tampered with.
+            'dom.webdriver.enabled': false,
+            // No proxy, pinned rather than assumed. Nothing sets one today, but
+            // Playwright picks up HTTP_PROXY/ALL_PROXY from the environment, and
+            // this container also runs Tor - MakerWorld must not end up behind an
+            // exit node, whose address pool is exactly what GeeTest scores badly.
+            // 0 = direct connection, and it beats any env-derived setting.
+            'network.proxy.type': 0,
+        },
+    })
+    makerworldContext = await makerworldBrowser.newContext({
+        userAgent: MAKERWORLD_USER_AGENT,
+        viewport: { width: 1280, height: 800 },
+        locale: 'en-US',
+    })
+    makerworldPage = await makerworldContext.newPage()
+
+    // One visit to the site (not to a model) is enough for GeeTest to hand out
+    // its domain-wide cookies; every later resolve reuses them.
+    await makerworldPage.goto('https://makerworld.com/en', { waitUntil: 'domcontentloaded', timeout: 60000 })
+    await makerworldHumanPause(makerworldPage, 2000, 1500)
+
+    if (await makerworldIsBotWall(makerworldPage)) {
+        await makerworldDispose()
+        throw Object.assign(new Error('cloudflare bot-check'), { botWall: true })
+    }
+    console.log('[playwright] makerworld: warm browser established')
+
+    makerworldStartReaper()
+    return makerworldPage
+}
+
+/**
+ * POST /resolve-makerworld
+ * Body: { modelID, instanceID, token }
+ * Returns: { status, body, url } or { error }
+ *
+ * MakerWorld's f3mf endpoint is GeeTest-gated: called from outside a browser it
+ * answers HTTP 418. Called from the page context of a browser that already holds
+ * the GeeTest cookies it answers with the presigned CDN URL, which the caller can
+ * then stream directly (no file transfer through this sidecar).
+ *
+ * The token is the Bambu bearer token the Go app got from the API login. It is
+ * sent as a header on the fetch, so the browser itself stays signed out and one
+ * warm instance can serve every user.
+ *
+ * `status` and `body` are passed through verbatim so the caller keeps its own
+ * 418/captcha handling; `url` is the parsed convenience field and is null when
+ * the body was not JSON or carried no url.
+ */
+app.post('/resolve-makerworld', limited(async (req, res) => {
+    const { modelID, instanceID, token } = req.body || {}
+    if (!modelID || !instanceID || !token) {
+        return res.status(400).json({ error: 'modelID, instanceID and token required' })
+    }
+    // Both ids go into a URL path. They are numeric everywhere they are produced,
+    // so rejecting anything else is free and keeps a crafted id from pointing the
+    // warm, cookie-holding browser at some other endpoint.
+    if (!/^\d+$/.test(String(modelID)) || !/^\d+$/.test(String(instanceID))) {
+        return res.status(400).json({ error: 'modelID and instanceID must be numeric' })
+    }
+
+    // A handler that hits the request timeout disposes the warm instance rather
+    // than closing a browser the module still points at.
+    res.locals.browser = { close: () => makerworldDispose() }
+
+    const apiPath = '/api/v1/design-service/instance/' + instanceID + '/f3mf?type=download&fileType='
+    const modelURL = 'https://makerworld.com/en/models/' + modelID
+
+    // Runs one pass on the warm page. Returns null when the page looked dead, so
+    // the caller can re-establish and try once more.
+    const attempt = async () => {
+        let page
+        try {
+            page = await makerworldEnsurePage()
+            makerworldLastUsed = Date.now()
+
+            // Visit the model page first: the fetch then goes out from the same
+            // origin and referer a visitor's would, instead of from a bare tab.
+            await page.goto(modelURL, { waitUntil: 'domcontentloaded', timeout: 45000 })
+            // GeeTest finishes setting its challenge cookies in the background,
+            // after domcontentloaded. Firing the fetch before that is what earns
+            // the 418, so this wait is deliberately longer than a cosmetic one.
+            await makerworldHumanPause(page, 2500, 1500)
+            // A scroll event from real input, so the page has seen the visitor do
+            // something before the download call goes out.
+            await page.mouse.wheel(0, 300)
+            await makerworldHumanPause(page, 400, 400)
+
+            if (await makerworldIsBotWall(page)) {
+                await makerworldDispose()
+                throw Object.assign(new Error('cloudflare bot-check'), { botWall: true })
+            }
+        } catch (err) {
+            if (err && err.botWall) throw err
+            console.warn('[playwright] makerworld: session unusable (' + err.message + ')')
+            return null
+        }
+
+        return page.evaluate(async ({ api, bearer }) => {
+            try {
+                const response = await fetch(api, {
+                    headers: {
+                        'Authorization': 'Bearer ' + bearer,
+                        'Accept': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        // Sec-Fetch-* are forbidden header names: fetch() drops
+                        // them and the browser sets its own. Same-origin from the
+                        // model page it sends exactly these three values anyway,
+                        // so they are stated here for the record, not for effect.
+                        'Sec-Fetch-Dest': 'empty',
+                        'Sec-Fetch-Mode': 'cors',
+                        'Sec-Fetch-Site': 'same-origin',
+                    },
+                })
+                return { status: response.status, body: await response.text() }
+            } catch (e) {
+                return { status: -1, body: String(e) }
+            }
+        }, { api: apiPath, bearer: token })
+    }
+
+    return makerworldSerial(async () => {
+        try {
+            let result = await attempt()
+            if (result === null) {
+                await makerworldDispose()
+                result = await attempt()
+            }
+            if (result === null) {
+                return res.status(502).json({ error: 'could not establish a MakerWorld browser session' })
+            }
+
+            let url = null
+            try {
+                const parsed = JSON.parse(result.body)
+                if (parsed && typeof parsed.url === 'string' && parsed.url) url = parsed.url
+            } catch (_) {}
+
+            if (url) {
+                console.log('[playwright] makerworld: model=' + modelID + ' instance=' + instanceID + ' -> ok')
+            } else {
+                // Never the body: it can carry the captcha payload and, on some
+                // errors, the token that was sent.
+                console.warn('[playwright] makerworld: model=' + modelID + ' instance=' + instanceID +
+                             ' -> no url (HTTP ' + result.status + ')')
+            }
+            return res.json({ status: result.status, body: result.body, url })
+        } catch (err) {
+            if (err && err.botWall) {
+                console.warn('[playwright] makerworld: STOP - Cloudflare bot-check served instead of MakerWorld')
+                await makerworldDispose()
+                if (!res.headersSent) {
+                    return res.json({ status: 403, body: '', url: null, botWall: true })
+                }
+                return
+            }
+            console.error('[playwright] makerworld error: ' + err.message)
+            await makerworldDispose()
+            if (!res.headersSent) return res.status(500).json({ error: err.message })
+        }
+    })
+}))
+
 app.get('/health', (_, res) => res.json({ ok: true }))
 
 app.listen(PORT, HOST, () => console.log('[playwright] Server listening on ' + HOST + ':' + PORT))
