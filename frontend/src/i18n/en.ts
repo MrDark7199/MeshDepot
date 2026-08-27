@@ -121,7 +121,7 @@ export default {
   toast_sync_started: 'Update check started',
   toast_import_queued: 'Import queued!',
 
-  upload_file_label: 'Upload File (.zip, .stl, .3mf, .obj)',
+  upload_file_label: 'Upload files (ZIP archives are extracted)',
   field_version: 'Version',
   btn_upload: 'Upload',
   btn_uploading: 'Uploading…',

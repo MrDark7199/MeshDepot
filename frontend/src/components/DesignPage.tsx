@@ -29,14 +29,16 @@ const RESIN_FORMATS = ['pwmx', 'pwmo', 'pws', 'pw0', 'pwms', 'pwmb', 'sl1', 'sl1
 // Resin formats the server can rebuild a mesh from - only these get the 3D button.
 // The layer decoder is Anycubic-PWMX-specific; everything else would 422.
 const RESIN_VIEWER_FORMATS = ['pwmx']
-// Every extension that counts as a finished printer file.
-const PRINTER_FORMATS = [...GCODE_FORMATS, ...FDM_JOB_FORMATS, ...RESIN_FORMATS]
 // Extensions the desktop slicers can open: meshes and CAD exchange formats plus
 // the text/binary g-code they load for preview. Resin formats are absent - none
 // of the three slicers reads them.
 const SLICER_FORMATS = ['stl', '3mf', 'obj', 'step', 'stp', 'amf', ...GCODE_FORMATS, 'bgcode']
-// The accept value for the upload pickers (models, archives, printer files).
-const FILE_ACCEPT = ['.zip', '.stl', '.3mf', '.obj', ...PRINTER_FORMATS.map(e => '.' + e)].join(',')
+// No `accept` on the upload pickers on purpose: the server stores whatever it is
+// sent (only .zip is treated specially, by being extracted), so filtering the
+// dialog just hid CAD sources like .FCStd, .step or .f3d from the file chooser
+// while drag-and-drop accepted them anyway. Files are served back as
+// application/octet-stream attachments, so a wider set of extensions carries no
+// extra risk - see mimeForExt in backend/internal/api/designfiles.go.
 
 const lowerExt = (name: string) => (name.split('.').pop() || '').toLowerCase()
 
@@ -1654,7 +1656,7 @@ export function DesignPage(props: DesignPageProps) {
                         <Show when={!props.isReadOnly}>
                           <label title={translate('btn_add_files_title')} onClick={e => e.stopPropagation()}
                             style={{ padding: '6px 12px', background: 'var(--bg4)', border: '1px solid var(--border2)', 'border-radius': '8px', color: 'var(--text)', 'font-size': '12px', cursor: 'pointer', ...monoFont, display: 'flex', 'align-items': 'center', gap: '5px' }}>
-                            <input type="file" multiple accept={FILE_ACCEPT} style={{ display: 'none' }}
+                            <input type="file" multiple style={{ display: 'none' }}
                               onChange={e => { addFilesToVersion(fileVersion.id, e.currentTarget.files); e.currentTarget.value = '' }} />
                             ＋ {translate('btn_add_files')}
                           </label>
@@ -1760,7 +1762,7 @@ export function DesignPage(props: DesignPageProps) {
                     <div style={{ display: 'flex', 'flex-direction': 'column', gap: '13px' }}>
                       <div onClick={() => fileInputRef?.click()}
                         style={{ border: `2px dashed ${uploadFileObject().length ? 'var(--accent)' : 'var(--border2)'}`, 'border-radius': '11px', padding: '22px', 'text-align': 'center', cursor: 'pointer', background: uploadFileObject().length ? 'rgba(69,123,157,0.05)' : 'transparent' }}>
-                        <input ref={fileInputRef} type="file" multiple accept={FILE_ACCEPT} style={{ display: 'none' }}
+                        <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }}
                           onChange={e => setUploadFileObject(Array.from(e.currentTarget.files ?? []))} />
                         <Show when={uploadFileObject().length} fallback={
                           <div style={{ ...monoFont, 'font-size': '13px', color: 'var(--muted)', display: 'flex', 'align-items': 'center', gap: '7px', 'justify-content': 'center' }}>
