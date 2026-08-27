@@ -8,6 +8,7 @@ import { AccountSettingsModal, ForcePasswordChangeModal } from './components/Acc
 import { ServerSettingsModal } from './components/ServerSettings'
 import { DesignPage } from './components/DesignPage'
 import { api } from './services/api'
+import { browserHandlesClick, gridHref } from './utils/navlink'
 import { UserAvatar } from './components/UserAvatar'
 import type { Design, DesignID, Tag, QueueItem, QueueBlock, DownloadJob, Filters, Collection, SyncStatus, SyncStep } from './types'
 import { createNotificationsStore } from './hooks/useNotifications'
@@ -1841,10 +1842,18 @@ function MainApp() {
     <nav class="stlv-nav" style={{ position:'sticky', top:'0', 'z-index':'100', background:'var(--nav-bg)', 'backdrop-filter':'blur(16px)', 'border-bottom':'1px solid var(--border)', padding:'0 40px', height:NAV_H, display:'flex', 'align-items':'center' }}>
       {/* Left - Logo */}
       <div class="stlv-nav-logo" style={{ flex:'1', display:'flex', 'align-items':'center' }}>
-        <div onClick={() => guardCloseGlobal(translate('confirm_discard_changes'), goToGrid)}
-          style={{ 'font-family':"'DM Sans',sans-serif", 'font-weight':'700', 'font-size':'26px', color:'var(--text)', 'letter-spacing':'-0.02em', cursor:'pointer', 'user-select':'none' }}>
+        {/* An anchor, not a div: middle click and Ctrl-click then open the grid
+            in a new tab the way any link would. Only the plain left click is
+            taken over, so the in-app navigation stays as it was. */}
+        <a href={gridHref()}
+          onClick={event => {
+            if (browserHandlesClick(event)) return
+            event.preventDefault()
+            guardCloseGlobal(translate('confirm_discard_changes'), goToGrid)
+          }}
+          style={{ 'font-family':"'DM Sans',sans-serif", 'font-weight':'700', 'font-size':'26px', color:'var(--text)', 'letter-spacing':'-0.02em', cursor:'pointer', 'user-select':'none', 'text-decoration':'none' }}>
           Mesh<span style={{ color:'var(--accent)' }}>Depot</span>
-        </div>
+        </a>
       </div>
 
       {/* Center - Search + Filter (hidden on mobile, drops to second row via flex-wrap) */}

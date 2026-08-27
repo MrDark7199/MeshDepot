@@ -11,6 +11,7 @@ import { errorKey } from '../utils/errorMessage'
 import type { Design, DesignFile, DesignFileEntry, DesignID, DesignImage, Tag, Collection, DesignShare, GcodeMeta, ShareLink } from '../types'
 import { PLATFORM_COLORS, platformLabel } from '../constants/platforms'
 import { buildDescriptionFragment, descriptionCss } from '../utils/description'
+import { browserHandlesClick, gridHref } from '../utils/navlink'
 
 const sansFont = { 'font-family': "'DM Sans',sans-serif" }
 const monoFont = { 'font-family': "'DM Mono',monospace" }
@@ -1094,11 +1095,20 @@ export function DesignPage(props: DesignPageProps) {
           way back, and the error panel already offers one. */}
       <Show when={design() || isLoading()}>
       <div class="stlv-breadcrumb" style={{ background: 'var(--nav-bg)', 'backdrop-filter': 'blur(16px)', 'border-bottom': '1px solid var(--border)', padding: '0 36px', height: '56px', display: 'flex', 'align-items': 'center', gap: '16px', position: 'sticky', top: '85px', 'z-index': '90' }}>
-        <button onClick={() => guardClose(props.onBack)}
-          style={{ background: 'none', border: 'none', color: 'var(--text2)', cursor: 'pointer', ...sansFont, 'font-size': '14px', 'font-weight': '600', display: 'flex', 'align-items': 'center', gap: '5px' }}>
+        {/* An anchor for the same reason as the nav logo: middle click opens the
+            grid in a new tab instead of doing nothing. A left click still runs
+            props.onBack, which walks history back to wherever this design was
+            opened from - a collection, say, which has no URL of its own. */}
+        <a href={gridHref()}
+          onClick={event => {
+            if (browserHandlesClick(event)) return
+            event.preventDefault()
+            guardClose(props.onBack)
+          }}
+          style={{ background: 'none', border: 'none', color: 'var(--text2)', cursor: 'pointer', ...sansFont, 'font-size': '14px', 'font-weight': '600', display: 'flex', 'align-items': 'center', gap: '5px', 'text-decoration': 'none' }}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
           {translate('btn_back')}
-        </button>
+        </a>
         <div style={{ height: '24px', width: '1px', background: 'var(--border)' }} />
         <span style={{ ...sansFont, 'font-size': '14px', color: 'var(--text2)', overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap', flex: '1' }}>
           {/* The ellipsis means "still loading"; a design that will never arrive
