@@ -1,6 +1,8 @@
 import { createSignal, createEffect, onMount, onCleanup, Show, For, type JSX } from 'solid-js'
 import { useI18n } from '../i18n/index'
 import { useTheme } from '../ThemeContext'
+import { splitConnectedComponents, writeBinaryStl, buildZip, type MeshPart } from '../utils/meshSplit'
+import type { Model3mfRequest, Model3mfResponse } from '../workers/model3mf'
 import {
   Engine, Scene, ArcRotateCamera, Vector3, Matrix,
   HemisphericLight, DirectionalLight, Color3, Color4,
@@ -49,7 +51,7 @@ const normalizeHex = (hex: string): string => {
  * ship zero-length facet normals (e.g. our marching-cubes resin reconstruction), which
  * would leave the mesh unlit; callers recompute normals from geometry when this is false.
  */
-const hasUsableNormals = (normals: number[]): boolean => {
+const hasUsableNormals = (normals: ArrayLike<number>): boolean => {
   for (let i = 0; i + 2 < normals.length; i += 3) {
     if (normals[i] !== 0 || normals[i + 1] !== 0 || normals[i + 2] !== 0) return true
   }
@@ -64,7 +66,7 @@ const hasUsableNormals = (normals: number[]): boolean => {
  * with no change to triangle detail. Positions are quantized to a fine grid so tiny float
  * differences still weld. Also shrinks the vertex count (faster picking/rendering).
  */
-const weldSmooth = (positions: number[]): { positions: number[]; indices: number[]; normals: number[] } => {
+const weldSmooth = (positions: ArrayLike<number>): { positions: number[]; indices: number[]; normals: number[] } => {
   const map = new Map<string, number>()
   const outPos: number[] = []
   const indices: number[] = new Array(positions.length / 3)
@@ -131,6 +133,8 @@ interface StlViewerModalProps {
   onClose: () => void
   /** Optional: persists a captured viewer photo to the design's image gallery. */
   onSaveImage?: (blob: Blob) => Promise<void>
+  /** Optional: adds the parts of a split model to the design's current version. */
+  onSaveFiles?: (files: File[]) => Promise<void>
   /** Model is authored Z-up (e.g. reconstructed resin mesh) → re-orient to the viewer's Y-up world. */
   zUp?: boolean
 }
@@ -154,6 +158,13 @@ export function StlViewerModal(props: StlViewerModalProps) {
   let builtPlates: PlateInfo[] = []
   /** Root node that re-orients slicer Z-up STL/3MF meshes to the viewer's Y-up world. */
   let modelRoot: TransformNode | undefined
+  /** Split tool: separated parts, kept outside reactivity - the arrays are large. */
+  let splitParts: MeshPart[] = []
+  /** Overlay pulsed over the model to point out a single part. */
+  let splitHighlight: Mesh | undefined
+  /** Render callback driving that pulse, kept so it can be detached again. */
+  let splitFlashTick: (() => void) | undefined
+
   /** The rendered G-code toolpath mesh (lines or solid), if the current file is G-code. */
   let gcodePath: Mesh | undefined
   /** Parsed G-code once, so line/solid switches and recolours never re-fetch or re-parse. */
@@ -171,6 +182,34 @@ export function StlViewerModal(props: StlViewerModalProps) {
   let sceneRadius = 0
 
   const [isLoading, setIsLoading] = createSignal(true)
+  /**
+   * One figure across the whole load, 0..1, or null when nothing can be
+   * measured. Downloading is only the first stretch of the wait - reading the
+   * file and handing it to the GPU are the rest - so each phase advances its
+   * own slice of a single bar instead of restarting from zero and leaving the
+   * previous one parked at some arbitrary value.
+   */
+  const [loadProgress, setLoadProgress] = createSignal<number | null>(null)
+  /** What the loading screen is currently busy with. */
+  const [loadPhase, setLoadPhase] = createSignal<'download' | 'parse' | 'build'>('download')
+
+  /**
+   * Share of the bar each phase owns. Weighted by what actually takes the time:
+   * from a local server the download is over in milliseconds, while reading a
+   * multi-million-triangle mesh is the bulk of the wait.
+   */
+  const LOAD_PHASE_RANGE: Record<'download' | 'parse' | 'build', [number, number]> = {
+    download: [0, 0.15],
+    parse: [0.15, 0.85],
+    build: [0.85, 1],
+  }
+
+  /** Maps a phase-local 0..1 onto that phase's slice of the overall bar. */
+  const reportLoad = (phase: 'download' | 'parse' | 'build', fraction: number) => {
+    const [from, to] = LOAD_PHASE_RANGE[phase]
+    setLoadPhase(phase)
+    setLoadProgress(from + (to - from) * Math.max(0, Math.min(1, fraction)))
+  }
   const [errorMessage, setErrorMessage] = createSignal('')
   const [formatLabel, setFormatLabel] = createSignal('')
   const [colorsOpen, setColorsOpen] = createSignal(false)
@@ -194,6 +233,41 @@ export function StlViewerModal(props: StlViewerModalProps) {
   const [gcodeLineColor, setGcodeLineColor] = createSignal<'heat' | 'custom'>(localStorage.getItem(VIEWER_GCODE_LINECOLOR_KEY) === 'custom' ? 'custom' : 'heat')
   /** Shared custom colour used by the solid body and by custom-coloured lines. */
   const [gcodeColor, setGcodeColor] = createSignal(normalizeHex(localStorage.getItem(VIEWER_GCODE_COLOR_KEY) || DEFAULT_GCODE_COLOR))
+
+  /**
+   * Split tool. 'intro' explains what the tool does and waits for a deliberate
+   * start - separating a dense mesh takes seconds, so it must not begin on the
+   * same click that opens the menu.
+   */
+  const [splitPhase, setSplitPhase] = createSignal<'idle' | 'intro' | 'busy' | 'done'>('idle')
+  const [splitProgress, setSplitProgress] = createSignal(0)
+  /** One entry per separated part, in the order they are listed. */
+  const [splitNames, setSplitNames] = createSignal<string[]>([])
+  /** Which parts the action buttons apply to. */
+  const [splitChosen, setSplitChosen] = createSignal<boolean[]>([])
+  /** Part currently being pointed out in the model; clears itself after a moment. */
+  const [splitFlash, setSplitFlash] = createSignal<number | null>(null)
+  /** Which plate to separate: an index into builtPlates, or 'all'. */
+  const [splitPlate, setSplitPlate] = createSignal<number | 'all'>('all')
+  const [splitSaving, setSplitSaving] = createSignal(false)
+  /**
+   * Which parts are already in the design. The selection is cumulative, so a
+   * second "add" would otherwise resend the ones from the first and the server
+   * rejects them by name (error.filename_exists). Tracked per part rather than
+   * as one "saved" flag so adding more later stays possible.
+   */
+  const [splitAdded, setSplitAdded] = createSignal<boolean[]>([])
+  /** The separation itself failed - there is no result to show. */
+  const [splitError, setSplitError] = createSignal(false)
+  /**
+   * Adding the parts to the design failed. Deliberately separate from
+   * splitError: one signal for both meant a failed upload was reported as
+   * "the model could not be separated", which is not what happened and sent
+   * the reader looking in the wrong place. Carries the server's message.
+   */
+  const [splitAddError, setSplitAddError] = createSignal('')
+  /** Panel position; null until the result places it, then dragged by the header. */
+  const [splitPos, setSplitPos] = createSignal<{ x: number; y: number } | null>(null)
 
   /** Tools menu + measure tool (pick two surface points → distance). */
   const [toolsOpen, setToolsOpen] = createSignal(false)
@@ -776,6 +850,238 @@ export function StlViewerModal(props: StlViewerModalProps) {
 
   // ── Photo tool ───────────────────────────────────────────────────────────────
   /** Enters framing mode: turns off measuring, closes panels and locks the camera so drags crop. */
+  /**
+   * Collects the rendered triangles as one flat soup, in the coordinates the
+   * source file used.
+   *
+   * Each mesh's own world matrix is applied so a 3MF that places its objects by
+   * transform comes out arranged the way it is drawn. modelRoot is undone
+   * again: that node only carries the viewer's Z-up correction, and baking it
+   * in would hand back parts rotated 90 degrees away from the original.
+   *
+   * `onlyPlate` restricts the soup to one build plate of a multi-plate 3MF.
+   */
+  const collectTriangleSoup = (onlyPlate: number | 'all'): Float32Array => {
+    const wanted = onlyPlate === 'all' || builtPlates.length === 0
+      ? null
+      : new Set<Mesh>(builtPlates[onlyPlate]?.meshes ?? [])
+    const chunks: number[] = []
+    const undoRoot = modelRoot ? Matrix.Invert(modelRoot.getWorldMatrix()) : null
+    for (const group of builtGroups) {
+      for (const mesh of group.meshes) {
+        if (wanted && !wanted.has(mesh)) continue
+        const positions = mesh.getVerticesData(VertexBuffer.PositionKind)
+        if (!positions) continue
+        mesh.computeWorldMatrix(true)
+        const toSource = undoRoot ? mesh.getWorldMatrix().multiply(undoRoot) : mesh.getWorldMatrix()
+        // A mesh without an index buffer is already a triangle soup.
+        const indices = mesh.getIndices() ?? Array.from({ length: positions.length / 3 }, (_, i) => i)
+        const point = new Vector3()
+        for (const index of indices) {
+          point.set(positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2])
+          const world = Vector3.TransformCoordinates(point, toSource)
+          chunks.push(world.x, world.y, world.z)
+        }
+      }
+    }
+    return new Float32Array(chunks)
+  }
+
+  /** Opens the explanation step; nothing is computed until the user starts it. */
+  const openSplitIntro = () => {
+    setToolsOpen(false)
+    setSplitPlate('all')
+    setSplitError(false)
+    setSplitAddError('')
+    setSplitPos(null)
+    setSplitPhase('intro')
+  }
+
+  /** Separates the model into its unconnected objects. */
+  const runSplit = async () => {
+    if (splitPhase() === 'busy') return
+    setSplitPhase('busy')
+    setSplitProgress(0)
+    setSplitError(false)
+    try {
+      const soup = collectTriangleSoup(splitPlate())
+      splitParts = await splitConnectedComponents(soup, fraction => setSplitProgress(fraction))
+      setSplitNames(splitParts.map((_, index) => splitFileName(index)))
+      // Everything is chosen to begin with: the common case is wanting all of it.
+      setSplitChosen(splitParts.map(() => true))
+      setSplitAdded(splitParts.map(() => false))
+      placeSplitPanelRight()
+      setSplitPhase('done')
+    } catch {
+      splitParts = []
+      setSplitNames([])
+      setSplitChosen([])
+      setSplitError(true)
+      setSplitPhase('done')
+    }
+  }
+
+  /** Parks the result panel at the right edge, vertically centred. */
+  const placeSplitPanelRight = () => {
+    const width = 420
+    const height = Math.min(520, window.innerHeight - 80)
+    setSplitPos({ x: Math.max(16, window.innerWidth - width - 32), y: Math.max(16, (window.innerHeight - height) / 2) })
+  }
+
+  const clearSplitHighlight = () => {
+    if (splitFlashTick && scene) scene.onBeforeRenderObservable.removeCallback(splitFlashTick)
+    splitFlashTick = undefined
+    splitHighlight?.dispose()
+    splitHighlight = undefined
+    setSplitFlash(null)
+  }
+
+  /** How long a part stays pointed out after the magnifier is clicked. */
+  const SPLIT_FLASH_MS = 4000
+
+  /**
+   * Points out one part by pulsing a copy of it over the model for a few
+   * seconds, then taking it away again.
+   *
+   * A copy rather than a recolour of the original: the parts are only data, and
+   * the model on screen is one mesh per colour group with no notion of them.
+   * It pulses rather than sitting there in a flat colour because a static
+   * overlay on a similarly-shaped object is easy to miss - movement is what the
+   * eye picks out. It also removes itself, so the list never leaves the model
+   * in a state the viewer has to be told to undo.
+   */
+  const flashSplitPart = (index: number) => {
+    clearSplitHighlight()
+    const part = splitParts[index]
+    if (!scene || !part) return
+
+    const mesh = new Mesh('splitHighlight', scene)
+    const data = new VertexData()
+    data.positions = Array.from(part.positions)
+    data.indices = Array.from({ length: part.positions.length / 3 }, (_, i) => i)
+    const normals: number[] = []
+    VertexData.ComputeNormals(data.positions, data.indices, normals)
+    data.normals = normals
+    data.applyToMesh(mesh)
+
+    const material = new StandardMaterial('splitHighlightMat', scene)
+    material.emissiveColor = Color3.FromHexString('#ffd23f')
+    material.diffuseColor = Color3.FromHexString('#ffd23f')
+    material.specularColor = Color3.Black()
+    // Drawn just in front of the surface it covers, or it would z-fight with it.
+    material.zOffset = -2
+    material.backFaceCulling = false
+    mesh.material = material
+    mesh.isPickable = false
+    if (modelRoot) mesh.parent = modelRoot
+    splitHighlight = mesh
+    setSplitFlash(index)
+
+    const startedAt = performance.now()
+    splitFlashTick = () => {
+      const elapsed = performance.now() - startedAt
+      if (elapsed >= SPLIT_FLASH_MS) { clearSplitHighlight(); return }
+      // Shimmer, then fade out over the last half second so it does not just vanish.
+      const pulse = 0.55 + 0.45 * Math.sin(elapsed / 110)
+      const fade = Math.min(1, (SPLIT_FLASH_MS - elapsed) / 500)
+      material.alpha = 0.9 * pulse * fade
+    }
+    scene.onBeforeRenderObservable.add(splitFlashTick)
+  }
+
+  const toggleSplitChoice = (index: number) => {
+    setSplitChosen(prev => prev.map((on, i) => (i === index ? !on : on)))
+    setSplitAddError('')
+  }
+
+  const setAllSplitChoices = (on: boolean) => {
+    setSplitChosen(prev => prev.map(() => on))
+    setSplitAddError('')
+  }
+
+
+  const chosenIndices = () => splitChosen().reduce<number[]>((list, on, index) => (on ? [...list, index] : list), [])
+
+  const closeSplit = () => {
+    clearSplitHighlight()
+    splitParts = []
+    setSplitNames([])
+    setSplitChosen([])
+    setSplitPhase('idle')
+    setSplitAdded([])
+    setSplitError(false)
+    setSplitAddError('')
+    setSplitPos(null)
+  }
+
+  /** Base name for the produced files, derived from the model being viewed. */
+  const splitBaseName = () =>
+    (props.designName || props.filename || 'model').replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_') || 'model'
+
+  const splitFileName = (index: number) => `${splitBaseName()}-part-${String(index + 1).padStart(2, '0')}.stl`
+
+  /** Hands the chosen parts over as one ZIP. */
+  const downloadSplit = () => {
+    const indices = chosenIndices()
+    if (indices.length === 0) return
+    const zip = buildZip(indices.map(index => ({ name: splitFileName(index), data: writeBinaryStl(splitParts[index]) })))
+    const url = URL.createObjectURL(zip)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `${splitBaseName()}-parts.zip`
+    anchor.click()
+    // Revoked on a later tick: revoking immediately cancels the download in
+    // some browsers before it has read the blob.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  }
+
+  /** Adds the chosen parts to the design's current version via the parent callback. */
+  /** Chosen parts that are not in the design yet - what an "add" would send. */
+  const pendingIndices = () => chosenIndices().filter(index => !splitAdded()[index])
+
+  const addSplitToDesign = async () => {
+    const indices = pendingIndices()
+    if (!props.onSaveFiles || indices.length === 0 || splitSaving()) return
+    setSplitSaving(true)
+    setSplitAddError('')
+    try {
+      const files = indices.map(index =>
+        new File([writeBinaryStl(splitParts[index])], splitFileName(index), { type: 'model/stl' }))
+      await props.onSaveFiles(files)
+      setSplitAdded(prev => prev.map((added, i) => added || indices.includes(i)))
+    } catch (failure) {
+      // The reason is shown as it came back: a rejected upload is usually
+      // specific (duplicate name, size, permissions), and hiding that behind a
+      // generic sentence is what made this hard to place in the first place.
+      setSplitAddError(failure instanceof Error && failure.message ? failure.message : 'unknown')
+    } finally {
+      setSplitSaving(false)
+    }
+  }
+
+  /** Drag the panel by its header. */
+  const startSplitDrag = (event: PointerEvent) => {
+    const start = splitPos() ?? { x: 0, y: 0 }
+    const originX = event.clientX
+    const originY = event.clientY
+    const move = (moveEvent: PointerEvent) => {
+      setSplitPos({
+        x: Math.max(0, Math.min(window.innerWidth - 120, start.x + moveEvent.clientX - originX)),
+        y: Math.max(0, Math.min(window.innerHeight - 60, start.y + moveEvent.clientY - originY)),
+      })
+    }
+    const stop = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', stop)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', stop)
+  }
+
+  // Closes the menu whenever a load begins: switching files while it is open
+  // would otherwise leave tools pointing at geometry that is being replaced.
+  createEffect(() => { if (isLoading()) setToolsOpen(false) })
+
   const startPhoto = () => {
     setMeasure(false)
     setToolsOpen(false); setColorsOpen(false); setSettingsOpen(false)
@@ -889,6 +1195,44 @@ export function StlViewerModal(props: StlViewerModalProps) {
   }
 
   /** Shows a single build plate (hiding the others), re-frames the camera on it, and highlights it. */
+  /**
+   * Partitions each mesh's triangles into an octree so scene.pick raycasts
+   * (measure tool, double-tap focus) stay fast on dense meshes - the
+   * reconstructed resin STL alone has ~1.8M triangles, where a brute-force
+   * per-triangle pick on every hover would stutter.
+   *
+   * Deferred, and one mesh per idle slot: building it is seconds of synchronous
+   * work on such a mesh, and doing it before the model appeared left the viewer
+   * frozen right when it looked ready to use. Picking simply falls back to the
+   * brute-force path until this has run.
+   *
+   * MUST run after every transform: the octree stores WORLD coordinates
+   * (bbox.minimumWorld) and is never refreshed automatically. Built before the
+   * Z-up rotation, its blocks end up rotated 90° away from the model.
+   */
+  const scheduleOctreeBuild = (groups: BuiltGroup[]) => {
+    const pending = groups.flatMap(group => group.meshes)
+    const idle: (callback: () => void) => void =
+      typeof requestIdleCallback === 'function'
+        ? callback => requestIdleCallback(() => callback(), { timeout: 2000 })
+        : callback => setTimeout(callback, 0)
+    const step = () => {
+      const mesh = pending.shift()
+      if (!mesh) return
+      if (!mesh.isDisposed()) {
+        mesh.createOrUpdateSubmeshesOctree?.(64, 2)
+        // Picking only. Otherwise Babylon also uses the octree for render selection
+        // (useOctreeForRenderingSelection defaults to on) and drops submeshes whose octree
+        // blocks miss the frustum - zooming in narrows the frustum, and a small inaccuracy
+        // is enough to make whole objects vanish. Visibility now hangs solely on the mesh's
+        // (always current) bounding box.
+        mesh.useOctreeForRenderingSelection = false
+      }
+      if (pending.length > 0) idle(step)
+    }
+    idle(step)
+  }
+
   const selectPlate = (idx: number) => {
     if (idx < 0 || idx >= builtPlates.length) return
     setActivePlate(idx)
@@ -1007,9 +1351,48 @@ export function StlViewerModal(props: StlViewerModalProps) {
     })
 
     try {
+      // Temporary instrumentation: the loading phases are hard to attribute from
+      // the outside, so each one reports how long it actually took.
+      const timings: Record<string, number> = {}
+      let phaseStart = performance.now()
+      const mark = (name: string) => {
+        timings[name] = Math.round(performance.now() - phaseStart)
+        phaseStart = performance.now()
+        console.info(`[viewer] ${name}: ${timings[name]} ms`)
+      }
       const response = await fetch(props.url, { credentials: 'include' })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const buffer = await response.arrayBuffer()
+      // Read the body in chunks so the loading screen can show how far along the
+      // download is. Without a Content-Length (chunked responses) there is
+      // nothing to measure, and it falls back to the plain read.
+      const declaredLength = Number(response.headers.get('content-length') || 0)
+      let buffer: ArrayBuffer
+      if (response.body && declaredLength > 0) {
+        const reader = response.body.getReader()
+        const chunks: Uint8Array[] = []
+        let received = 0
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          chunks.push(value)
+          received += value.length
+          reportLoad('download', received / declaredLength)
+        }
+        const joined = new Uint8Array(received)
+        let at = 0
+        for (const chunk of chunks) { joined.set(chunk, at); at += chunk.length }
+        buffer = joined.buffer
+      } else {
+        buffer = await response.arrayBuffer()
+      }
+      // Parsing is one synchronous stretch with no measurable steps, so the bar
+      // gives way to an indeterminate state rather than pretending to advance.
+      mark('download')
+      console.info(`[viewer] file: ${(buffer.byteLength / 1048576).toFixed(1)} MiB, format hint: ${props.filename}`)
+      // The bar carries on from where the download left it. Formats whose parser
+      // reports nothing simply hold here rather than dropping the bar entirely -
+      // it still shows how much of the whole load is behind us.
+      reportLoad('parse', 0)
 
       // Detect format: prefer filename hint, fall back to magic bytes
       const extHint = fileExtension()
@@ -1047,7 +1430,13 @@ export function StlViewerModal(props: StlViewerModalProps) {
           // Only offer the plate switcher when the file actually splits across several plates.
           builtPlates = res.plates.length > 1 ? res.plates : []
         } else {
-          groups = [singleGroup(parseStl(buffer, scene), scene)]
+          groups = [singleGroup(await parseStl(
+            buffer, scene,
+            fraction => reportLoad('parse', fraction),
+            () => { mark('read'); reportLoad('build', 0) },
+          ), scene)]
+          mark('build')
+          reportLoad('build', 1)
         }
         builtGroups = groups
         setColorGroups(groups.map(g => ({ label: g.label, hex: g.defaultHex })))
@@ -1062,26 +1451,12 @@ export function StlViewerModal(props: StlViewerModalProps) {
           for (const g of groups) for (const m of g.meshes) m.parent = modelRoot
         }
 
-        // Partition each mesh's triangles into an octree so scene.pick raycasts (measure tool,
-        // double-tap focus) stay fast on dense meshes - the reconstructed resin STL alone has
-        // ~1.8M triangles, where a brute-force per-triangle pick on every hover would stutter.
-        //
-        // MUST run after every transform: the octree stores WORLD coordinates (bbox.minimumWorld)
-        // and is never refreshed automatically. Built before the Z-up rotation, its blocks end up
-        // rotated 90° away from the model.
-        for (const g of groups) for (const m of g.meshes) {
-          m.createOrUpdateSubmeshesOctree?.(64, 2)
-          // Picking only. Otherwise Babylon also uses the octree for render selection
-          // (useOctreeForRenderingSelection defaults to on) and drops submeshes whose octree blocks
-          // miss the frustum - zooming in narrows the frustum, and a small inaccuracy is enough to
-          // make whole objects vanish. Visibility now hangs solely on the mesh's (always current)
-          // bounding box.
-          m.useOctreeForRenderingSelection = false
-        }
+        scheduleOctreeBuild(groups)
 
         if (builtPlates.length > 1) {
           setPlatesUI(builtPlates.map(p => ({ name: p.name, thumbnail: p.thumbnail, colorIdx: p.colorIdx })))
           selectPlate(0) // show the first plate; rebuilds overlays and frames the view
+          mark('finish')
           setIsLoading(false)
           return
         }
@@ -1102,7 +1477,27 @@ export function StlViewerModal(props: StlViewerModalProps) {
    * Parses a binary or ASCII STL buffer into a Babylon.js Mesh.
    * Detects ASCII vs binary by inspecting the first 5 bytes and surrounding text.
    */
-  const parseStl = (buffer: ArrayBuffer, scene: Scene): Mesh => {
+  /**
+   * Parses a binary or ASCII STL.
+   *
+   * Asynchronous and chunked on purpose. The binary path walks millions of
+   * triangles, and doing that in one synchronous stretch is what made the
+   * browser report the page as unresponsive - and left the loading bar frozen
+   * mid-transition, because no frames were painted. Yielding every so often
+   * costs a little wall-clock and buys back a responsive page and a progress
+   * figure that means something: on a local server the download is over in
+   * milliseconds, so this is the part the user actually waits for.
+   *
+   * Positions and normals go into preallocated Float32Arrays rather than
+   * number[] with push: the triangle count is in the header, and growing a
+   * plain array to 16 million boxed numbers was a large part of the cost.
+   */
+  const parseStl = async (
+    buffer: ArrayBuffer,
+    scene: Scene,
+    onProgress?: (fraction: number) => void,
+    onBuildStart?: () => void,
+  ): Promise<Mesh> => {
     const dataView = new DataView(buffer)
     const uint8View = new Uint8Array(buffer)
     const first5 = new TextDecoder().decode(uint8View.slice(0, 5))
@@ -1113,8 +1508,10 @@ export function StlViewerModal(props: StlViewerModalProps) {
       isAscii = preview.includes('facet') || preview.includes('endsolid')
     }
 
-    const positions: number[] = []
-    const normals: number[] = []
+    const breathe = () => new Promise<void>(resolve => setTimeout(resolve, 0))
+
+    let positions: Float32Array | number[]
+    let normals: Float32Array | number[]
 
     if (!isAscii) {
       const triangleCount = dataView.getUint32(80, true)
@@ -1122,37 +1519,71 @@ export function StlViewerModal(props: StlViewerModalProps) {
       if (triangleCount === 0 || triangleCount > 5_000_000 || expectedSize > buffer.byteLength + 100) {
         throw new Error(`Invalid STL: ${triangleCount} triangles, ${buffer.byteLength} bytes`)
       }
+      const usable = Math.min(triangleCount, Math.floor((buffer.byteLength - 84) / 50))
+      // Report in fiftieths rather than every fixed number of triangles: a fixed
+      // chunk on a 1.6M mesh left the last update at 91%, and that was the value
+      // the bar sat on while the build step ran.
+      const step = Math.max(1, Math.floor(usable / 50))
+      const positionData = new Float32Array(usable * 9)
+      const normalData = new Float32Array(usable * 9)
       let offset = 84
-      for (let i = 0; i < triangleCount; i++) {
-        if (offset + 50 > buffer.byteLength) break
+      let write = 0
+      for (let i = 0; i < usable; i++) {
         const nx = dataView.getFloat32(offset, true)
         const ny = dataView.getFloat32(offset + 4, true)
         const nz = dataView.getFloat32(offset + 8, true)
         offset += 12
         for (let vertexIndex = 0; vertexIndex < 3; vertexIndex++) {
-          positions.push(
-            dataView.getFloat32(offset, true),
-            dataView.getFloat32(offset + 4, true),
-            dataView.getFloat32(offset + 8, true),
-          )
-          normals.push(nx, ny, nz)
+          positionData[write] = dataView.getFloat32(offset, true)
+          positionData[write + 1] = dataView.getFloat32(offset + 4, true)
+          positionData[write + 2] = dataView.getFloat32(offset + 8, true)
+          normalData[write] = nx
+          normalData[write + 1] = ny
+          normalData[write + 2] = nz
+          write += 3
           offset += 12
         }
         offset += 2
-      }
-    } else {
-      const lines = new TextDecoder().decode(buffer).split('\n')
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/)
-        if (parts[0] === 'vertex') {
-          positions.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]))
-        } else if (parts[0] === 'facet' && parts[1] === 'normal') {
-          // repeat the normal for each of the 3 upcoming vertices
-          for (let vertexIndex = 0; vertexIndex < 3; vertexIndex++) normals.push(parseFloat(parts[2]), parseFloat(parts[3]), parseFloat(parts[4]))
+        if (i % step === 0) {
+          onProgress?.(i / usable)
+          await breathe()
         }
       }
+      positions = positionData
+      normals = normalData
+    } else {
+      // ASCII STL carries no count, so the arrays have to grow. Rare and slow by
+      // nature; it is chunked for responsiveness rather than for speed.
+      const lines = new TextDecoder().decode(buffer).split('\n')
+      const positionList: number[] = []
+      const normalList: number[] = []
+      for (let i = 0; i < lines.length; i++) {
+        const parts = lines[i].trim().split(/\s+/)
+        if (parts[0] === 'vertex') {
+          positionList.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]))
+        } else if (parts[0] === 'facet' && parts[1] === 'normal') {
+          // repeat the normal for each of the 3 upcoming vertices
+          for (let vertexIndex = 0; vertexIndex < 3; vertexIndex++) normalList.push(parseFloat(parts[2]), parseFloat(parts[3]), parseFloat(parts[4]))
+        }
+        if (i % 50_000 === 0) {
+          onProgress?.(i / lines.length)
+          await breathe()
+        }
+      }
+      positions = positionList
+      normals = normalList
     }
+    onProgress?.(1)
+    // Two yields: one so the finished bar is actually painted, and one so the
+    // phase change below reaches the screen before the build blocks the thread.
+    await breathe()
+    onBuildStart?.()
+    await breathe()
 
+    // buildMesh hands the data to Babylon, which uploads it to the GPU. That is
+    // one opaque call with no steps to report, so the caller drops the bar and
+    // says what is happening instead of showing a figure that cannot move.
+    //
     // Smooth-shade only reconstructed resin meshes (props.zUp): their coarse marching-cubes
     // surface otherwise reads as flat facets. Regular STLs keep their crisp per-facet normals.
     return buildMesh('stl', positions, normals, scene, !!props.zUp)
@@ -1434,77 +1865,72 @@ export function StlViewerModal(props: StlViewerModalProps) {
   }
 
   /** Builds a Babylon Matrix from a 3MF transform string (12 values, row-vector convention). */
-  const parseMatrix = (s: string | null): Matrix => {
-    if (!s) return Matrix.Identity()
-    const m = s.trim().split(/\s+/).map(Number)
-    if (m.length < 12 || m.some(n => !isFinite(n))) return Matrix.Identity()
-    return Matrix.FromValues(
-      m[0], m[1], m[2], 0,
-      m[3], m[4], m[5], 0,
-      m[6], m[7], m[8], 0,
-      m[9], m[10], m[11], 1,
-    )
-  }
-
-  /** Parses one .model XML into its objects (keyed by id) and its <build> items. */
-  const parseModelFile = (bytes: Uint8Array): {
+  /**
+   * Reads one .model entry into its objects (keyed by id) and its <build> items.
+   *
+   * The scan runs in a worker: it is the longest stretch of opening a 3MF, and
+   * on the main thread nothing could be painted while it ran - the loading bar
+   * sat frozen and the browser flagged the page as unresponsive. The worker
+   * also cannot use DOMParser, which is why the geometry is read from the text
+   * instead of from a DOM built with one element per vertex.
+   *
+   * A worker that fails to start (or throws) is not fatal: the caller falls
+   * back to reading the file on this thread, which is slow but correct.
+   */
+  const parseModelFile = (bytes: Uint8Array, onProgress?: (fraction: number) => void): Promise<{
     objects: Map<string, M3mfObject>
     build: { objectid: string; matrix: Matrix }[]
-  } => {
-    const doc = new DOMParser().parseFromString(new TextDecoder('utf-8', { fatal: false }).decode(bytes), 'text/xml')
-    const objects = new Map<string, M3mfObject>()
-
-    for (const objEl of Array.from(doc.getElementsByTagName('object'))) {
-      const id = objEl.getAttribute('id')
-      if (!id) continue
-      const obj: M3mfObject = {}
-
-      const verticesEl = objEl.getElementsByTagName('vertices')[0]
-      const trianglesEl = objEl.getElementsByTagName('triangles')[0]
-      if (verticesEl && trianglesEl) {
-        const verts: number[] = []
-        for (const v of Array.from(verticesEl.getElementsByTagName('vertex'))) {
-          verts.push(parseFloat(v.getAttribute('x') || '0'),
-                     parseFloat(v.getAttribute('y') || '0'),
-                     parseFloat(v.getAttribute('z') || '0'))
-        }
-        const tris: number[] = []
-        for (const t of Array.from(trianglesEl.getElementsByTagName('triangle'))) {
-          tris.push(parseInt(t.getAttribute('v1') || '0'),
-                    parseInt(t.getAttribute('v2') || '0'),
-                    parseInt(t.getAttribute('v3') || '0'))
-        }
-        if (verts.length) { obj.verts = verts; obj.tris = tris }
-      }
-
-      const componentsEl = objEl.getElementsByTagName('components')[0]
-      if (componentsEl) {
-        const components: NonNullable<M3mfObject['components']> = []
-        for (const c of Array.from(componentsEl.getElementsByTagName('component'))) {
-          const cid = c.getAttribute('objectid')
-          if (!cid) continue
-          components.push({
-            path: (c.getAttribute('p:path') || c.getAttribute('path') || '').replace(/^\/+/, ''),
-            objectid: cid,
-            matrix: parseMatrix(c.getAttribute('transform')),
-          })
-        }
-        if (components.length) obj.components = components
-      }
-
-      objects.set(id, obj)
+  }> => new Promise((resolve, reject) => {
+    let worker: Worker
+    try {
+      worker = new Worker(new URL('../workers/model3mf.ts', import.meta.url), { type: 'module' })
+    } catch (failure) {
+      reject(failure)
+      return
     }
+    const finish = () => worker.terminate()
 
-    const build: { objectid: string; matrix: Matrix }[] = []
-    const buildEl = doc.getElementsByTagName('build')[0]
-    if (buildEl) {
-      for (const item of Array.from(buildEl.getElementsByTagName('item'))) {
-        const oid = item.getAttribute('objectid')
-        if (oid) build.push({ objectid: oid, matrix: parseMatrix(item.getAttribute('transform')) })
+    worker.onmessage = (event: MessageEvent<Model3mfResponse>) => {
+      const message = event.data
+      if (message.type === 'progress') { onProgress?.(message.fraction); return }
+      if (message.type === 'error') { finish(); reject(new Error(message.message)); return }
+
+      const objects = new Map<string, M3mfObject>()
+      for (const scanned of message.objects) {
+        const object: M3mfObject = {}
+        if (scanned.vertices.length) {
+          object.verts = Array.from(scanned.vertices)
+          object.tris = Array.from(scanned.triangles)
+        }
+        if (scanned.components.length) {
+          object.components = scanned.components.map(component => ({
+            path: component.path,
+            objectid: component.objectid,
+            matrix: matrixFromValues(component.transform),
+          }))
+        }
+        objects.set(scanned.id, object)
       }
+      const build = message.build.map(item => ({ objectid: item.objectid, matrix: matrixFromValues(item.transform) }))
+      finish()
+      resolve({ objects, build })
     }
+    worker.onerror = failure => { finish(); reject(new Error(failure.message || 'worker failed')) }
 
-    return { objects, build }
+    // The buffer is transferred, so this copy is the worker's from here on.
+    const copy = bytes.slice()
+    worker.postMessage({ bytes: copy.buffer, path: '' } satisfies Model3mfRequest, [copy.buffer])
+  })
+
+  /** Same layout as parseMatrix, but from the twelve numbers the scan returns. */
+  const matrixFromValues = (values: number[] | null): Matrix => {
+    if (!values || values.length < 12) return Matrix.Identity()
+    return Matrix.FromValues(
+      values[0], values[1], values[2], 0,
+      values[3], values[4], values[5], 0,
+      values[6], values[7], values[8], 0,
+      values[9], values[10], values[11], 1,
+    )
   }
 
   /**
@@ -1553,7 +1979,7 @@ export function StlViewerModal(props: StlViewerModalProps) {
     let buildItems: { objectid: string; matrix: Matrix }[] = []
     for (const [path, bytes] of files) {
       if (!path.endsWith('.model')) continue
-      const { objects, build } = parseModelFile(bytes)
+      const { objects, build } = await parseModelFile(bytes, fraction => reportLoad('parse', fraction))
       parsed.set(path, objects)
       if (build.length && !mainPath) { mainPath = path; buildItems = build }
     }
@@ -1684,7 +2110,7 @@ export function StlViewerModal(props: StlViewerModalProps) {
    * smooth object instead of a field of flat facets. Not for regular STL/OBJ,
    * whose hard edges must stay crisp.
    */
-  const buildMesh = (name: string, positions: number[], normals: number[], scene: Scene, smooth = false): Mesh => {
+  const buildMesh = (name: string, positions: number[] | Float32Array, normals: number[] | Float32Array, scene: Scene, smooth = false): Mesh => {
     if (smooth) {
       const w = weldSmooth(positions)
       const vd = new VertexData()
@@ -1696,8 +2122,11 @@ export function StlViewerModal(props: StlViewerModalProps) {
       return mesh
     }
 
-    const indices: number[] = []
-    for (let i = 0; i < positions.length / 3; i++) indices.push(i)
+    // A preallocated index buffer rather than push: for a multi-million-triangle
+    // mesh, growing a plain array here cost about as much as parsing the file.
+    const vertexCount = Math.floor(positions.length / 3)
+    const indices = new Uint32Array(vertexCount)
+    for (let i = 0; i < vertexCount; i++) indices[i] = i
 
     // Only trust supplied normals when they carry real direction. Reconstructed resin
     // meshes (marching cubes) ship zero-length facet normals; used as-is they leave the
@@ -1960,8 +2389,13 @@ export function StlViewerModal(props: StlViewerModalProps) {
         </span>
         {/* Werkzeuge: für alle Typen sichtbar (Foto funktioniert überall). "Messen" ist im Menü
             weiterhin nur für nicht-generierte Meshes (STL/OBJ/3MF) - bei G-code fehlt der Punkt. */}
-        <button onClick={() => { setToolsOpen(o => !o); setColorsOpen(false); setSettingsOpen(false) }}
-          style={{ background: toolsOpen() || measureActive() ? 'rgba(74,144,217,0.25)' : 'rgba(255,255,255,0.08)', border: `1px solid ${toolsOpen() || measureActive() ? 'rgba(74,144,217,0.6)' : 'rgba(255,255,255,0.15)'}`, 'border-radius': '8px', padding: '6px 14px', color: '#fff', 'font-size': '12px', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif", 'flex-shrink': '0' }}>
+        {/* Unavailable until the model is there. Every tool behind it works on the
+            loaded geometry - measuring needs a surface to pick, splitting needs
+            triangles to walk - so offering them mid-load can only disappoint. */}
+        <button onClick={() => { if (isLoading()) return; setToolsOpen(o => !o); setColorsOpen(false); setSettingsOpen(false) }}
+          disabled={isLoading()}
+          title={isLoading() ? translate('viewer_tools_wait') : translate('viewer_btn_tools')}
+          style={{ background: toolsOpen() || measureActive() ? 'rgba(74,144,217,0.25)' : 'rgba(255,255,255,0.08)', border: `1px solid ${toolsOpen() || measureActive() ? 'rgba(74,144,217,0.6)' : 'rgba(255,255,255,0.15)'}`, 'border-radius': '8px', padding: '6px 14px', color: '#fff', 'font-size': '12px', cursor: isLoading() ? 'not-allowed' : 'pointer', opacity: isLoading() ? '0.4' : '1', 'font-family': "'DM Sans',sans-serif", 'flex-shrink': '0' }}>
           {translate('viewer_btn_tools')}
         </button>
         <Show when={colorGroups().length > 0}>
@@ -2073,6 +2507,13 @@ export function StlViewerModal(props: StlViewerModalProps) {
                 </span>
               </button>
             </Show>
+            {/* Zerlegen: nur für Meshes. Ein G-code-Pfad hat keine Objekte, die man trennen könnte. */}
+            <Show when={!isGcode()}>
+              <button onClick={openSplitIntro}
+                style={{ display: 'flex', 'align-items': 'center', gap: '10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.12)', 'border-radius': '8px', padding: '8px 10px', color: '#fff', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif", 'font-size': '12px' }}>
+                <span>✂️ {translate('viewer_tool_split')}</span>
+              </button>
+            </Show>
             {/* Foto erstellen: für alle Typen (STL/OBJ/3MF + G-code) – arbeitet auf dem Framebuffer. */}
             <button onClick={startPhoto}
               style={{ display: 'flex', 'align-items': 'center', gap: '10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.12)', 'border-radius': '8px', padding: '8px 10px', color: '#fff', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif", 'font-size': '12px' }}>
@@ -2136,6 +2577,162 @@ export function StlViewerModal(props: StlViewerModalProps) {
               style={{ display: 'flex', 'align-items': 'center', 'justify-content': 'center', width: '34px', height: '34px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.2)', 'border-radius': '9px', color: '#fff', 'font-size': '16px', cursor: 'pointer' }}>
               ✕
             </button>
+          </div>
+        </Show>
+
+        {/* Split tool. One panel across all steps: explanation, progress, result.
+            Placed centrally until the result arrives, then parked at the right edge
+            and draggable by its header so it need not cover the model. */}
+        <Show when={splitPhase() !== 'idle'}>
+          <div style={{
+            position: 'absolute',
+            ...(splitPos()
+              ? { left: `${splitPos()!.x}px`, top: `${splitPos()!.y}px` }
+              : { top: '50%', left: '50%', transform: 'translate(-50%,-50%)' }),
+            width: '420px', 'max-width': 'calc(100vw - 32px)',
+            background: 'rgba(13,17,23,0.96)', border: '1px solid rgba(255,255,255,0.16)',
+            'border-radius': '14px', display: 'flex', 'flex-direction': 'column',
+            'backdrop-filter': 'blur(8px)', 'box-shadow': '0 12px 40px rgba(0,0,0,0.55)', 'z-index': '9',
+          }}>
+            {/* Header: drag handle and the only close control. */}
+            <div onPointerDown={splitPhase() === 'done' ? startSplitDrag : undefined}
+              style={{ display: 'flex', 'align-items': 'center', 'justify-content': 'space-between', gap: '12px', padding: '14px 16px', 'border-bottom': '1px solid rgba(255,255,255,0.1)', cursor: splitPhase() === 'done' ? 'move' : 'default' }}>
+              <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '14px', 'font-weight': '600', color: '#fff' }}>
+                {translate('viewer_split_title')}
+              </span>
+              <button onClick={closeSplit} title={translate('viewer_split_close')}
+                style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.55)', cursor: 'pointer', padding: '2px', display: 'flex', 'align-items': 'center' }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+
+            <div style={{ padding: '16px', display: 'flex', 'flex-direction': 'column', gap: '14px' }}>
+
+              {/* ── Step 1: what this does, and what to run it on ───────────── */}
+              <Show when={splitPhase() === 'intro'}>
+                <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '13px', 'line-height': '1.55', color: 'rgba(255,255,255,0.78)' }}>
+                  {translate('viewer_split_explain')}
+                </span>
+                <Show when={builtPlates.length > 1}>
+                  <label style={{ display: 'flex', 'flex-direction': 'column', gap: '6px' }}>
+                    <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '12px', color: 'rgba(255,255,255,0.6)' }}>
+                      {translate('viewer_split_plate_label')}
+                    </span>
+                    <select value={String(splitPlate())} onChange={e => setSplitPlate(e.currentTarget.value === 'all' ? 'all' : Number(e.currentTarget.value))}
+                      style={{ background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.16)', 'border-radius': '8px', padding: '7px 9px', color: '#fff', 'font-size': '13px', 'font-family': "'DM Sans',sans-serif", 'color-scheme': 'dark' }}>
+                      <option value="all">{translate('viewer_split_plate_all')}</option>
+                      <For each={platesUI()}>{(plate, index) => (
+                        <option value={String(index())}>{plate.name || translate('viewer_split_plate_n', { n: String(index() + 1) })}</option>
+                      )}</For>
+                    </select>
+                  </label>
+                </Show>
+                <div style={{ display: 'flex', gap: '8px', 'justify-content': 'flex-end' }}>
+                  <button onClick={closeSplit}
+                    style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', 'border-radius': '8px', padding: '8px 14px', color: 'rgba(255,255,255,0.8)', 'font-size': '13px', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif" }}>
+                    {translate('viewer_split_cancel')}
+                  </button>
+                  <button onClick={runSplit}
+                    style={{ background: 'rgba(74,144,217,0.3)', border: '1px solid rgba(74,144,217,0.7)', 'border-radius': '8px', padding: '8px 14px', color: '#fff', 'font-size': '13px', 'font-weight': '600', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif" }}>
+                    {translate('viewer_split_start')}
+                  </button>
+                </div>
+              </Show>
+
+              {/* ── Step 2: separating ───────────────────────────────────────── */}
+              <Show when={splitPhase() === 'busy'}>
+                <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '13px', color: 'rgba(255,255,255,0.78)' }}>
+                  {translate('viewer_split_working')}
+                </span>
+                <div style={{ display: 'flex', 'align-items': 'center', gap: '10px' }}>
+                  <div style={{ flex: '1', height: '6px', background: 'rgba(255,255,255,0.1)', 'border-radius': '3px', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${Math.round(splitProgress() * 100)}%`, background: '#4a90d9', transition: 'width 120ms linear' }} />
+                  </div>
+                  <span style={{ 'font-family': "'DM Mono',monospace", 'font-size': '13px', color: '#9ec5ff', 'min-width': '42px', 'text-align': 'right' }}>
+                    {Math.round(splitProgress() * 100)}%
+                  </span>
+                </div>
+              </Show>
+
+              {/* ── Step 3: the parts ────────────────────────────────────────── */}
+              <Show when={splitPhase() === 'done'}>
+                <Show when={!splitError() && splitNames().length > 1} fallback={
+                  <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '13px', color: 'rgba(255,255,255,0.78)' }}>
+                    {splitError() ? translate('viewer_split_failed') : translate('viewer_split_single')}
+                  </span>
+                }>
+                  <div style={{ display: 'flex', 'align-items': 'center', 'justify-content': 'space-between', gap: '10px' }}>
+                    <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '13px', color: 'rgba(255,255,255,0.78)' }}>
+                      {translate('viewer_split_found', { count: String(splitNames().length) })}
+                    </span>
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button onClick={() => setAllSplitChoices(true)}
+                        style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.14)', 'border-radius': '6px', padding: '4px 9px', color: 'rgba(255,255,255,0.8)', 'font-size': '11px', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif" }}>
+                        {translate('viewer_split_select_all')}
+                      </button>
+                      <button onClick={() => setAllSplitChoices(false)}
+                        style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.14)', 'border-radius': '6px', padding: '4px 9px', color: 'rgba(255,255,255,0.8)', 'font-size': '11px', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif" }}>
+                        {translate('viewer_split_select_none')}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div style={{ 'max-height': '260px', 'overflow-y': 'auto', display: 'flex', 'flex-direction': 'column', gap: '3px', border: '1px solid rgba(255,255,255,0.08)', 'border-radius': '8px', padding: '5px' }}>
+                    {/* Magnifier points the part out in the model, the rest of the row is a
+                        plain selection toggle. Two separate targets, so neither click has to
+                        guess which of the two the user meant. */}
+                    <For each={splitNames()}>{(name, index) => (
+                      <div onClick={() => toggleSplitChoice(index())}
+                        title={translate('viewer_split_box_hint')}
+                        style={{ display: 'flex', 'align-items': 'center', gap: '8px', background: splitFlash() === index() ? 'rgba(255,210,63,0.16)' : 'transparent', 'border-radius': '6px', padding: '5px 7px', color: 'rgba(255,255,255,0.8)', 'font-size': '12px', cursor: 'pointer', 'font-family': "'DM Mono',monospace", width: '100%', 'box-sizing': 'border-box' }}>
+                        <button onClick={event => { event.stopPropagation(); flashSplitPart(index()) }}
+                          title={translate('viewer_split_row_hint')}
+                          style={{ background: 'none', border: 'none', padding: '2px', cursor: 'pointer', display: 'flex', 'align-items': 'center', color: splitFlash() === index() ? '#ffd23f' : 'rgba(255,255,255,0.45)', 'flex-shrink': '0' }}>
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
+                            <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.2" y2="16.2" />
+                          </svg>
+                        </button>
+                        <span style={{ width: '14px', height: '14px', 'border-radius': '3px', border: `1.5px solid ${splitChosen()[index()] ? '#4a90d9' : 'rgba(255,255,255,0.35)'}`, background: splitChosen()[index()] ? '#4a90d9' : 'transparent', 'flex-shrink': '0', display: 'flex', 'align-items': 'center', 'justify-content': 'center' }}>
+                          <Show when={splitChosen()[index()]}>
+                            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="4"><polyline points="20 6 9 17 4 12" /></svg>
+                          </Show>
+                        </span>
+                        <span style={{ overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap', flex: '1' }}>{name}</span>
+                        <Show when={splitAdded()[index()]}>
+                          <span title={translate('viewer_split_added')} style={{ color: '#7fd18b', 'flex-shrink': '0', display: 'flex', 'align-items': 'center' }}>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12" /></svg>
+                          </span>
+                        </Show>
+                      </div>
+                    )}</For>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '8px', 'flex-wrap': 'wrap' }}>
+                    <button onClick={downloadSplit} disabled={chosenIndices().length === 0}
+                      style={{ background: 'rgba(74,144,217,0.28)', border: '1px solid rgba(74,144,217,0.65)', 'border-radius': '8px', padding: '8px 13px', color: '#fff', 'font-size': '12px', cursor: chosenIndices().length === 0 ? 'default' : 'pointer', opacity: chosenIndices().length === 0 ? '0.45' : '1', 'font-family': "'DM Sans',sans-serif" }}>
+                      ⭳ {translate('viewer_split_download')}
+                    </button>
+                    <Show when={props.onSaveFiles}>
+                      {/* Offers only what is not in the design yet, so a second click
+                          cannot resend a part the version already has by that name. */}
+                      <button onClick={addSplitToDesign} disabled={splitSaving() || pendingIndices().length === 0}
+                        style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', 'border-radius': '8px', padding: '8px 13px', color: pendingIndices().length === 0 && chosenIndices().length > 0 ? '#7fd18b' : '#fff', 'font-size': '12px', cursor: splitSaving() || pendingIndices().length === 0 ? 'default' : 'pointer', opacity: pendingIndices().length === 0 ? '0.55' : '1', 'font-family': "'DM Sans',sans-serif" }}>
+                        {splitSaving() ? translate('viewer_split_adding')
+                          : pendingIndices().length === 0 && chosenIndices().length > 0 ? translate('viewer_split_added')
+                          : translate('viewer_split_add')}
+                      </button>
+                    </Show>
+                  </div>
+                  <Show when={splitAddError()}>
+                    <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '11px', color: '#ff8a8a' }}>
+                      {translate('viewer_split_add_failed')} ({splitAddError()})
+                    </span>
+                  </Show>
+                </Show>
+              </Show>
+            </div>
           </div>
         </Show>
 
@@ -2257,7 +2854,29 @@ export function StlViewerModal(props: StlViewerModalProps) {
           <div style={{ position: 'absolute', inset: '0', display: 'flex', 'flex-direction': 'column', 'align-items': 'center', 'justify-content': 'center', gap: '16px', background: 'var(--bg2)' }}>
             <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
             <div style={{ width: '48px', height: '48px', border: '3px solid var(--border)', 'border-top': '3px solid var(--accent)', 'border-radius': '50%', animation: 'spin 0.8s linear infinite' }} />
-            <span style={{ 'font-family': "'DM Sans',sans-serif", color: 'var(--muted)', 'font-size': '14px' }}>{translate('label_loading_model')}</span>
+            <span style={{ 'font-family': "'DM Sans',sans-serif", color: 'var(--muted)', 'font-size': '14px' }}>
+              {loadPhase() === 'build' ? translate('viewer_loading_building')
+                : loadPhase() === 'parse' ? translate('viewer_loading_parsing')
+                : translate('label_loading_model')}
+            </span>
+            {/* A bar only while the download has a known size. The parse that follows is one
+                synchronous stretch with nothing to report, so claiming progress there would
+                just be a bar that sits still. */}
+            <Show when={loadProgress() !== null}>
+              <div style={{ display: 'flex', 'align-items': 'center', gap: '10px', width: '220px' }}>
+                {/* No CSS transition here on purpose. An animated width needs painted
+                    frames to advance, and the parse that follows the download blocks the
+                    main thread - the bar would freeze part-way while the percentage next
+                    to it already showed the final value. Both read the same signal, so
+                    applying the width in the same paint keeps them honest. */}
+                <div style={{ flex: '1', height: '5px', background: 'var(--border)', 'border-radius': '3px', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${Math.round((loadProgress() ?? 0) * 100)}%`, background: 'var(--accent)' }} />
+                </div>
+                <span style={{ 'font-family': "'DM Mono',monospace", 'font-size': '12px', color: 'var(--muted)', 'min-width': '38px', 'text-align': 'right' }}>
+                  {Math.round((loadProgress() ?? 0) * 100)}%
+                </span>
+              </div>
+            </Show>
           </div>
         </Show>
 

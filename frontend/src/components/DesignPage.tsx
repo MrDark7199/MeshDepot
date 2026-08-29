@@ -356,6 +356,8 @@ export function DesignPage(props: DesignPageProps) {
   const [stlViewFilename, setStlViewFilename] = createSignal('')
   /** The open model is Z-up (a reconstructed resin mesh), so the viewer stands it upright. */
   const [stlViewZUp, setStlViewZUp] = createSignal(false)
+  /** Version the viewer was opened from - where its split tool writes the parts back to. */
+  const [stlViewVersionId, setStlViewVersionId] = createSignal<number | null>(null)
   /** When true, the detail view shows the canonical (untranslated) name/description. */
   const [showOriginal, setShowOriginal] = createSignal(false)
 
@@ -767,6 +769,7 @@ export function DesignPage(props: DesignPageProps) {
     }
     setStlViewZUp(resin)
     setStlViewName(entry.filename)
+    setStlViewVersionId(fileVersionId)
   }
 
   /**
@@ -1247,6 +1250,7 @@ export function DesignPage(props: DesignPageProps) {
                         setStlViewUrl(api.entryUrl(props.designId, cv.id, entry.id))
                         setStlViewName(entry.filename)
                         setStlViewFilename(entry.filename)
+                        setStlViewVersionId(cv.id)
                       }}
                       style={{ position: 'absolute', bottom: '14px', left: '14px', background: 'rgba(0,0,0,0.65)', border: '1px solid rgba(255,255,255,0.2)', 'border-radius': '10px', padding: '7px 14px', color: '#fff', 'font-size': '13px', cursor: 'pointer', ...monoFont, display: 'flex', 'align-items': 'center', gap: '7px', 'font-weight': '500', 'backdrop-filter': 'blur(4px)' }}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">
@@ -1843,7 +1847,15 @@ export function DesignPage(props: DesignPageProps) {
                     placeholder={translate('notes_placeholder')}
                     style={{...inputStyle, resize: 'vertical', 'min-height': '220px', 'line-height': '1.65'}} />
                   <div style={{ 'margin-top': '13px', display: 'flex', 'justify-content': 'flex-end' }}>
-                    <button onClick={async () => { await api.updateDesign(props.designId, { notes: editForm().notes }); props.showToast(translate('toast_design_saved')); loadDesign() }}
+                    {/* Updates the loaded design in place instead of calling loadDesign():
+                        that one flips isLoading and refetches everything, which threw the
+                        whole detail view away to apply a field we just sent ourselves. */}
+                    <button onClick={async () => {
+                      const notes = editForm().notes
+                      await api.updateDesign(props.designId, { notes })
+                      setDesign(current => (current ? { ...current, notes } : current))
+                      props.showToast(translate('toast_design_saved'))
+                    }}
                       style={{ padding: '9px 22px', background: 'var(--accent)', border: 'none', 'border-radius': '10px', color: '#fff', ...sansFont, 'font-size': '14px', 'font-weight': '700', cursor: 'pointer' }}>
                       {translate('btn_save_notes')}
                     </button>
@@ -1956,6 +1968,38 @@ export function DesignPage(props: DesignPageProps) {
       {/* 3D Viewer */}
       <Show when={stlViewUrl()}>
         <StlViewerModal url={stlViewUrl()!} filename={stlViewFilename()} designName={stlViewName()} zUp={stlViewZUp()}
+          onSaveFiles={async (files) => {
+            // Lands in the version the viewer was opened from. The request has to
+            // throw on failure: that is the only way the viewer learns of it.
+            const versionId = stlViewVersionId()
+            if (!versionId) throw new Error('no version')
+
+            // Collisions are resolved here rather than in the viewer, because this
+            // is the side that knows what the version already holds. A second run
+            // of the split tool produces the same names as the first, and the
+            // server rejects the whole batch on the first duplicate - so the parts
+            // get the next free name instead of an error the user cannot act on.
+            const taken = new Set(
+              (fileVersions().find(version => version.id === versionId)?.entries ?? [])
+                .map(entry => entry.filename.toLowerCase()),
+            )
+            const freeName = (filename: string) => {
+              if (!taken.has(filename.toLowerCase())) { taken.add(filename.toLowerCase()); return filename }
+              const dot = filename.lastIndexOf('.')
+              const stem = dot > 0 ? filename.slice(0, dot) : filename
+              const extension = dot > 0 ? filename.slice(dot) : ''
+              for (let suffix = 2; ; suffix++) {
+                const candidate = `${stem}-${suffix}${extension}`
+                if (!taken.has(candidate.toLowerCase())) { taken.add(candidate.toLowerCase()); return candidate }
+              }
+            }
+
+            const formData = new FormData()
+            for (const file of files) formData.append('file', new File([file], freeName(file.name), { type: file.type }))
+            await api.addEntries(props.designId, versionId, formData)
+            props.showToast(translate('toast_file_uploaded'))
+            loadFiles()
+          }}
           onSaveImage={async (blob) => {
             const n = await uploadDesignImage([new File([blob], `${(stlViewName() || 'modell').replace(/[^\w.-]+/g, '_')}-foto.png`, { type: 'image/png' })])
             // The upload helper swallows errors itself (toast); without re-raising, the viewer would
