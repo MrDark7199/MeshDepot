@@ -1351,15 +1351,6 @@ export function StlViewerModal(props: StlViewerModalProps) {
     })
 
     try {
-      // Temporary instrumentation: the loading phases are hard to attribute from
-      // the outside, so each one reports how long it actually took.
-      const timings: Record<string, number> = {}
-      let phaseStart = performance.now()
-      const mark = (name: string) => {
-        timings[name] = Math.round(performance.now() - phaseStart)
-        phaseStart = performance.now()
-        console.info(`[viewer] ${name}: ${timings[name]} ms`)
-      }
       const response = await fetch(props.url, { credentials: 'include' })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       // Read the body in chunks so the loading screen can show how far along the
@@ -1387,8 +1378,6 @@ export function StlViewerModal(props: StlViewerModalProps) {
       }
       // Parsing is one synchronous stretch with no measurable steps, so the bar
       // gives way to an indeterminate state rather than pretending to advance.
-      mark('download')
-      console.info(`[viewer] file: ${(buffer.byteLength / 1048576).toFixed(1)} MiB, format hint: ${props.filename}`)
       // The bar carries on from where the download left it. Formats whose parser
       // reports nothing simply hold here rather than dropping the bar entirely -
       // it still shows how much of the whole load is behind us.
@@ -1433,9 +1422,8 @@ export function StlViewerModal(props: StlViewerModalProps) {
           groups = [singleGroup(await parseStl(
             buffer, scene,
             fraction => reportLoad('parse', fraction),
-            () => { mark('read'); reportLoad('build', 0) },
+            () => reportLoad('build', 0),
           ), scene)]
-          mark('build')
           reportLoad('build', 1)
         }
         builtGroups = groups
@@ -1456,7 +1444,6 @@ export function StlViewerModal(props: StlViewerModalProps) {
         if (builtPlates.length > 1) {
           setPlatesUI(builtPlates.map(p => ({ name: p.name, thumbnail: p.thumbnail, colorIdx: p.colorIdx })))
           selectPlate(0) // show the first plate; rebuilds overlays and frames the view
-          mark('finish')
           setIsLoading(false)
           return
         }
