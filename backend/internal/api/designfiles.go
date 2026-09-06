@@ -21,6 +21,7 @@ import (
 	"meshdepot/internal/blobstore"
 	"meshdepot/internal/dbutil"
 	"meshdepot/internal/httpx"
+	"meshdepot/internal/platforms"
 	"meshdepot/internal/printmeta"
 	"meshdepot/internal/storage"
 )
@@ -332,7 +333,7 @@ func (server *Server) storeUploads(headers []*multipart.FileHeader, user storage
 			total += subtotal
 		default:
 			if info, storeFailure := blobstore.StoreReader(user, file); storeFailure == nil {
-				stored = append(stored, storedFile{filename: fileHeader.Filename, blobPath: info.Path, size: info.SizeBytes, fileHash: info.Hash, blobHash: info.Hash, relativePath: fileHeader.Filename, gcodeMeta: printmeta.ExtractFileJSON(fileHeader.Filename, info.Path)})
+				stored = append(stored, storedFile{filename: fileHeader.Filename, blobPath: info.Path, size: info.SizeBytes, fileHash: platforms.ContentHash(info.Path, info.Hash), blobHash: info.Hash, relativePath: fileHeader.Filename, gcodeMeta: printmeta.ExtractFileJSON(fileHeader.Filename, info.Path)})
 				total += info.SizeBytes
 			}
 		}
@@ -390,7 +391,7 @@ func (server *Server) extractZip(readerAt io.ReaderAt, size int64, user storage.
 	if failure != nil {
 		if reader, ok := readerAt.(io.Reader); ok {
 			if info, storeFailure := blobstore.StoreReader(user, reader); storeFailure == nil {
-				return []storedFile{{filename: "upload.zip", blobPath: info.Path, size: info.SizeBytes, fileHash: info.Hash, blobHash: info.Hash, relativePath: "upload.zip"}}, info.SizeBytes
+				return []storedFile{{filename: "upload.zip", blobPath: info.Path, size: info.SizeBytes, fileHash: platforms.ContentHash(info.Path, info.Hash), blobHash: info.Hash, relativePath: "upload.zip"}}, info.SizeBytes
 			}
 		}
 		return nil, 0
@@ -452,7 +453,7 @@ func (server *Server) extractZip(readerAt io.ReaderAt, size int64, user storage.
 			continue
 		}
 		total += info.SizeBytes
-		stored = append(stored, storedFile{filename: basename, blobPath: info.Path, size: info.SizeBytes, fileHash: info.Hash, blobHash: info.Hash, relativePath: relativePath, gcodeMeta: printmeta.ExtractBytesJSON(basename, data)})
+		stored = append(stored, storedFile{filename: basename, blobPath: info.Path, size: info.SizeBytes, fileHash: platforms.ContentHash(info.Path, info.Hash), blobHash: info.Hash, relativePath: relativePath, gcodeMeta: printmeta.ExtractBytesJSON(basename, data)})
 	}
 	return stored, total
 }

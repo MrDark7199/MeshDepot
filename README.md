@@ -13,6 +13,28 @@ sync involved.
 
 </div>
 
+## At a glance
+
+- **Import by URL** from Thingiverse, Printables, MakerWorld, MyMiniFactory, Cults3D and Thangs -
+  files, cover, gallery, description, tags and author in one paste
+- **Upload your own** designs just as easily, with no platform involved
+- **View in the browser** - STL, OBJ, 3MF, G-code and resin formats, no plugin, no download
+- **Measure** two points on a model in millimetres, and **capture** the view as a design picture
+- **Split** a file that holds several objects into one STL per part
+- **Read the print settings** out of sliced files: layer height, temperatures, filament, print time
+- **Open in Bambu Studio, OrcaSlicer or PrusaSlicer** with one click
+- **Versions instead of copies** - unchanged files are stored once, however many versions use them
+- **Search, filter and tag** across the whole library, and group designs into collections
+- **Keep designs current** - check the source platform for new versions, or mirror your likes and
+  collections from a connected account
+- **Share** with another user, or hand out a link that needs no account and expires when you say
+- **Several users**, each with their own library, platform accounts and storage quota
+- **Notifications** in the app and by e-mail, per event and per user
+- **Yours to shape** - light or dark, an accent colour, your own CSS, English or German
+- **Runs on your server** - one container, SQLite, no cloud and no account anywhere
+
+---
+
 <!-- Screenshots go in docs/images/. Every image below is a placeholder: drop the file
      in with the name shown and it appears here. -->
 

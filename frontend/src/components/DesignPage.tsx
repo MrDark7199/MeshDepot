@@ -5,7 +5,7 @@ import { useI18n } from '../i18n/index'
 import { useUnsavedChanges } from '../utils/unsavedChanges'
 import { StlViewerModal, is3dFile } from './StlViewer'
 import { displayName, displayDescription } from '../utils/designText'
-import { formatDate } from '../utils/datetime'
+import { formatDate, formatDateTime } from '../utils/datetime'
 import { escapeHtml } from '../utils/sanitizeHtml'
 import { errorKey } from '../utils/errorMessage'
 import type { Design, DesignFile, DesignFileEntry, DesignID, DesignImage, Tag, Collection, DesignShare, GcodeMeta, ShareLink } from '../types'
@@ -1375,7 +1375,7 @@ export function DesignPage(props: DesignPageProps) {
                     { label: translate('tab_files'),          value: design()!.file_count ? translate('label_files_in_version').replace('{count}', String(design()!.file_count!)) : null },
                     { label: translate('label_size'),         value: design()!.size_bytes ? formatBytes(design()!.size_bytes!) : null },
                     { label: translate('label_version'),      value: currentVersion()?.version ? `v${currentVersion()!.version}` : null },
-                    { label: translate('label_updated'),      value: design()!.updated_at ? (() => { const date = new Date(design()!.updated_at!); const dd = String(date.getDate()).padStart(2,'0'); const mm = String(date.getMonth()+1).padStart(2,'0'); const yy = date.getFullYear(); const hh = String(date.getHours()).padStart(2,'0'); const min = String(date.getMinutes()).padStart(2,'0'); return `${dd}.${mm}.${yy} ${hh}:${min}`; })() : null },
+                    { label: translate('label_updated'),      value: design()!.updated_at ? formatDateTime(design()!.updated_at!, lang()) : null },
                   ] as const).filter(item => item.value).map(item => (
                     <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '11px', padding: '11px 15px' }}>
                       <div style={{ ...monoFont, 'font-size': '10px', color: 'var(--muted)', 'margin-bottom': '5px', 'text-transform': 'uppercase', 'letter-spacing': '0.05em' }}>{item.label}</div>
@@ -1649,7 +1649,7 @@ export function DesignPage(props: DesignPageProps) {
                       </Show>
                       <div onClick={e => e.stopPropagation()} style={{ 'margin-left': 'auto', display: 'flex', gap: '9px', 'align-items': 'center' }}>
                         <span style={{ ...monoFont, 'font-size': '12px', color: 'var(--muted)' }}>
-                          {(() => { const date = new Date(fileVersion.created_at); return `${String(date.getDate()).padStart(2,'0')}.${String(date.getMonth()+1).padStart(2,'0')}.${date.getFullYear()}` })()}
+                          {formatDate(fileVersion.created_at, lang())}
                         </span>
                         {(() => {
                           const totalBytes = (fileVersion.entries || []).reduce((sum, entry) => sum + (entry.size_bytes || 0), 0) || fileVersion.size_bytes || 0

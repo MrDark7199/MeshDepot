@@ -2,6 +2,7 @@ package platforms
 
 import (
 	"database/sql"
+	"log"
 
 	"meshdepot/internal/dbutil"
 )
@@ -31,11 +32,13 @@ func (deps Deps) loadAccount(userID int, platform string) platformAccount {
 	).Scan(&token, &username, &password, &totp, &expires)
 
 	account := platformAccount{
-		Token:    deps.decryptField(token, userID),
-		Password: deps.decryptField(password, userID),
-		TOTP:     deps.decryptField(totp, userID),
+		Token:    deps.decryptSecret(token, userID, platform, "token"),
+		Password: deps.decryptSecret(password, userID, platform, "password"),
+		TOTP:     deps.decryptSecret(totp, userID, platform, "TOTP secret"),
 		Expires:  expires.String,
 	}
+	// The username is the one field with a plaintext fallback (older rows stored
+	// it unencrypted), so a failed decrypt here is expected and stays quiet.
 	if account.Username = deps.decryptField(username, userID); account.Username == "" {
 		account.Username = username.String
 	}
@@ -50,6 +53,29 @@ func (deps Deps) decryptField(column sql.NullString, userID int) string {
 	if decrypted, ok := deps.Crypto.Decrypt(column.String, userID); ok {
 		return decrypted
 	}
+	return ""
+}
+
+// decryptSecret is decryptField for the fields an auto-login depends on, and it
+// says so when one cannot be read.
+//
+// Without this the failure is invisible: an undecryptable password comes back
+// as "", hasLogin then reports no credentials, and the download fails with
+// "add your credentials" for an account that has them. The usual cause is an
+// APP_KEY that differs from the one the row was written with - a value the
+// operator changed, or lost. Nothing here can recover the row, but the log line
+// points at the key instead of sending someone to re-check credentials that
+// were entered correctly.
+func (deps Deps) decryptSecret(column sql.NullString, userID int, platform, field string) string {
+	if !column.Valid || column.String == "" {
+		return ""
+	}
+	if decrypted, ok := deps.Crypto.Decrypt(column.String, userID); ok {
+		return decrypted
+	}
+	log.Printf("[platforms] %s: the stored %s of user %d cannot be decrypted - APP_KEY most likely differs from "+
+		"the one it was saved with. The account now reads as if nothing had been entered; re-enter the credentials to fix it.",
+		platform, field, userID)
 	return ""
 }
 

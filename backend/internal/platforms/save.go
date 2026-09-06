@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"path/filepath"
@@ -35,8 +36,12 @@ func nullIfEmpty(value string) any {
 
 // storedEntry is a finally stored file.
 type storedEntry struct {
-	filename, path, fileHash, relativePath string
-	size                                   int64
+	filename, path, relativePath string
+	// blobHash addresses the stored bytes; contentHash identifies what the file
+	// holds and is what a later sync compares against. They differ for an
+	// archive that gets rebuilt on every download - see ContentHash.
+	blobHash, contentHash string
+	size                  int64
 }
 
 // SaveDownload writes a download result into the library: design row, files
@@ -126,11 +131,16 @@ func SaveDownload(db *sql.DB, owner Owner, platform, sourceURL string, result Re
 		if failure != nil || blob.SizeBytes == 0 {
 			continue
 		}
+		// Read before the temp file goes. The first version has to record the same
+		// kind of hash the sync will later compare against, or the very next
+		// update check finds a mismatch and publishes a version holding nothing
+		// new - for every freshly imported design.
+		stableHash := ContentHash(file.TempPath, blob.Hash)
 		_ = os.Remove(file.TempPath)
 		totalBytes += blob.SizeBytes
 		entries = append(entries, storedEntry{
 			filename: filepath.Base(destination), path: destination,
-			fileHash: blob.Hash, relativePath: relativePath, size: blob.SizeBytes,
+			blobHash: blob.Hash, contentHash: stableHash, relativePath: relativePath, size: blob.SizeBytes,
 		})
 	}
 	if len(entries) == 0 {
@@ -147,7 +157,7 @@ func SaveDownload(db *sql.DB, owner Owner, platform, sourceURL string, result Re
 	versionID, _ := versionResult.LastInsertId()
 	for _, entry := range entries {
 		if _, failure := transaction.Exec(`INSERT INTO design_file_entries (design_file_id, filename, path, size_bytes, file_hash, relative_path, blob_hash, gcode_meta)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, versionID, entry.filename, owner.Layout.Rel(entry.path), entry.size, entry.fileHash, entry.relativePath, entry.fileHash,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, versionID, entry.filename, owner.Layout.Rel(entry.path), entry.size, entry.contentHash, entry.relativePath, entry.blobHash,
 			nullIfEmpty(printmeta.ExtractFileJSON(entry.filename, entry.path))); failure != nil {
 			return 0, failure
 		}
@@ -184,16 +194,34 @@ func SaveDownload(db *sql.DB, owner Owner, platform, sourceURL string, result Re
 // platform side, however, remains.
 func AddTags(db dbutil.Querier, userID, designID int, tags []string) {
 	for _, rawTag := range tags {
-		name := strings.TrimSpace(rawTag)
-		if len(name) > 80 {
-			name = name[:80]
+		// Some platforms hand their text over HTML-escaped. A tag written
+		// "'decor" arrived as "&#39;decor" and was stored, listed and searched
+		// under that name. Decoding happens here rather than in each scraper:
+		// every imported tag passes through this one function, and a new
+		// platform would otherwise have to remember to do it again.
+		name := strings.TrimSpace(html.UnescapeString(rawTag))
+		// Cut on a character boundary, not a byte one. Decoding readily yields
+		// multi-byte characters, and slicing bytes would leave half of one
+		// behind - which is not valid UTF-8 and would land in the database.
+		if runes := []rune(name); len(runes) > 80 {
+			name = strings.TrimSpace(string(runes[:80]))
 		}
 		if name == "" {
 			continue
 		}
-		dbutil.ExecLogged(db, "INSERT OR IGNORE INTO tags (user_id, name, color, source) VALUES (?, ?, '#457b9d', 'import')", userID, name)
+		// Matched without regard to case, so "Decor" from one platform and
+		// "decor" from another end up on the same tag. The UNIQUE index is
+		// case-sensitive, so without this lookup both would exist side by side
+		// and a filter on one would miss the designs carrying the other.
 		var tagID int
-		if db.QueryRow("SELECT id FROM tags WHERE user_id=? AND name=? LIMIT 1", userID, name).Scan(&tagID) == nil && tagID > 0 {
+		found := db.QueryRow(
+			"SELECT id FROM tags WHERE user_id=? AND name=? COLLATE NOCASE LIMIT 1", userID, name).Scan(&tagID) == nil && tagID > 0
+		if !found {
+			// The spelling of whoever gets there first is the one that is kept.
+			dbutil.ExecLogged(db, "INSERT OR IGNORE INTO tags (user_id, name, color, source) VALUES (?, ?, '#457b9d', 'import')", userID, name)
+			_ = db.QueryRow("SELECT id FROM tags WHERE user_id=? AND name=? COLLATE NOCASE LIMIT 1", userID, name).Scan(&tagID)
+		}
+		if tagID > 0 {
 			dbutil.ExecLogged(db, "INSERT OR IGNORE INTO design_tags (design_id, tag_id) VALUES (?, ?)", designID, tagID)
 		}
 	}
@@ -261,8 +289,12 @@ func SaveSyncVersion(db *sql.DB, owner Owner, designID int, result Result, progr
 	}
 
 	type syncEntry struct {
-		filename, blobPath, relativePath, hash string
-		size                                   int64
+		filename, blobPath, relativePath string
+		// blobHash addresses the stored bytes; contentHash identifies what the
+		// file holds and is what decides whether this is new. They differ for a
+		// repacked archive - see ContentHash in archivehash.go.
+		blobHash, contentHash string
+		size                  int64
 	}
 	var entries []syncEntry
 	newBlobCount := 0
@@ -284,15 +316,22 @@ func SaveSyncVersion(db *sql.DB, owner Owner, designID int, result Result, progr
 		if failure != nil {
 			continue
 		}
+		// Read before the temp file goes: a rebuilt archive has different bytes
+		// on every download, so comparing those would publish a version per sync
+		// that contains nothing new.
+		stableHash := ContentHash(file.TempPath, blob.Hash)
 		_ = os.Remove(file.TempPath)
 
-		if blob.IsNew && !knownHashes[blob.Hash] {
+		if !knownHashes[stableHash] {
 			newBlobCount++
 			progress("store", fmt.Sprintf("New file %d/%d: %s", index+1, total, base), index+1, total)
 		} else {
 			progress("skip", "Unchanged: "+base, index+1, total)
 		}
-		entries = append(entries, syncEntry{filename: base, blobPath: blob.Path, relativePath: relativePath, hash: blob.Hash, size: blob.SizeBytes})
+		entries = append(entries, syncEntry{
+			filename: base, blobPath: blob.Path, relativePath: relativePath,
+			blobHash: blob.Hash, contentHash: stableHash, size: blob.SizeBytes,
+		})
 	}
 
 	if len(entries) == 0 {
@@ -364,7 +403,7 @@ func SaveSyncVersion(db *sql.DB, owner Owner, designID int, result Result, progr
 		if _, failure := transaction.Exec(
 			`INSERT INTO design_file_entries (design_file_id, filename, path, size_bytes, file_hash, relative_path, blob_hash, gcode_meta)
 			 VALUES (?,?,?,?,?,?,?,?)`,
-			versionID, entry.filename, owner.Layout.Rel(published[index]), entry.size, entry.hash, entry.relativePath, entry.hash,
+			versionID, entry.filename, owner.Layout.Rel(published[index]), entry.size, entry.contentHash, entry.relativePath, entry.blobHash,
 			nullIfEmpty(printmeta.ExtractFileJSON(entry.filename, published[index]))); failure != nil {
 			return false, "", 0, failure
 		}

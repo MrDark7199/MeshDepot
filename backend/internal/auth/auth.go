@@ -55,14 +55,15 @@ type userRow struct {
 	totpSecret sql.NullString
 	state      string
 	customCSS  string
+	dateFormat string
 }
 
-const userColumns = "id, COALESCE(public_id, ''), email, hash, name, admin, language, must_change_password, avatar_path, totp_secret, state, COALESCE(custom_css, '')"
+const userColumns = "id, COALESCE(public_id, ''), email, hash, name, admin, language, must_change_password, avatar_path, totp_secret, state, COALESCE(custom_css, ''), COALESCE(date_format, '')"
 
 // scanUser reads a userRow from a row scanner.
 func scanUser(row interface{ Scan(...any) error }) (userRow, error) {
 	var user userRow
-	failure := row.Scan(&user.id, &user.publicID, &user.email, &user.hash, &user.name, &user.admin, &user.language, &user.mustChange, &user.avatarPath, &user.totpSecret, &user.state, &user.customCSS)
+	failure := row.Scan(&user.id, &user.publicID, &user.email, &user.hash, &user.name, &user.admin, &user.language, &user.mustChange, &user.avatarPath, &user.totpSecret, &user.state, &user.customCSS, &user.dateFormat)
 	return user, failure
 }
 
@@ -113,6 +114,10 @@ func payload(user userRow) map[string]any {
 		// paint. Keeping it in localStorage alone lost it on every reload and on
 		// every other device.
 		"custom_css": user.customCSS,
+		// Travels with the session for the same reason: every date in the interface
+		// is written in this notation, and reading it after the first paint would
+		// show one format and then swap it for another.
+		"date_format": user.dateFormat,
 	}
 }
 

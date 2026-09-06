@@ -102,9 +102,9 @@ func TestDownloadQueueAcceptsAPlatformOnceItsCredentialsExist(t *testing.T) {
 	}
 }
 
-// MakerWorld needs both halves of the credentials, so a token alone is not
-// enough.
-func TestDownloadQueueDemandsBothMakerWorldCredentials(t *testing.T) {
+// MakerWorld re-fetches its short-lived token with the login, so a token on its
+// own cannot keep downloads working and does not get a job through.
+func TestDownloadQueueRejectsMakerWorldWithOnlyAToken(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.insertPlatformAccount(testHarness.userID, "makerworld", "ein-token", "")
 
@@ -113,6 +113,21 @@ func TestDownloadQueueDemandsBothMakerWorldCredentials(t *testing.T) {
 
 	if key := answer.errorKey(t); key != "error.platform_credentials_required:makerworld" {
 		t.Fatalf("unexpected error key %q", key)
+	}
+}
+
+// The token is only created by the first successful login, so an account that
+// has just been entered has none yet. Demanding one rejected credentials that
+// were stored correctly - the e-mail alone has to be enough.
+func TestDownloadQueueAcceptsMakerWorldWithOnlyAnEmail(t *testing.T) {
+	testHarness := newHarness(t)
+	testHarness.insertPlatformAccount(testHarness.userID, "makerworld", "", "jemand@example.org")
+
+	answer := testHarness.asUser(http.MethodPost, "/api/v1/download",
+		map[string]any{"source_url": "https://makerworld.com/en/models/55555"})
+
+	if answer.status != http.StatusCreated {
+		t.Fatalf("queueing answered %d: %s", answer.status, answer.rawBody)
 	}
 }
 

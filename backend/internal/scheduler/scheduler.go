@@ -23,6 +23,11 @@ type Scheduler struct {
 	// RunLibrarySync triggers the library sync of all accounts (injected).
 	RunLibrarySync   func()
 	AutoSyncInterval time.Duration
+	// SendMailDigest collects pending notification e-mails into one message per
+	// member (injected, so the scheduler does not depend on the mail stack).
+	SendMailDigest func()
+	// MailDigestInterval is how often that runs.
+	MailDigestInterval time.Duration
 	// Heartbeat records the liveness of both loops for the health endpoint.
 	// Wired by main.go; nil elsewhere, which the registry tolerates.
 	Heartbeat *health.Registry
@@ -37,6 +42,9 @@ func New(db *sql.DB, runLibrarySync func()) *Scheduler {
 func (scheduler *Scheduler) Start(stop <-chan struct{}) {
 	scheduler.Heartbeat.Register(health.SchedulerForce, forceFlagInterval)
 	scheduler.Heartbeat.Register(health.SchedulerAuto, scheduler.AutoSyncInterval)
+	if scheduler.SendMailDigest != nil && scheduler.MailDigestInterval > 0 {
+		scheduler.Heartbeat.Register(health.SchedulerMailDigest, scheduler.MailDigestInterval)
+	}
 	safego.Go("scheduler.force-flag", func() {
 		scheduler.loop(stop, health.SchedulerForce, forceFlagInterval, func() {
 			if scheduler.consumeForceFlag() && scheduler.RunLibrarySync != nil {
@@ -51,6 +59,13 @@ func (scheduler *Scheduler) Start(stop <-chan struct{}) {
 	safego.Go("scheduler.auto-sync", func() {
 		scheduler.loop(stop, health.SchedulerAuto, scheduler.AutoSyncInterval, func() { scheduler.autoSyncEnqueue() })
 	})
+	// Only when mail is wired at all: a deployment without it should not carry a
+	// loop that wakes up to find nothing to do.
+	if scheduler.SendMailDigest != nil && scheduler.MailDigestInterval > 0 {
+		safego.Go("scheduler.mail-digest", func() {
+			scheduler.loop(stop, health.SchedulerMailDigest, scheduler.MailDigestInterval, scheduler.SendMailDigest)
+		})
+	}
 }
 
 // loop calls task at the given interval until stop is closed and reports every

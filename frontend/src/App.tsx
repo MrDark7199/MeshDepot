@@ -18,6 +18,7 @@ import { NotificationBell } from './components/NotificationBell'
 import { guardClose as guardCloseGlobal, pendingActionSignal, pendingMessageSignal, confirmDiscard, cancelDiscard } from './utils/unsavedChanges'
 import { displayName, displayAuthor } from './utils/designText'
 import { errorKey } from './utils/errorMessage'
+import { formatDateTime } from './utils/datetime'
 import { PLATFORM_COLORS, PLATFORM_LABELS, platformLabel } from './constants/platforms'
 
 const GRADIENTS = [
@@ -34,9 +35,14 @@ const CARD_H = '344px'
 /** Base interval of the single background-poll ticker (see the onMount loop in MainApp). */
 const POLL_TICK_MS = 2000
 
+
 const globalStyles = `
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body, #root { background: var(--bg); min-height: 100vh; font-size: 16px; -webkit-font-smoothing: antialiased; }
+  /* Firefox ignores the ::-webkit- rules and would use the system theme; these
+     two are the standard equivalents. Transparent track, so nothing is drawn
+     when there is nothing to scroll. Kept in step with index.html. */
+  html { scrollbar-width: thin; scrollbar-color: var(--scrollbar) transparent; }
   ::-webkit-scrollbar { width: 8px; }
   ::-webkit-scrollbar-track { background: var(--bg2); }
   ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 5px; }
@@ -1492,20 +1498,16 @@ function MainApp() {
   // Platform queue blocks/pauses surface as error entries in the notification
   // bell instead of a permanent top-right banner. One notification per newly
   // seen block; a block that clears is forgotten so a later re-block notifies
-  // again, and its bell entry is withdrawn - see below. Date format DD/MM/YYYY.
+  // again, and its bell entry is withdrawn - see below.
   const notifiedBlockKeys = new Set<string>()
   // Title of the bell entry each platform currently has, so it can be taken back
   // once that platform runs again. Keyed by platform rather than by block key:
   // the key carries the block's expiry, which changes on a re-block.
   const blockNotificationTitles = new Map<string, string>()
   const blockKey = (block: QueueBlock) => `${block.platform}|${block.blocked ? (block.until || 'blocked') : 'paused'}`
-  const formatBlockUntil = (iso?: string) => {
-    if (!iso) return ''
-    const date = new Date(iso)
-    if (isNaN(date.getTime())) return ''
-    const pad = (value: number) => String(value).padStart(2, '0')
-    return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`
-  }
+  // Written through the shared formatter so it follows the account's notation
+  // like every other date, instead of the DD/MM/YYYY it used to hard-code.
+  const formatBlockUntil = (iso?: string) => (iso ? formatDateTime(iso, lang()) : '')
   createEffect(() => {
     const active = queueBlocks()
     const activeKeys = new Set(active.map(blockKey))
@@ -2132,7 +2134,11 @@ function MainApp() {
               })()}
             </Show>
           </>}>
-            <div style={{ display: 'flex', 'justify-content': 'center', 'margin-top': '110px' }}>
+            {/* Centred in the space below the nav rather than pushed down by a
+                fixed margin. The old 110px was added on top of the nav and the
+                main padding without regard to the window, so on a short enough
+                one the spinner alone made the page scrollable. */}
+            <div style={{ display: 'flex', 'align-items': 'center', 'justify-content': 'center', height: `calc(100vh - ${NAV_H} - 108px)`, 'min-height': '160px' }}>
               <div style={{ width: '40px', height: '40px', border: '3px solid var(--border)', 'border-top': '3px solid var(--accent)', 'border-radius': '50%', animation: 'spin 0.8s linear infinite' }} />
             </div>
           </Show>

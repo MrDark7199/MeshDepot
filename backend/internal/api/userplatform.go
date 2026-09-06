@@ -45,7 +45,10 @@ func (server *Server) accountView(row map[string]any, currentUserID int) map[str
 // validation run silently checks the platform with an empty password and
 // blames the credentials the user just typed.
 func (server *Server) credentialsUnreadable(row map[string]any, currentUserID int) bool {
-	for _, column := range []string{"token", "username", "password_encrypted", "totp_secret"} {
+	// username is not checked: older rows keep it in plaintext and the readers
+	// fall back to that, so a failed decrypt there is normal and would light the
+	// warning up for an account that is perfectly usable.
+	for _, column := range []string{"token", "password_encrypted", "totp_secret"} {
 		stored := coerce.StringOr(row[column], "")
 		if stored == "" {
 			continue
@@ -149,25 +152,45 @@ func (server *Server) PlatformAccountsSave(responseWriter http.ResponseWriter, r
 	// The write must be reported honestly: a swallowed error leaves the user
 	// believing the credentials are stored, and the next sync fails with "no
 	// credentials" for no visible reason.
+	// A carried-over secret that will not decrypt is worthless: it cannot be
+	// used, and keeping it leaves the account flagged as unreadable however
+	// often the user re-enters their details. Dropping it also lets the next
+	// login fetch a fresh token instead of retrying a dead one.
+	//
+	// The username is exempt: older rows store it in plaintext, where a failed
+	// decrypt is expected and dropping it would throw the login e-mail away.
+	keepIfReadable := func(stored any) any {
+		encrypted := coerce.StringOr(stored, "")
+		if encrypted == "" {
+			return nil
+		}
+		if _, ok := server.Crypto.Decrypt(encrypted, currentUserID); ok {
+			return stored
+		}
+		return nil
+	}
+
 	var writeFailure error
 	if hasExisting {
 		if token == nil {
-			tokenEncrypted = existing["token"]
+			tokenEncrypted = keepIfReadable(existing["token"])
 		}
 		if username == nil {
 			userEncrypted = existing["username"]
 		}
 		if password == "***" || password == "" {
-			passwordEncrypted = existing["password_encrypted"]
+			passwordEncrypted = keepIfReadable(existing["password_encrypted"])
 		}
 		if totp == nil {
-			totpEncrypted = existing["totp_secret"]
+			totpEncrypted = keepIfReadable(existing["totp_secret"])
 		}
 		_, writeFailure = server.DB.Exec(`UPDATE platform_accounts
 			SET token = ?, username = ?, password_encrypted = ?, totp_secret = ?,
+				token_expires_at = CASE WHEN ? IS NULL THEN NULL ELSE token_expires_at END,
 				sync_likes = ?, sync_collections = ?, auto_library_sync = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?`,
-			tokenEncrypted, userEncrypted, passwordEncrypted, totpEncrypted, syncLikes, syncCollections, autoSync, existing["id"])
+			tokenEncrypted, userEncrypted, passwordEncrypted, totpEncrypted, tokenEncrypted,
+			syncLikes, syncCollections, autoSync, existing["id"])
 	} else {
 		_, writeFailure = server.DB.Exec(`INSERT INTO platform_accounts
 			(user_id, platform, token, username, password_encrypted, totp_secret, sync_likes, sync_collections, auto_library_sync, state, updated_at)
@@ -327,6 +350,11 @@ func (server *Server) PlatformAccountsValidate(responseWriter http.ResponseWrite
 	token := strings.TrimSpace(coerce.StringOr(body["token"], ""))
 	totp := strings.TrimSpace(coerce.StringOr(body["totp_secret"], ""))
 
+	// Noted before the masked fields are resolved from storage: whether the user
+	// actually typed a secret in this request decides how an unreadable stored
+	// one is handled below.
+	suppliedSecret := (password != "" && password != "***") || (token != "" && token != "***")
+
 	// Masked fields ("***") are resolved from the stored credentials below, so a
 	// failed read would silently validate with empty values and report wrong
 	// credentials to the user.
@@ -368,7 +396,15 @@ func (server *Server) PlatformAccountsValidate(responseWriter http.ResponseWrite
 	if totp == "" || totp == "***" {
 		totp = decryptSaved("totp_secret")
 	}
-	if storedUnreadable {
+	// Only give up when there is nothing to go on. If the user typed a password
+	// or a token, the unreadable leftovers are exactly what this request is
+	// about to overwrite - refusing here left them with a red account they had
+	// no way to repair, since every attempt tripped over the old value.
+	//
+	// The remaining case is a form submitted with masked fields only: nothing
+	// new was entered and nothing stored can be read, so validating would test
+	// empty values and report wrong credentials for a problem that is not that.
+	if storedUnreadable && !suppliedSecret {
 		httpx.Success(responseWriter, map[string]any{
 			"ok":    false,
 			"error": "error.platform_credentials_unreadable",

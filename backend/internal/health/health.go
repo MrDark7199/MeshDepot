@@ -24,6 +24,8 @@ const (
 	SyncWorker     = "sync_worker"
 	SchedulerForce = "scheduler.force_flag"
 	SchedulerAuto  = "scheduler.auto_sync"
+	// Collects pending notification e-mails into one message per member.
+	SchedulerMailDigest = "scheduler.mail_digest"
 )
 
 // staleFactor is how many ticks a loop may miss before it counts as dead. Two

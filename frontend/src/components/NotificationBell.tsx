@@ -1,12 +1,7 @@
 import { createEffect, onCleanup, For, Show } from 'solid-js'
 import type { NotificationsStore } from '../hooks/useNotifications'
-
-/** Formats an ISO timestamp as `DD.MM.YYYY HH:MM` in the browser's timezone. */
-function formatTimestamp(iso: string): string {
-  const date = new Date(iso)
-  const pad = (value: number) => String(value).padStart(2, '0')
-  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
+import { useI18n } from '../i18n/index'
+import { formatDateTime } from '../utils/datetime'
 
 /**
  * Bell button with unread badge and the dropdown panel listing the
@@ -17,6 +12,7 @@ export function NotificationBell(props: {
   store: NotificationsStore
   translate: (key: string, vars?: Record<string, string | number>) => string
 }) {
+  const { lang } = useI18n()
   let panelRef: HTMLDivElement | undefined
 
   createEffect(() => {
@@ -74,7 +70,7 @@ export function NotificationBell(props: {
                   <Show when={notification.body}>
                     <div style={{ 'font-family':"'DM Sans',sans-serif", 'font-size':'11px', color:'var(--muted)', 'margin-top':'2px', 'word-break':'break-word' }}>{notification.body}</div>
                   </Show>
-                  <div style={{ 'font-family':"'DM Mono',monospace", 'font-size':'10px', color:'var(--muted)', 'margin-top':'3px' }}>{formatTimestamp(notification.created_at)}</div>
+                  <div style={{ 'font-family':"'DM Mono',monospace", 'font-size':'10px', color:'var(--muted)', 'margin-top':'3px' }}>{formatDateTime(notification.created_at, lang())}</div>
                 </div>
                 <button
                   onClick={() => props.store.remove(notification)}

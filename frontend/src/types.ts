@@ -19,6 +19,8 @@ export interface User {
   avatar_url?: string | null
   /** The account's own stylesheet, applied to the document on login and reload. */
   custom_css?: string
+  /** How dates are written for this account; '' follows the display language. */
+  date_format?: string
 }
 
 export interface Tag {

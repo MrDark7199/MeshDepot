@@ -2,7 +2,7 @@ import { createSignal, createEffect, createMemo, onCleanup, Show, For, JSX } fro
 import { api } from '../services/api'
 import { useI18n } from '../i18n/index'
 import { errorKey } from '../utils/errorMessage'
-import { formatDate } from '../utils/datetime'
+import { formatDate, formatDateExample, dateFormat, setDateFormat, languageDatePattern, SELECTABLE_DATE_FORMATS } from '../utils/datetime'
 import { useTheme } from '../ThemeContext'
 import type { SyncState, User, UserShareLink } from '../types'
 import { UserAvatar } from './UserAvatar'
@@ -45,11 +45,19 @@ function fmtBytes(b: number): string {
 
 /**
  * Account settings tab - displays the user's avatar (with upload/delete),
- * username, email, and language selector.
+ * username, email, language and date notation.
  */
 function TabAccount(props: { user: User; translate: any; showToast: (message: string, variant?: string) => void; onUserUpdate: (u: User) => void }) {
   const { lang, setLang, availableLangs, translateDesigns, setTranslateDesigns } = useI18n()
-  const [form, setForm] = createSignal({ name: props.user.name || '', email: props.user.email || '', language: lang(), translateDesigns: translateDesigns() })
+  const [form, setForm] = createSignal({
+    name: props.user.name || '', email: props.user.email || '', language: lang(),
+    translateDesigns: translateDesigns(),
+    // From the module rather than props.user: it is the value actually in force,
+    // and a cached user record from an older session may not carry the field yet.
+    // An account that has never chosen one starts on whatever its language
+    // renders today, so the dropdown opens on the notation actually in use.
+    dateFormat: dateFormat() || languageDatePattern(lang()),
+  })
   const [saving, setSaving] = createSignal(false)
   const [err, setErr] = createSignal('')
   const [avatarUploading, setAvatarUploading] = createSignal(false)
@@ -92,10 +100,13 @@ function TabAccount(props: { user: User; translate: any; showToast: (message: st
       }
       // The language goes to the server too, so the account keeps it on the next
       // device instead of only in this browser's localStorage.
-      await api.updateProfile(props.user.id, { name: form().name, email, language: form().language })
+      await api.updateProfile(props.user.id, { name: form().name, email, language: form().language, date_format: form().dateFormat })
       setLang(form().language)
       setTranslateDesigns(form().translateDesigns)
-      props.onUserUpdate({ ...props.user, name: form().name, email: email || null, language: form().language })
+      // Applied immediately, not on the next load: the examples in this very
+      // dropdown would otherwise disagree with the dates on the page behind it.
+      setDateFormat(form().dateFormat)
+      props.onUserUpdate({ ...props.user, name: form().name, email: email || null, language: form().language, date_format: form().dateFormat })
       props.showToast(props.translate('toast_account_saved'))
       resetDirty()
     } catch (e: unknown) { setErr(props.translate(errorKey(e))) }
@@ -142,6 +153,17 @@ function TabAccount(props: { user: User; translate: any; showToast: (message: st
           <select style={inp} value={form().language} onChange={e => setForm(currentState => ({ ...currentState, language: e.currentTarget.value }))}>
             <For each={availableLangs}>{l => <option value={l}>{l.toUpperCase()}</option>}</For>
           </select>
+        </div>
+        <div>
+          <label style={lbl}>{props.translate('field_date_format')}</label>
+          <select style={inp} value={form().dateFormat} onChange={e => setForm(currentState => ({ ...currentState, dateFormat: e.currentTarget.value }))}>
+            <For each={SELECTABLE_DATE_FORMATS}>{pattern =>
+              // Every entry shows the same day written its own way, so the choice
+              // is made by looking at a date rather than by decoding "MM/DD/YYYY".
+              <option value={pattern}>{formatDateExample(pattern, form().language)}</option>
+            }</For>
+          </select>
+          <div style={{ ...mono, 'font-size': '11px', color: 'var(--muted)', 'margin-top': '5px' }}>{props.translate('field_date_format_hint')}</div>
         </div>
         <div>
           <div style={{ display: 'flex', 'align-items': 'center', gap: '10px', cursor: 'pointer' }}
@@ -396,9 +418,25 @@ function TabStats(props: { user: User; translate: any }) {
         {/* Storage + newest */}
         <div style={{ display: 'grid', 'grid-template-columns': '1fr 1fr', gap: '10px' }}>
           <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '12px', padding: '14px 16px' }}>
-            <div style={{ ...sans, 'font-size': '18px', 'font-weight': '700', color: 'var(--text)', 'line-height': '1' }}>{fmtBytes(stats().used_bytes)}</div>
+            <div style={{ ...sans, 'font-size': '18px', 'font-weight': '700', color: usedPct() !== null && usedPct()! >= 80 ? 'var(--danger)' : 'var(--text)', 'line-height': '1' }}>
+              {fmtBytes(stats().used_bytes)}
+              {/* The limit only appears when there is one - "/ ∞" beside every
+                  figure would be noise for an account that has none. */}
+              <Show when={stats().max_bytes > 0}>
+                <span style={{ ...sans, 'font-size': '13px', 'font-weight': '600', color: 'var(--muted)' }}> / {fmtBytes(stats().max_bytes)}</span>
+              </Show>
+            </div>
             <div style={{ ...sans, 'font-size': '13px', 'font-weight': '600', color: 'var(--text2)', 'margin-top': '6px' }}>{props.translate('stats_label_storage_used')}</div>
-            <div style={{ ...mono, 'font-size': '10px', color: 'var(--muted)', 'margin-top': '2px' }}>{props.translate('stats_sub_all_versions')}</div>
+            <Show when={stats().max_bytes > 0} fallback={
+              <div style={{ ...mono, 'font-size': '10px', color: 'var(--muted)', 'margin-top': '2px' }}>{props.translate('stats_sub_all_versions')}</div>
+            }>
+              <div style={{ height: '5px', 'border-radius': '3px', background: 'var(--border)', overflow: 'hidden', 'margin-top': '8px' }}>
+                <div style={{ height: '100%', width: `${usedPct() ?? 0}%`, background: (usedPct() ?? 0) >= 80 ? 'var(--danger)' : 'var(--accent)' }} />
+              </div>
+              <div style={{ ...mono, 'font-size': '10px', color: 'var(--muted)', 'margin-top': '4px' }}>
+                {props.translate('stats_sub_storage_free', { free: fmtBytes(freeBytes() ?? 0) })}
+              </div>
+            </Show>
           </div>
           <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '12px', padding: '14px 16px' }}>
             <div style={{ ...sans, 'font-size': '15px', 'font-weight': '700', color: 'var(--text)', 'line-height': '1.2' }}>{newestDate()}</div>
@@ -619,7 +657,7 @@ function PlatformRow(props: {
             intro above - a legend for a dot that sits right here read like an
             instruction manual. */}
         <div title={props.translate(isFullyConfigured() ? 'platform_configured_short' : 'platform_not_configured_short')}
-          style={{ width: '10px', height: '10px', 'border-radius': '50%', background: isFullyConfigured() ? '#22c55e' : 'var(--border)', 'flex-shrink': '0', cursor: 'help' }} />
+          style={{ width: '10px', height: '10px', 'border-radius': '50%', background: isFullyConfigured() ? '#22c55e' : 'var(--border)', 'flex-shrink': '0' }} />
         {/* Platform name badge */}
         <span style={{ ...mono, 'font-size': '12px', background: color + '22', color: color, 'border-radius': '5px', padding: '2px 9px', 'flex-shrink': '0' }}>
           {props.platform.charAt(0).toUpperCase() + props.platform.slice(1)}
@@ -1046,7 +1084,7 @@ function PlatformStatusRow(props: {
   return (
     <div style={{ border: '1px solid var(--border)', 'border-radius': '12px', padding: '12px 16px', display: 'flex', 'align-items': 'center', gap: '12px', background: 'var(--surface)' }}>
       <div title={t(credentialsUnreadable() ? 'platform_unreadable_short' : fullyConfigured() ? 'platform_configured_short' : 'platform_not_configured_short')}
-        style={{ width: '10px', height: '10px', 'border-radius': '50%', background: credentialsUnreadable() ? 'var(--danger)' : fullyConfigured() ? '#22c55e' : 'var(--border)', 'flex-shrink': '0', cursor: 'help' }} />
+        style={{ width: '10px', height: '10px', 'border-radius': '50%', background: credentialsUnreadable() ? 'var(--danger)' : fullyConfigured() ? '#22c55e' : 'var(--border)', 'flex-shrink': '0' }} />
       <span style={{ ...mono, 'font-size': '12px', background: color + '22', color: color, 'border-radius': '5px', padding: '2px 9px', 'flex-shrink': '0' }}>
         {props.platform.charAt(0).toUpperCase() + props.platform.slice(1)}
       </span>
@@ -1197,33 +1235,59 @@ function TabPlatforms(props: { user: User; translate: any; showToast: (message: 
 }
 
 const NOTIFICATION_PREFERENCES = [
-  { key: 'sync_update',     labelKey: 'notif_pref_sync_update',     descKey: 'notif_pref_sync_update_desc' },
-  { key: 'download_done',   labelKey: 'notif_pref_download_done',   descKey: 'notif_pref_download_done_desc' },
-  { key: 'download_failed', labelKey: 'notif_pref_download_failed', descKey: 'notif_pref_download_failed_desc' },
-  { key: 'design_shared',   labelKey: 'notif_pref_design_shared',   descKey: 'notif_pref_design_shared_desc' },
-  { key: 'storage_80',      labelKey: 'notif_pref_storage_80',      descKey: 'notif_pref_storage_80_desc' },
+  { key: 'sync_update',      labelKey: 'notif_pref_sync_update',      descKey: 'notif_pref_sync_update_desc' },
+  { key: 'download_done',    labelKey: 'notif_pref_download_done',    descKey: 'notif_pref_download_done_desc' },
+  { key: 'download_failed',  labelKey: 'notif_pref_download_failed',  descKey: 'notif_pref_download_failed_desc' },
+  { key: 'design_shared',    labelKey: 'notif_pref_design_shared',    descKey: 'notif_pref_design_shared_desc' },
+  // The member's own storage against their quota - everyone has one of these.
+  { key: 'user_storage_80',  labelKey: 'notif_pref_user_storage_80',  descKey: 'notif_pref_user_storage_80_desc' },
+  // The server as a whole. Only an administrator can do anything about it, and
+  // only an administrator is shown it.
+  { key: 'storage_80',       labelKey: 'notif_pref_storage_80',       descKey: 'notif_pref_storage_80_desc', adminOnly: true },
 ]
 
-function ToggleSwitch(props: { checked: boolean; onChange: (newValue: boolean) => void }) {
+function ToggleSwitch(props: { checked: boolean; onChange: (newValue: boolean) => void; disabled?: boolean }) {
   return (
-    <div onClick={() => props.onChange(!props.checked)}
-      style={{ width: '42px', height: '24px', 'border-radius': '12px', background: props.checked ? 'var(--accent)' : 'var(--bg4)', cursor: 'pointer', position: 'relative', transition: 'background 0.2s', 'flex-shrink': '0' }}>
+    // A disabled switch swallows the click rather than being merely faded: the
+    // e-mail column is greyed out when mail cannot be delivered, and flipping it
+    // would store a preference that can never take effect.
+    <div onClick={() => { if (!props.disabled) props.onChange(!props.checked) }}
+      style={{ width: '42px', height: '24px', 'border-radius': '12px', background: props.checked ? 'var(--accent)' : 'var(--bg4)', cursor: props.disabled ? 'not-allowed' : 'pointer', position: 'relative', transition: 'background 0.2s', 'flex-shrink': '0' }}>
       <div style={{ position: 'absolute', top: '3px', left: props.checked ? '21px' : '3px', width: '18px', height: '18px', 'border-radius': '50%', background: '#fff', transition: 'left 0.2s', 'box-shadow': '0 1px 3px rgba(0,0,0,0.3)' }} />
     </div>
   )
 }
 
 /**
- * Notification preferences tab - a list of toggles for each notification
- * category. Changes are persisted to the API immediately on toggle.
+ * Notification preferences tab - one row per notification type, with a switch
+ * per delivery channel.
+ *
+ * The two channels are independent: a type can go to the bell, to the inbox, to
+ * both, or nowhere. E-mail is only offered when it can actually be delivered -
+ * the server has to have a mail server configured and the account an address -
+ * because a switch that silently does nothing is worse than one that is not
+ * there.
  */
 function TabNotifications(props: { user: User; translate: any }) {
   const [prefs, setPrefs] = createSignal<Record<string, number | null>>({})
   const [loaded, setLoaded] = createSignal(false)
+  /** Whether the server can send mail at all; from the public settings. */
+  const [mailAvailable, setMailAvailable] = createSignal(false)
 
   api.getNotifPrefs(props.user.id)
     .then((response: any) => { setPrefs(response.data || {}); setLoaded(true) })
     .catch(() => setLoaded(true))
+  api.getPublicSettings()
+    .then((response: any) => setMailAvailable(!!response.data?.mail_enabled))
+    .catch(() => {})
+
+  const ownAddress = () => (props.user.email || '').trim()
+  /** Why e-mail cannot be chosen, or "" when it can. */
+  const mailBlockedReason = () => {
+    if (!mailAvailable()) return props.translate('notif_email_server_off')
+    if (!ownAddress()) return props.translate('notif_email_no_address')
+    return ''
+  }
 
   const savePrefs = async (updated: Record<string, number | null>) => {
     try {
@@ -1233,6 +1297,13 @@ function TabNotifications(props: { user: User; translate: any }) {
         download_failed:   updated.download_failed   ?? 1,
         design_shared:     updated.design_shared     ?? 1,
         storage_80:        updated.storage_80        ?? 1,
+        user_storage_80:   updated.user_storage_80   ?? 1,
+        sync_update_email:     updated.sync_update_email     ?? 0,
+        download_done_email:   updated.download_done_email   ?? 0,
+        download_failed_email: updated.download_failed_email ?? 0,
+        design_shared_email:   updated.design_shared_email   ?? 0,
+        storage_80_email:      updated.storage_80_email      ?? 0,
+        user_storage_80_email: updated.user_storage_80_email ?? 0,
         sync_min_age_days: updated.sync_min_age_days ?? 7,
       })
     } catch (_error) {}
@@ -1245,18 +1316,48 @@ function TabNotifications(props: { user: User; translate: any }) {
     resetDirty()
   }
 
+  const columnLabel: JSX.CSSProperties = {
+    ...sans, 'font-size': '10px', 'font-weight': '600', color: 'var(--muted)',
+    'text-transform': 'uppercase', 'letter-spacing': '0.06em', 'text-align': 'center', width: '54px',
+  }
+
   return (
     <div style={{ display: 'flex', 'flex-direction': 'column', gap: '10px' }}>
       <div style={{ ...sans, 'font-size': '12px', color: 'var(--muted)', 'line-height': '1.5', 'margin-bottom': '4px' }}>
         {props.translate('notif_tab_intro')}
       </div>
+
+      {/* Stated once above the list rather than repeated on every greyed-out
+          switch: the reason is the same for all of them. */}
+      <Show when={loaded() && mailBlockedReason()}>
+        <div style={{ ...sans, 'font-size': '12px', color: 'var(--text3)', background: 'var(--bg3)', border: '1px solid var(--border)', 'border-radius': '10px', padding: '10px 12px', 'line-height': '1.5' }}>
+          {mailBlockedReason()}
+        </div>
+      </Show>
+
       <Show when={loaded()}>
-        <For each={NOTIFICATION_PREFERENCES}>{(preference) => (
+        {/* Column headings, aligned with the switches below. */}
+        <div style={{ display: 'flex', 'align-items': 'center', gap: '14px', padding: '0 14px' }}>
+          <div style={{ flex: '1' }} />
+          <span style={columnLabel}>{props.translate('notif_channel_app')}</span>
+          <span style={columnLabel}>{props.translate('notif_channel_email')}</span>
+        </div>
+
+        <For each={NOTIFICATION_PREFERENCES.filter(preference => !preference.adminOnly || props.user.admin)}>{(preference) => (
           <div style={{ display: 'flex', 'align-items': 'center', gap: '14px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '12px', padding: '12px 14px' }}>
-            <ToggleSwitch checked={(prefs()[preference.key] ?? 1) === 1} onChange={(newValue) => toggle(preference.key, newValue)} />
             <div style={{ flex: '1' }}>
               <div style={{ ...sans, 'font-size': '13px', 'font-weight': '600', color: 'var(--text)' }}>{props.translate(preference.labelKey)}</div>
               <div style={{ ...sans, 'font-size': '11px', color: 'var(--muted)', 'margin-top': '2px' }}>{props.translate(preference.descKey)}</div>
+            </div>
+            <div style={{ width: '54px', display: 'flex', 'justify-content': 'center' }}>
+              <ToggleSwitch checked={(prefs()[preference.key] ?? 1) === 1}
+                onChange={(newValue) => toggle(preference.key, newValue)} />
+            </div>
+            <div style={{ width: '54px', display: 'flex', 'justify-content': 'center', opacity: mailBlockedReason() ? '0.4' : '1' }}
+              title={mailBlockedReason()}>
+              <ToggleSwitch checked={(prefs()[preference.key + '_email'] ?? 0) === 1}
+                disabled={!!mailBlockedReason()}
+                onChange={(newValue) => toggle(preference.key + '_email', newValue)} />
             </div>
           </div>
         )}</For>

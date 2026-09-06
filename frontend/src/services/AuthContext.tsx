@@ -2,6 +2,7 @@ import { createContext, useContext, createSignal, JSX } from 'solid-js'
 import { api } from './api'
 import { useI18n } from '../i18n/index'
 import { applyCustomCss } from '../utils/customCss'
+import { setDateFormat } from '../utils/datetime'
 import type { User } from '../types'
 
 interface AuthCtx {
@@ -49,6 +50,7 @@ export function AuthProvider(props: { children: JSX.Element }) {
     setUser(next)
     applyLanguage(next)
     applyCustomCss(next.custom_css || '')
+    setDateFormat(next.date_format)
     const storage = localStorage.getItem('meshdepot_user') ? localStorage
       : sessionStorage.getItem('meshdepot_user') ? sessionStorage : null
     storage?.setItem('meshdepot_user', JSON.stringify(next))
@@ -63,6 +65,7 @@ export function AuthProvider(props: { children: JSX.Element }) {
       // From the cache first so the styling is there before /auth/me answers;
       // the revalidation below replaces it with the stored one.
       applyCustomCss(cached.custom_css || '')
+      setDateFormat(cached.date_format)
     } catch {}
   }
   setLoading(false)
@@ -85,6 +88,7 @@ export function AuthProvider(props: { children: JSX.Element }) {
     setUser(res.data)
     applyLanguage(res.data)
     applyCustomCss(res.data.custom_css || '')
+    setDateFormat(res.data.date_format)
     const storage = remember ? localStorage : sessionStorage
     storage.setItem('meshdepot_user', JSON.stringify(res.data))
     return {}
@@ -95,6 +99,7 @@ export function AuthProvider(props: { children: JSX.Element }) {
     setUser(res.data)
     applyLanguage(res.data)
     applyCustomCss(res.data.custom_css || '')
+    setDateFormat(res.data.date_format)
     const storage = remember ? localStorage : sessionStorage
     storage.setItem('meshdepot_user', JSON.stringify(res.data))
   }
@@ -102,8 +107,9 @@ export function AuthProvider(props: { children: JSX.Element }) {
   const logout = async () => {
     try { await api.logout() } catch {}
     setUser(null)
-    // The next account gets its own look, or none.
+    // The next account gets its own look and its own notation, or neither.
     applyCustomCss('')
+    setDateFormat('')
     localStorage.removeItem('meshdepot_user')
     sessionStorage.removeItem('meshdepot_user')
   }

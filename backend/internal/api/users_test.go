@@ -643,3 +643,59 @@ func TestUsersStatsAreZeroForAnEmptyLibrary(t *testing.T) {
 		t.Fatalf("newest_design_at is %v", stats["newest_design_at"])
 	}
 }
+
+// The notation belongs to the account for the same reason the language does: it
+// has to hold on the next device, and it has to travel with the session so the
+// browser writes every date the same way from the first paint.
+func TestUsersUpdateProfileStoresTheDateFormat(t *testing.T) {
+	testHarness := newHarness(t)
+	path := fmt.Sprintf("/api/v1/users/%s/profile", testHarness.publicID(testHarness.userID))
+
+	// No notation to begin with: dates follow the display language, which is what
+	// every account did before the setting existed.
+	if stored := testHarness.scalar("SELECT date_format FROM users WHERE id = ?", testHarness.userID); stored != "" {
+		t.Fatalf("a fresh account starts with %q", stored)
+	}
+
+	answer := testHarness.asUser(http.MethodPut, path, map[string]any{"date_format": "YYYY-MM-DD"})
+
+	if answer.status != http.StatusOK {
+		t.Fatalf("the update answered %d: %s", answer.status, answer.rawBody)
+	}
+	if answer.data(t)["date_format"] != "YYYY-MM-DD" {
+		t.Fatalf("the answer carries %v", answer.data(t)["date_format"])
+	}
+	if stored := testHarness.scalar("SELECT date_format FROM users WHERE id = ?", testHarness.userID); stored != "YYYY-MM-DD" {
+		t.Fatalf("the stored notation is %q", stored)
+	}
+
+	me := testHarness.asUser(http.MethodGet, "/api/v1/auth/me", nil).data(t)
+	if me["date_format"] != "YYYY-MM-DD" {
+		t.Fatalf("/auth/me carries %v", me["date_format"])
+	}
+
+	// Back to the default is a value, not a missing field.
+	testHarness.asUser(http.MethodPut, path, map[string]any{"date_format": ""})
+	if stored := testHarness.scalar("SELECT date_format FROM users WHERE id = ?", testHarness.userID); stored != "" {
+		t.Fatalf("the cleared notation is still %q", stored)
+	}
+}
+
+// An unknown pattern must not reach the column: the browser hands it straight to
+// the formatter, which would then write every date as the pattern itself.
+func TestUsersUpdateProfileRefusesAnUnknownDateFormat(t *testing.T) {
+	testHarness := newHarness(t)
+	path := fmt.Sprintf("/api/v1/users/%s/profile", testHarness.publicID(testHarness.userID))
+
+	answer := testHarness.asUser(http.MethodPut, path, map[string]any{"date_format": "DD-MM-YY"})
+
+	if answer.status != http.StatusUnprocessableEntity {
+		t.Fatalf("an unknown notation answered %d", answer.status)
+	}
+	if key := answer.errorKey(t); key != "error.invalid_date_format" {
+		t.Fatalf("unexpected error key %q", key)
+	}
+	if stored := testHarness.scalar("SELECT date_format FROM users WHERE id = ?", testHarness.userID); stored != "" {
+		t.Fatal("the refused notation was stored anyway")
+	}
+}

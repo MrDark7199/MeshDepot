@@ -864,7 +864,14 @@ func TestPublicSettingsAreOpenToOrdinaryUsers(t *testing.T) {
 	if coerce.Int(settings["design_update_min_days"]) != scheduler.DesignUpdateMinDays {
 		t.Fatalf("the update interval is %v", settings["design_update_min_days"])
 	}
-	if len(settings) != 4 {
+	// Whether notification mail can be sent - the account page greys its e-mail
+	// column out when it cannot. Only the fact travels, never the configuration.
+	if settings["mail_enabled"] != false {
+		t.Fatalf("mail is reported as %v on a server that has none configured", settings["mail_enabled"])
+	}
+	// Counted on purpose: this endpoint is open to every logged-in user, so a
+	// setting added to app_settings must not appear here unnoticed.
+	if len(settings) != 5 {
 		t.Fatalf("the public settings carry %v", settings)
 	}
 }

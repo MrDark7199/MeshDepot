@@ -642,6 +642,66 @@ func TestPlatformAccountsIndexReportsReadableCredentialsAsReadable(t *testing.T)
 
 // Validating with a masked password whose stored value cannot be decrypted used
 // to check the platform with an empty password, so the user was told their
+// Re-entering credentials has to clear the warning, or the account stays marked
+// broken for good: the old token is only replaced by a later login, so carrying
+// an unreadable one over kept the flag up no matter what the user did.
+func TestPlatformAccountsSaveDropsSecretsThatCannotBeRead(t *testing.T) {
+	testHarness := newHarness(t)
+	testHarness.saveAccount(map[string]any{
+		"platform": "thingiverse", "token": "geheimes-token", "username": "sammler", "password": "geheim",
+	})
+	if _, failure := testHarness.database.Exec(
+		`UPDATE platform_accounts SET password_encrypted = ?, token = ?, totp_secret = ? WHERE user_id = ?`,
+		"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=",
+		"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", testHarness.userID); failure != nil {
+		t.Fatalf("break the stored secrets: %v", failure)
+	}
+
+	// The user enters their password again; no token is supplied.
+	testHarness.saveAccount(map[string]any{
+		"platform": "thingiverse", "username": "sammler", "password": "das-neue-passwort",
+	})
+
+	accounts := testHarness.asUser(http.MethodGet, platformAccountsPath(testHarness.publicID(testHarness.userID)), nil).list(t)
+	if len(accounts) != 1 {
+		t.Fatalf("%d accounts were listed", len(accounts))
+	}
+	if account := accounts[0].(map[string]any); account["credentials_unreadable"] != false {
+		t.Fatalf("the warning must be gone after re-entering, got %v", account)
+	}
+}
+
+// A lost APP_KEY makes EVERY stored secret unreadable, not just one. Replacing
+// them then has to work, or the account can never be repaired: the old token is
+// unreadable too, and refusing over it blocks the very entry meant to fix it.
+func TestPlatformAccountsValidateAcceptsAFreshSecretWhenNothingStoredCanBeRead(t *testing.T) {
+	testHarness := newHarness(t)
+	testHarness.saveAccount(map[string]any{
+		"platform": "thingiverse", "token": "geheimes-token", "username": "sammler", "password": "geheim",
+	})
+	// Every encrypted column, the way a changed key would leave them.
+	if _, failure := testHarness.database.Exec(
+		`UPDATE platform_accounts SET password_encrypted = ?, token = ?, totp_secret = ? WHERE user_id = ?`,
+		"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=",
+		"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", testHarness.userID); failure != nil {
+		t.Fatalf("break the stored secrets: %v", failure)
+	}
+	validator := &stubValidator{}
+	validator.valid = true
+	testHarness.server.Registry = platforms.Registry{"thingiverse": validator}
+
+	answer := testHarness.asUser(http.MethodPost, platformAccountsPath(testHarness.publicID(testHarness.userID))+"/validate",
+		map[string]any{"platform": "thingiverse", "username": "sammler", "password": "das-neue-passwort"})
+
+	data := answer.data(t)
+	if data["ok"] != true {
+		t.Fatalf("a freshly entered password must be verified, the answer is %v", data)
+	}
+	if validator.seen.Password != "das-neue-passwort" {
+		t.Fatalf("the downloader saw %+v", validator.seen)
+	}
+}
+
 // credentials were wrong. It must name the real problem instead.
 func TestPlatformAccountsValidateReportsUnreadableCredentials(t *testing.T) {
 	testHarness := newHarness(t)

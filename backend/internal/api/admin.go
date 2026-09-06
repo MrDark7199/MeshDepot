@@ -20,6 +20,7 @@ import (
 	"meshdepot/internal/platforms/tor"
 	"meshdepot/internal/publicid"
 	"meshdepot/internal/queuestate"
+	"meshdepot/internal/quota"
 	"meshdepot/internal/scheduler"
 	"meshdepot/internal/translate"
 )
@@ -161,6 +162,19 @@ func (server *Server) AdminUpdate(responseWriter http.ResponseWriter, request *h
 		assignments = append(assignments, "must_change_password = ?")
 		args = append(args, coerce.Int(value))
 	}
+	if value, ok := body["storage_quota_bytes"]; ok {
+		// Anything at or below zero, and an explicit null, mean unlimited - the
+		// column is NULL then, so "no limit" has one representation rather than
+		// competing with a stored 0 that would read as "nothing allowed".
+		assignments = append(assignments, "storage_quota_bytes = ?")
+		if value == nil {
+			args = append(args, nil)
+		} else if bytes := int64(coerce.Int(value)); bytes > 0 {
+			args = append(args, bytes)
+		} else {
+			args = append(args, nil)
+		}
+	}
 	if value, ok := body["state"]; ok {
 		if coerce.StringOr(value, "") == "inactive" && !server.guardLastAdmin(responseWriter, id) {
 			return
@@ -234,11 +248,20 @@ func (server *Server) AdminResetPassword(responseWriter http.ResponseWriter, req
 func (server *Server) AdminDetail(responseWriter http.ResponseWriter, request *http.Request) {
 	// No resolution needed: the row is looked up by the same id the path carries.
 	row, ok := server.fetchRow(responseWriter,
-		"SELECT public_id AS id, name, email, admin, state, must_change_password, created_at, updated_at FROM users WHERE public_id = ? LIMIT 1",
+		`SELECT id AS numeric_id, public_id AS id, name, email, admin, state, must_change_password,
+			storage_quota_bytes, created_at, updated_at
+		 FROM users WHERE public_id = ? LIMIT 1`,
 		request.PathValue("id"))
 	if !ok {
 		return
 	}
+	// What the account currently occupies, so the form can show the limit against
+	// what is actually in use rather than as a number without a scale.
+	if numericID := coerce.Int(row["numeric_id"]); numericID > 0 {
+		row["used_bytes"] = quota.Of(server.DB, numericID).UsedBytes
+	}
+	// The sequential id never leaves the process; it was only read to measure.
+	delete(row, "numeric_id")
 	httpx.Success(responseWriter, row)
 }
 
@@ -252,7 +275,9 @@ func (server *Server) AdminStats(responseWriter http.ResponseWriter, request *ht
 	platformCounts, _ := dbutil.QueryMaps(server.DB, `SELECT source_platform AS platform, COUNT(*) AS cnt FROM designs
 		WHERE source_platform IS NOT NULL AND source_platform != '' GROUP BY source_platform ORDER BY cnt DESC`)
 	perUser, _ := dbutil.QueryMaps(server.DB, `
-		SELECT u.public_id AS id, u.name, COUNT(DISTINCT d.id) AS design_count, COALESCE(SUM(df.size_bytes),0) AS used_bytes
+		SELECT u.public_id AS id, u.name, COUNT(DISTINCT d.id) AS design_count,
+			COALESCE(SUM(df.size_bytes),0) AS used_bytes,
+			u.storage_quota_bytes
 		FROM users u LEFT JOIN designs d ON d.user_id = u.id LEFT JOIN design_files df ON df.design_id = d.id
 		WHERE u.state = 'active' GROUP BY u.id ORDER BY used_bytes DESC`)
 	var newest any
@@ -270,6 +295,11 @@ func (server *Server) AdminStats(responseWriter http.ResponseWriter, request *ht
 		"synced_count":     countScalar("SELECT COUNT(*) FROM designs WHERE source_url IS NOT NULL AND source_url != ''"),
 		"platforms":        platformCounts, "per_user": perUser, "newest_design_at": newest,
 		"disk_free": free, "disk_total": total,
+		// Notification e-mail, counted per notification rather than per message:
+		// pending ones are bundled into one e-mail per member.
+		"mail_queued":        countScalar("SELECT COUNT(*) FROM notification_mail_queue WHERE sent_at IS NULL"),
+		"mail_sent":          countScalar("SELECT COUNT(*) FROM notification_mail_queue WHERE sent_at IS NOT NULL"),
+		"notification_count": countScalar("SELECT COUNT(*) FROM notifications"),
 	})
 }
 
@@ -478,8 +508,14 @@ func (server *Server) GetSettings(responseWriter http.ResponseWriter, request *h
 // hour that is displayed, and whether the library sync is switched on
 // server-side at all (the account page hides its sync controls when it is not).
 func (server *Server) GetPublicSettings(responseWriter http.ResponseWriter, request *http.Request) {
-	httpx.Success(responseWriter, server.loadSettings(
-		"SELECT key, value FROM app_settings WHERE key IN ('library_sync_hour', 'library_sync_enabled', 'design_update_enabled', 'design_update_min_days')"))
+	settings := server.loadSettings(
+		"SELECT key, value FROM app_settings WHERE key IN ('library_sync_hour', 'library_sync_enabled', 'design_update_enabled', 'design_update_min_days')")
+	// Whether notification mail can be sent at all. The account page greys its
+	// e-mail column out when it cannot, rather than offering a switch that would
+	// silently do nothing. Only the fact is exposed, never the configuration.
+	_, mailReady := server.mailConfig()
+	settings["mail_enabled"] = mailReady
+	httpx.Success(responseWriter, settings)
 }
 
 // SaveSettings stores the whitelisted settings (upsert, int clamp).

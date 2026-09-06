@@ -109,9 +109,16 @@ func (server *Server) NotificationsGetPrefs(responseWriter http.ResponseWriter, 
 		return
 	}
 	if !found {
+		// The in-app switches default on, the e-mail ones off: an account that
+		// never touched this page should get the bell it always had and no mail
+		// it did not ask for.
 		prefs = map[string]any{
 			"user_id": currentUserID, "sync_update": 1, "download_failed": 1,
-			"download_done": 1, "design_shared": 1, "storage_80": 1, "sync_min_age_days": 7,
+			"download_done": 1, "design_shared": 1, "storage_80": 1, "user_storage_80": 1,
+			"sync_min_age_days": 7,
+			"sync_update_email": 0, "download_failed_email": 0,
+			"download_done_email": 0, "design_shared_email": 0, "storage_80_email": 0,
+			"user_storage_80_email": 0,
 		}
 	}
 	httpx.Success(responseWriter, prefs)
@@ -150,25 +157,50 @@ func (server *Server) NotificationsSavePrefs(responseWriter http.ResponseWriter,
 	downloadDone := intFlag(body, "download_done", 1)
 	designShared := intFlag(body, "design_shared", 1)
 	storage80 := intFlag(body, "storage_80", 1)
+	userStorage80 := intFlag(body, "user_storage_80", 1)
+	// The e-mail half of each type. Independent of the switches above: a type
+	// can go to the bell, to the inbox, to both, or nowhere. Default 0, so a
+	// client that does not send these does not silently enable mail.
+	syncUpdateMail := intFlag(body, "sync_update_email", 0)
+	downloadFailedMail := intFlag(body, "download_failed_email", 0)
+	downloadDoneMail := intFlag(body, "download_done_email", 0)
+	designSharedMail := intFlag(body, "design_shared_email", 0)
+	storage80Mail := intFlag(body, "storage_80_email", 0)
+	userStorage80Mail := intFlag(body, "user_storage_80_email", 0)
 
 	_, failure := server.DB.Exec(`
-		INSERT INTO notification_prefs (user_id, sync_update, download_failed, download_done, design_shared, storage_80, sync_min_age_days)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO notification_prefs (user_id, sync_update, download_failed, download_done, design_shared, storage_80, user_storage_80,
+			sync_update_email, download_failed_email, download_done_email, design_shared_email, storage_80_email, user_storage_80_email,
+			sync_min_age_days)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id) DO UPDATE SET
 			sync_update = excluded.sync_update,
 			download_failed = excluded.download_failed,
 			download_done = excluded.download_done,
 			design_shared = excluded.design_shared,
 			storage_80 = excluded.storage_80,
+			user_storage_80 = excluded.user_storage_80,
+			sync_update_email = excluded.sync_update_email,
+			download_failed_email = excluded.download_failed_email,
+			download_done_email = excluded.download_done_email,
+			design_shared_email = excluded.design_shared_email,
+			storage_80_email = excluded.storage_80_email,
+			user_storage_80_email = excluded.user_storage_80_email,
 			sync_min_age_days = excluded.sync_min_age_days`,
-		currentUserID, syncUpdate, downloadFailed, downloadDone, designShared, storage80, syncDays)
+		currentUserID, syncUpdate, downloadFailed, downloadDone, designShared, storage80, userStorage80,
+		syncUpdateMail, downloadFailedMail, downloadDoneMail, designSharedMail, storage80Mail, userStorage80Mail,
+		syncDays)
 	if failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 		return
 	}
 	httpx.Success(responseWriter, map[string]any{
 		"sync_update": syncUpdate, "download_failed": downloadFailed, "download_done": downloadDone,
-		"design_shared": designShared, "storage_80": storage80, "sync_min_age_days": syncDays,
+		"design_shared": designShared, "storage_80": storage80, "user_storage_80": userStorage80,
+		"sync_update_email": syncUpdateMail, "download_failed_email": downloadFailedMail,
+		"download_done_email": downloadDoneMail, "design_shared_email": designSharedMail,
+		"storage_80_email":  storage80Mail,
+		"sync_min_age_days": syncDays,
 	})
 }
 

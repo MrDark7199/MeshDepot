@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -22,9 +23,11 @@ import (
 	"meshdepot/internal/db"
 	"meshdepot/internal/health"
 	"meshdepot/internal/httpx"
+	"meshdepot/internal/maildigest"
 	"meshdepot/internal/notify"
 	"meshdepot/internal/platforms"
 	"meshdepot/internal/platforms/tor"
+	"meshdepot/internal/quota"
 	"meshdepot/internal/safego"
 	"meshdepot/internal/scheduler"
 	"meshdepot/internal/storage"
@@ -118,6 +121,11 @@ func main() {
 
 	// Scheduler: forced library sync (flag) + auto-sync enqueue.
 	backgroundScheduler := scheduler.New(database, func() { platforms.RunLibrarySync(platformDeps) })
+	// Notification e-mails go out in batches rather than one per event: forty
+	// queued downloads would otherwise be forty messages. The SMTP password is
+	// stored encrypted, so the sender needs the crypto helper to read it.
+	backgroundScheduler.SendMailDigest = func() { maildigest.Send(database, cryptoHelper) }
+	backgroundScheduler.MailDigestInterval = maildigest.Interval
 	backgroundScheduler.Heartbeat = heartbeats
 	backgroundScheduler.Start(stop)
 	log.Printf("[worker] download/sync workers + scheduler started")
@@ -207,6 +215,14 @@ func downloadProcess(database *sql.DB, configuration config.Config, registry pla
 		if downloader == nil {
 			return 0, errors.New("error.unsupported_url")
 		}
+		// Checked before the download, not after: a job that cannot be kept should
+		// not spend minutes fetching gigabytes first. The message is in the
+		// permanent list, so the queue reports it once instead of retrying against
+		// a limit that will not move on its own.
+		if usage := quota.Of(database, job.UserID); usage.Exceeded() {
+			return 0, errors.New("error.storage_quota_exceeded:Your storage limit is reached. " +
+				"Delete designs or versions you no longer need, or ask an administrator for more space.")
+		}
 		owner := platforms.Owner{ID: job.UserID, Layout: storage.New(configuration.BasePathData).User(job.UserPublicID)}
 		result, failure := downloader.Download(job.SourceURL, owner, func(string, string, int, int) {})
 		if failure != nil {
@@ -226,8 +242,38 @@ func downloadProcess(database *sql.DB, configuration config.Config, registry pla
 			description = &result.Description
 		}
 		translate.New(database).ApplyToDesign(designID, result.Name, description, true)
+		// Raised after the design is stored, so the figure the member is told
+		// about is the one they can go and look at.
+		warnIfStorageNearlyFull(database, job.UserID)
 		return designID, nil
 	}
+}
+
+// warnIfStorageNearlyFull tells a member once their own storage crosses the
+// warning threshold.
+//
+// Only on the crossing: the check runs after every download, and a notification
+// on each one past 80% would turn the bell into a counter of downloads rather
+// than a warning. The previous state is derived from the size just added, which
+// is what makes "was below before" answerable without keeping a flag.
+func warnIfStorageNearlyFull(database *sql.DB, userID int) {
+	usage := quota.Of(database, userID)
+	if !usage.NearlyFull() {
+		return
+	}
+	var lastAdded int64
+	database.QueryRow(`
+		SELECT COALESCE(df.size_bytes, 0)
+		FROM design_files df JOIN designs d ON d.id = df.design_id
+		WHERE d.user_id = ? ORDER BY df.id DESC LIMIT 1`, userID).Scan(&lastAdded)
+	before := quota.Usage{UsedBytes: usage.UsedBytes - lastAdded, LimitBytes: usage.LimitBytes}
+	if before.NearlyFull() {
+		return
+	}
+	notify.User(database, userID, "user_storage_80",
+		"Your storage is nearly full",
+		fmt.Sprintf("%d%% of your storage quota is in use. Delete designs or versions you no longer need, or ask an administrator for more space.", usage.Percent()),
+		nil)
 }
 
 // syncProcess builds the Process function of the sync worker: reload the design

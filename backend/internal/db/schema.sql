@@ -13,6 +13,10 @@ CREATE TABLE IF NOT EXISTS users (
     -- existing table has to have its rows backfilled first.
     public_id            TEXT    NOT NULL DEFAULT '',
     email                TEXT    DEFAULT NULL,
+    -- Storage the account may use, in bytes. NULL = unlimited, the default.
+    storage_quota_bytes  INTEGER DEFAULT NULL,
+    -- Date notation for this account; '' follows the display language.
+    date_format          TEXT    NOT NULL DEFAULT '',
     hash                 TEXT    NOT NULL,
     name                 TEXT    NOT NULL DEFAULT '',
     state                TEXT    NOT NULL DEFAULT 'active' CHECK (state IN ('active','inactive')),
@@ -297,7 +301,20 @@ CREATE TABLE IF NOT EXISTS notification_prefs (
     download_failed   INTEGER NOT NULL DEFAULT 1,
     download_done     INTEGER NOT NULL DEFAULT 1,
     design_shared     INTEGER NOT NULL DEFAULT 1,
+    -- The server's total storage; only meaningful to an administrator, and only
+    -- offered to one.
     storage_80        INTEGER NOT NULL DEFAULT 1,
+    -- The member's own storage against their quota. Everyone sees this one.
+    user_storage_80   INTEGER NOT NULL DEFAULT 1,
+    -- Each type has a second switch for e-mail. The columns above stay the
+    -- in-app entry, so a type can go to the bell, to the inbox, to both or
+    -- nowhere. Default 0: nobody is mailed until they ask to be.
+    sync_update_email     INTEGER NOT NULL DEFAULT 0,
+    download_failed_email INTEGER NOT NULL DEFAULT 0,
+    download_done_email   INTEGER NOT NULL DEFAULT 0,
+    design_shared_email   INTEGER NOT NULL DEFAULT 0,
+    storage_80_email      INTEGER NOT NULL DEFAULT 0,
+    user_storage_80_email INTEGER NOT NULL DEFAULT 0,
     sync_min_age_days INTEGER DEFAULT 7,
     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );

@@ -6,6 +6,25 @@ import (
 	"testing"
 )
 
+// "Decor" and "decor" are one tag, not two: the UNIQUE index compares them
+// case-sensitively, so without an explicit check both would exist and a filter
+// on one would miss everything filed under the other.
+func TestTagsCreateRejectsAnExistingNameInAnotherCasing(t *testing.T) {
+	testHarness := newHarness(t)
+	testHarness.database.Exec("INSERT INTO tags (user_id, name, color, source) VALUES (?, 'decor', '#457b9d', 'manual')", testHarness.userID)
+
+	answer := testHarness.asUser(http.MethodPost, "/api/v1/tags", map[string]any{"name": "Decor"})
+
+	if key := answer.errorKey(t); key != "error.tag_exists" {
+		t.Fatalf("unexpected error key %q", key)
+	}
+	var count int
+	testHarness.database.QueryRow("SELECT COUNT(*) FROM tags WHERE user_id = ?", testHarness.userID).Scan(&count)
+	if count != 1 {
+		t.Fatalf("a second tag was created, %d exist", count)
+	}
+}
+
 func TestTagsIndexOnlyReturnsOwnTags(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.database.Exec("INSERT INTO tags (user_id, name, color, source) VALUES (?, 'mine', '#457b9d', 'manual')", testHarness.userID)

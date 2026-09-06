@@ -42,10 +42,6 @@ func (server *Server) platformCredsOK(platform string, currentUserID int) (bool,
 		if !hasToken {
 			return false, "error.platform_credentials_required:thingiverse"
 		}
-	case "makerworld":
-		if !hasToken || !hasUser {
-			return false, "error.platform_credentials_required:makerworld"
-		}
 	case "myminifactory":
 		if !hasToken {
 			return false, "error.platform_credentials_required:myminifactory"
@@ -55,6 +51,17 @@ func (server *Server) platformCredsOK(platform string, currentUserID int) (bool,
 		// only for the sync. So the email (username) is enough here.
 		if !hasUser {
 			return false, "error.platform_credentials_required:cults3d"
+		}
+	case "makerworld":
+		// The e-mail is what matters: MakerWorld's token is short-lived and is
+		// re-fetched with the login (see refreshToken), so a token on its own
+		// cannot keep downloads working.
+		//
+		// It must NOT also demand a token, though. That token only exists after
+		// the first successful login, so freshly entered - and perfectly valid -
+		// credentials were rejected as missing.
+		if !hasUser {
+			return false, "error.platform_credentials_required:makerworld"
 		}
 	case "printables", "thangs":
 		// Both log in with email + password and hand the token they get back to

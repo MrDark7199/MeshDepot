@@ -101,7 +101,44 @@ func migrate(database *sql.DB) {
 		// Collections the user pushed out of sight; see the column comment in
 		// schema.sql.
 		"ALTER TABLE collections ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0",
+		// Notifications can now go out by e-mail as well as into the bell. The
+		// existing columns keep their meaning - the in-app entry - and these say
+		// whether a mail is sent too. Default 0: an upgrade must not start mailing
+		// people who never asked for it.
+		"ALTER TABLE notification_prefs ADD COLUMN sync_update_email INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE notification_prefs ADD COLUMN download_failed_email INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE notification_prefs ADD COLUMN download_done_email INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE notification_prefs ADD COLUMN design_shared_email INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE notification_prefs ADD COLUMN storage_80_email INTEGER NOT NULL DEFAULT 0",
+		// Per-account storage limit in bytes. NULL means unlimited, which is what
+		// every existing account gets - a limit nobody set must not start
+		// refusing downloads on the next boot.
+		"ALTER TABLE users ADD COLUMN storage_quota_bytes INTEGER DEFAULT NULL",
+		// How dates are written for this account. Empty means "follow the display
+		// language", which is what everyone had until now.
+		"ALTER TABLE users ADD COLUMN date_format TEXT NOT NULL DEFAULT ''",
+		// "your own storage is nearly full", as opposed to storage_80, which is
+		// about the server as a whole and only concerns admins.
+		"ALTER TABLE notification_prefs ADD COLUMN user_storage_80 INTEGER NOT NULL DEFAULT 1",
+		"ALTER TABLE notification_prefs ADD COLUMN user_storage_80_email INTEGER NOT NULL DEFAULT 0",
 	}
+	// Pending notification e-mails. Its own table rather than a column on
+	// notifications: a member can have the e-mail switched on and the bell off,
+	// and then there is no notifications row to hang the state on.
+	database.Exec(`CREATE TABLE IF NOT EXISTS notification_mail_queue (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id    INTEGER NOT NULL,
+		type       TEXT    NOT NULL,
+		title      TEXT    NOT NULL,
+		body       TEXT,
+		-- What the entry is about, so the digest can check at send time whether
+		-- it still holds: the source URL for a download, empty otherwise.
+		reference  TEXT    DEFAULT NULL,
+		created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		sent_at    TEXT    DEFAULT NULL,
+		FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+	)`)
+	database.Exec("CREATE INDEX IF NOT EXISTS idx_notif_mail_pending ON notification_mail_queue (user_id, sent_at)")
 	for _, statement := range alterStatements {
 		database.Exec(statement) // Error (column already exists) intentionally ignored.
 	}

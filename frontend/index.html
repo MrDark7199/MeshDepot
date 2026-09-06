@@ -46,7 +46,14 @@
         -webkit-font-smoothing: antialiased;
       }
 
-      /* ── Scrollbar ── */
+      /* ── Scrollbar ──
+         The ::-webkit- rules are Chromium-only; Firefox ignores them and falls
+         back to the system theme, which on a light GTK theme draws a pale strip
+         down the right edge of a dark page - visible even with nothing to
+         scroll. The two standard properties below cover Firefox, with a
+         transparent track so only the thumb shows, and only when there is
+         something to scroll. */
+      html { scrollbar-width: thin; scrollbar-color: var(--scrollbar) transparent; }
       ::-webkit-scrollbar       { width: 8px; height: 8px; }
       ::-webkit-scrollbar-track { background: var(--bg2); }
       ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 5px; }

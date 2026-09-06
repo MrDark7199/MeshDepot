@@ -153,11 +153,15 @@ function TabStats() {
           <div style={{ display: 'flex', 'flex-direction': 'column', gap: '20px' }}>
 
             {/* Summary row */}
-            <div style={{ display: 'grid', 'grid-template-columns': 'repeat(4, 1fr)', gap: '10px' }}>
+            <div style={{ display: 'grid', 'grid-template-columns': 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px' }}>
               <StatBox label={translate('admin_stat_users')} value={data().user_count ?? 0} sub={translate('admin_stat_active').replace('{count}', String(data().active_users ?? 0))} />
               <StatBox label={translate('admin_stat_designs')} value={data().design_count ?? 0} sub={translate('admin_stat_synced').replace('{count}', String(data().synced_count ?? 0))} />
               <StatBox label={translate('admin_stat_files')} value={data().file_count ?? 0} />
               <StatBox label={translate('admin_stat_storage')} value={fmtBytes(data().total_bytes ?? 0)} sub={translate('admin_stat_tags_collections').replace('{tags}', String(data().tag_count ?? 0)).replace('{collections}', String(data().collection_count ?? 0))} />
+              {/* Notifications and their e-mail queue. Counted per notification,
+                  not per message - pending ones are bundled into one e-mail. */}
+              <StatBox label={translate('admin_stat_notifications')} value={data().notification_count ?? 0}
+                sub={translate('admin_stat_mail_sub', { queued: String(data().mail_queued ?? 0), sent: String(data().mail_sent ?? 0) })} />
             </div>
 
             {/* Disk space */}
@@ -202,15 +206,25 @@ function TabStats() {
                 <div style={{ 'max-height': '220px', 'overflow-y': 'auto', display: 'flex', 'flex-direction': 'column', gap: '8px', 'padding-right': '4px' }}>
                   <For each={data().per_user}>{(u: any) => {
                     const bytes = parseInt(u.used_bytes || '0')
-                    const pct = Math.round((bytes / maxUserBytes()) * 100)
+                    const limit = parseInt(u.storage_quota_bytes || '0')
+                    // Without a limit the bar compares members with each other, as
+                    // before. With one it shows how full that member is, which is
+                    // the more useful reading and the one a limit invites.
+                    const pct = limit > 0
+                      ? Math.min(100, Math.round((bytes / limit) * 100))
+                      : Math.round((bytes / maxUserBytes()) * 100)
+                    const tight = limit > 0 && bytes >= limit * 0.8
                     return (
                       <div style={{ display: 'flex', 'align-items': 'center', gap: '10px' }}>
                         <LetterAvatar name={u.name} size={24} fontSize={10} />
                         <span style={{ ...sans, 'font-size': '12px', color: 'var(--text2)', 'min-width': '100px', overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap' }}>{u.name}</span>
                         <div style={{ flex: '1', height: '6px', 'border-radius': '3px', background: 'var(--border)', overflow: 'hidden' }}>
-                          <div style={{ height: '100%', width: `${pct}%`, background: 'var(--accent)', 'border-radius': '3px' }} />
+                          <div style={{ height: '100%', width: `${pct}%`, background: tight ? 'var(--danger)' : 'var(--accent)', 'border-radius': '3px' }} />
                         </div>
-                        <span style={{ ...mono, 'font-size': '11px', color: 'var(--muted)', width: '55px', 'text-align': 'right', 'flex-shrink': '0' }}>{fmtBytes(bytes)}</span>
+                        <span title={limit > 0 ? '' : translate('admin_user_quota_unlimited')}
+                          style={{ ...mono, 'font-size': '11px', color: tight ? 'var(--danger)' : 'var(--muted)', width: '110px', 'text-align': 'right', 'flex-shrink': '0' }}>
+                          {fmtBytes(bytes)} / {limit > 0 ? fmtBytes(limit) : '\u221e'}
+                        </span>
                         <span style={{ ...mono, 'font-size': '11px', color: 'var(--muted)', width: '60px', 'text-align': 'right', 'flex-shrink': '0' }}>{translate('admin_user_designs').replace('{count}', String(u.design_count ?? 0))}</span>
                       </div>
                     )
@@ -334,7 +348,16 @@ function UserDetail(props: { userId: string; adminCount: number; onBack: () => v
   const load = () => {
     api.adminUserDetail(props.userId).then((r: any) => {
       setData(r.data)
-      setEditForm({ name: r.data.user?.name || r.data.name, email: r.data.user?.email || r.data.email, admin: !!(r.data.user?.admin ?? r.data.admin), must_change_password: !!(r.data.user?.must_change_password ?? r.data.must_change_password) })
+      const quotaBytes = r.data.user?.storage_quota_bytes ?? r.data.storage_quota_bytes
+      setEditForm({
+        name: r.data.user?.name || r.data.name,
+        email: r.data.user?.email || r.data.email,
+        admin: !!(r.data.user?.admin ?? r.data.admin),
+        must_change_password: !!(r.data.user?.must_change_password ?? r.data.must_change_password),
+        // Shown in MB, stored in bytes. Empty means no limit, which is also what
+        // the column holds - so an untouched field cannot invent one.
+        storage_quota_mb: quotaBytes ? String(Math.round(quotaBytes / 1048576)) : '',
+      })
     }).catch(() => {}).finally(() => setLoading(false))
   }
   load()
@@ -343,7 +366,19 @@ function UserDetail(props: { userId: string; adminCount: number; onBack: () => v
 
   const saveEdit = async () => {
     setErr(''); setSaving(true)
-    try { await api.adminUpdateUser(props.userId, { ...editForm(), admin: editForm().admin ? 1 : 0, must_change_password: editForm().must_change_password ? 1 : 0 }); props.showToast(translate('toast_user_updated')); resetDirty(); setEditing(false); load() }
+    try {
+      const form = editForm()
+      const megabytes = parseFloat(String(form.storage_quota_mb ?? '').replace(',', '.'))
+      await api.adminUpdateUser(props.userId, {
+        ...form,
+        admin: form.admin ? 1 : 0,
+        must_change_password: form.must_change_password ? 1 : 0,
+        // null rather than 0: the column uses NULL for "no limit", so a cleared
+        // field must not arrive as a limit of zero bytes.
+        storage_quota_bytes: Number.isFinite(megabytes) && megabytes > 0 ? Math.round(megabytes * 1048576) : null,
+      })
+      props.showToast(translate('toast_user_updated')); resetDirty(); setEditing(false); load()
+    }
     catch (failure: unknown) { setErr(translate(errorKey(failure))) }
     finally { setSaving(false) }
   }
@@ -425,6 +460,18 @@ function UserDetail(props: { userId: string; adminCount: number; onBack: () => v
               <div style={{ display: 'flex', 'flex-direction': 'column', gap: '10px' }}>
                 <div><label style={lbl}>{translate('field_username')}</label><input style={inp} value={editForm().name} onInput={event => setEditForm((currentState: any) => ({ ...currentState, name: event.currentTarget.value }))} /></div>
                 <div><label style={lbl}>{translate('field_email')}</label><input style={inp} type="email" value={editForm().email} onInput={event => setEditForm((currentState: any) => ({ ...currentState, email: event.currentTarget.value }))} /></div>
+                <div>
+                  <label style={lbl}>{translate('admin_user_quota_label')}</label>
+                  <input style={inp} type="number" min="0" step="1" placeholder={translate('admin_user_quota_unlimited')}
+                    value={editForm().storage_quota_mb ?? ''}
+                    onInput={event => setEditForm((currentState: any) => ({ ...currentState, storage_quota_mb: event.currentTarget.value }))} />
+                  <div style={{ ...sans, 'font-size': '11px', color: 'var(--muted)', 'margin-top': '4px' }}>
+                    {translate('admin_user_quota_hint')}
+                    <Show when={userData().used_bytes != null}>
+                      {' · '}{translate('admin_user_quota_used', { used: fmtBytes(userData().used_bytes) })}
+                    </Show>
+                  </div>
+                </div>
                 <Toggle value={editForm().admin} onChange={newValue => setEditForm((currentState: any) => ({ ...currentState, admin: newValue }))} label={translate('admin_field_admin')} />
                 <Toggle value={editForm().must_change_password} onChange={newValue => setEditForm((currentState: any) => ({ ...currentState, must_change_password: newValue }))} label={translate('admin_field_force_pwd')} />
                 <div style={{ display: 'flex', gap: '8px' }}>
@@ -440,6 +487,12 @@ function UserDetail(props: { userId: string; adminCount: number; onBack: () => v
                 <FieldView label={translate('field_email')} value={userData().email} />
                 <FieldView label={translate('admin_field_admin')} value={userData().admin ? translate('label_yes') : translate('label_no')} />
                 <FieldView label={translate('admin_field_force_pwd')} value={userData().must_change_password ? translate('label_yes') : translate('label_no')} />
+                {/* Limit and what is used against it, so the figure has a scale
+                    without having to open the form. */}
+                <FieldView label={translate('admin_user_quota_label')}
+                  value={userData().storage_quota_bytes
+                    ? `${fmtBytes(userData().used_bytes ?? 0)} / ${fmtBytes(userData().storage_quota_bytes)}`
+                    : `${fmtBytes(userData().used_bytes ?? 0)} · ${translate('admin_user_quota_unlimited')}`} />
                 <FieldView label={translate('admin_field_created')} value={formatDate(userData().created_at, lang())} />
                 <FieldView label={translate('admin_field_updated')} value={formatDate(userData().updated_at, lang())} />
               </div>
@@ -885,6 +938,193 @@ function TabSettings(props: { showToast: (m: string, v?: string) => void }) {
  * free/no key) and offers a backfill run that translates all not-yet-translated
  * designs in batches.
  */
+/**
+ * Outgoing mail server.
+ *
+ * The fields stay disabled while the service is switched off: they describe how
+ * mail would be sent, and offering them for a service that sends none only
+ * invites the question of why nothing arrives.
+ */
+function TabMail(props: { showToast: (m: string, v?: string) => void }) {
+  const { translate } = useI18n()
+  const [enabled, setEnabled] = createSignal(false)
+  const [host, setHost] = createSignal('')
+  const [port, setPort] = createSignal(587)
+  const [username, setUsername] = createSignal('')
+  const [password, setPassword] = createSignal('')
+  /** Whether the server holds a password. Shown as a placeholder, never as a value. */
+  const [passwordStored, setPasswordStored] = createSignal(false)
+  const [from, setFrom] = createSignal('')
+  const [fromName, setFromName] = createSignal('')
+  const [encryption, setEncryption] = createSignal('starttls')
+  const [saving, setSaving] = createSignal(false)
+  const [testing, setTesting] = createSignal(false)
+  const [testResult, setTestResult] = createSignal('')
+  /** Queue figures, so an administrator can see whether anything is stuck. */
+  const [stats, setStats] = createSignal<{ queued: number; sent: number; last: string; minutes: number }>({ queued: 0, sent: 0, last: '', minutes: 10 })
+  const [testOk, setTestOk] = createSignal(false)
+  const [err, setErr] = createSignal('')
+
+  api.adminGetMail().then((response: any) => {
+    const data = response.data ?? {}
+    setEnabled(!!data.enabled)
+    setHost(data.host ?? '')
+    setPort(data.port ?? 587)
+    setUsername(data.username ?? '')
+    // The stored password never leaves the server; the response only says whether
+    // there is one. The field stays EMPTY rather than being filled with asterisks
+    // that read like something typed - the placeholder says what is going on, and
+    // an empty field on save means "keep what is stored".
+    setPasswordStored(!!data.password)
+    setFrom(data.from ?? '')
+    setFromName(data.from_name ?? '')
+    setEncryption(data.encryption ?? 'starttls')
+    setStats({
+      queued: data.queued_count ?? 0,
+      sent: data.sent_count ?? 0,
+      last: data.last_sent_at ?? '',
+      minutes: data.digest_minutes ?? 10,
+    })
+  }).catch(() => {})
+
+  const payload = () => ({
+    enabled: enabled(), host: host(), port: port(), username: username(),
+    password: password(), from: from(), from_name: fromName(), encryption: encryption(),
+  })
+
+  const save = async () => {
+    setSaving(true); setErr('')
+    try {
+      await api.adminSaveMail(payload())
+      resetDirty()
+      props.showToast(translate('toast_settings_saved'))
+    } catch (failure: unknown) { setErr(translate(errorKey(failure))) }
+    finally { setSaving(false) }
+  }
+
+  /** Sends a test message with what is on screen, saved or not. */
+  const test = async () => {
+    setTesting(true); setErr(''); setTestResult('')
+    try {
+      const response: any = await api.adminTestMail(payload())
+      const data = response.data ?? {}
+      setTestOk(!!data.ok)
+      setTestResult(data.ok
+        ? translate('admin_mail_test_ok', { address: data.sent_to ?? '' })
+        // The mail server's own words follow the translated sentence: "login
+        // rejected" or "STARTTLS refused" is what an administrator can act on.
+        : translate(data.error ?? 'error.mail_send_failed') + (data.detail ? ` (${data.detail})` : ''))
+    } catch (failure: unknown) { setErr(translate(errorKey(failure))) }
+    finally { setTesting(false) }
+  }
+
+  const fieldStyle = (): JSX.CSSProperties => ({
+    width: '100%', padding: '8px 10px', background: 'var(--bg3)',
+    border: '1px solid var(--border)', 'border-radius': '8px',
+    color: enabled() ? 'var(--text)' : 'var(--muted)', 'font-size': '13px', ...sans,
+    opacity: enabled() ? '1' : '0.55',
+  })
+  const rowStyle: JSX.CSSProperties = { display: 'flex', 'flex-direction': 'column', gap: '5px', flex: '1' }
+  const labelStyle: JSX.CSSProperties = { 'font-size': '11px', color: 'var(--muted)', ...sans }
+
+  return (
+    <div style={{ display: 'flex', 'flex-direction': 'column', gap: '20px' }}>
+      <Card>
+        <SectionTitle label={translate('admin_mail_heading')} />
+        <div style={{ ...sans, 'font-size': '12px', color: 'var(--text3)', 'line-height': '1.6' }}>
+          {translate('admin_mail_desc')}
+        </div>
+        <Err message={err()} />
+        <div style={{ 'margin-top': '12px' }}>
+          <Toggle value={enabled()} onChange={setEnabled} label={translate('admin_mail_enable_label')} />
+        </div>
+
+        <fieldset disabled={!enabled()} style={{ border: 'none', padding: '0', margin: '14px 0 0', display: 'flex', 'flex-direction': 'column', gap: '12px' }}>
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <label style={{ ...rowStyle, flex: '3' }}>
+              <span style={labelStyle}>{translate('admin_mail_host')}</span>
+              <input value={host()} onInput={e => setHost(e.currentTarget.value)} placeholder="smtp.example.org" style={fieldStyle()} />
+            </label>
+            <label style={{ ...rowStyle, flex: '1' }}>
+              <span style={labelStyle}>{translate('admin_mail_port')}</span>
+              <input type="number" min="1" max="65535" value={port()} onInput={e => setPort(parseInt(e.currentTarget.value) || 0)} style={fieldStyle()} />
+            </label>
+          </div>
+          <label style={rowStyle}>
+            <span style={labelStyle}>{translate('admin_mail_encryption')}</span>
+            <select value={encryption()} onChange={e => setEncryption(e.currentTarget.value)} style={{ ...fieldStyle(), 'color-scheme': 'dark' }}>
+              <option value="starttls">STARTTLS (587)</option>
+              <option value="tls">TLS (465)</option>
+              <option value="none">{translate('admin_mail_encryption_none')}</option>
+            </select>
+          </label>
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <label style={rowStyle}>
+              <span style={labelStyle}>{translate('admin_mail_username')}</span>
+              <input value={username()} onInput={e => setUsername(e.currentTarget.value)} autocomplete="off" style={fieldStyle()} />
+            </label>
+            <label style={rowStyle}>
+              <span style={labelStyle}>{translate('admin_mail_password')}</span>
+              <input type="password" value={password()} onInput={e => setPassword(e.currentTarget.value)}
+                placeholder={passwordStored() ? translate('admin_mail_password_kept') : ''}
+                autocomplete="new-password" style={fieldStyle()} />
+            </label>
+          </div>
+          <div style={{ ...sans, 'font-size': '11px', color: 'var(--text3)' }}>
+            {translate('admin_mail_auth_hint')}
+          </div>
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <label style={rowStyle}>
+              <span style={labelStyle}>{translate('admin_mail_from')}</span>
+              <input value={from()} onInput={e => setFrom(e.currentTarget.value)} placeholder="meshdepot@example.org" style={fieldStyle()} />
+            </label>
+            <label style={rowStyle}>
+              <span style={labelStyle}>{translate('admin_mail_from_name')}</span>
+              <input value={fromName()} onInput={e => setFromName(e.currentTarget.value)} placeholder="MeshDepot" style={fieldStyle()} />
+            </label>
+          </div>
+        </fieldset>
+
+        {/* What the queue is doing. Counted per notification, not per message: a
+            digest bundles several into one e-mail. */}
+        <div style={{ 'margin-top': '16px', 'border-top': '1px solid var(--border)', 'padding-top': '14px', display: 'flex', gap: '24px', 'flex-wrap': 'wrap' }}>
+          <div>
+            <div style={{ ...sans, 'font-size': '11px', color: 'var(--muted)' }}>{translate('admin_mail_queued')}</div>
+            <div style={{ ...sans, 'font-size': '18px', 'font-weight': '600', color: stats().queued > 0 ? 'var(--accent-light)' : 'var(--text2)' }}>{stats().queued}</div>
+          </div>
+          <div>
+            <div style={{ ...sans, 'font-size': '11px', color: 'var(--muted)' }}>{translate('admin_mail_sent')}</div>
+            <div style={{ ...sans, 'font-size': '18px', 'font-weight': '600', color: 'var(--text2)' }}>{stats().sent}</div>
+          </div>
+          <div style={{ flex: '1', 'min-width': '180px' }}>
+            <div style={{ ...sans, 'font-size': '11px', color: 'var(--muted)' }}>{translate('admin_mail_last_sent')}</div>
+            <div style={{ ...sans, 'font-size': '13px', color: 'var(--text2)', 'padding-top': '4px' }}>{stats().last || '-'}</div>
+          </div>
+        </div>
+        <div style={{ ...sans, 'font-size': '11px', color: 'var(--text3)', 'margin-top': '6px', 'line-height': '1.5' }}>
+          {translate('admin_mail_queue_hint', { minutes: String(stats().minutes) })}
+        </div>
+
+        <div style={{ display: 'flex', gap: '10px', 'align-items': 'center', 'margin-top': '16px', 'flex-wrap': 'wrap' }}>
+          <button onClick={test} disabled={!enabled() || testing()}
+            style={{ padding: '8px 14px', background: 'var(--bg4)', border: '1px solid var(--border2)', 'border-radius': '8px', color: 'var(--text)', 'font-size': '13px', cursor: !enabled() || testing() ? 'default' : 'pointer', opacity: !enabled() || testing() ? '0.5' : '1', ...sans }}>
+            {testing() ? translate('admin_mail_testing') : translate('admin_mail_test')}
+          </button>
+          <button onClick={save} disabled={saving()}
+            style={{ padding: '8px 14px', background: 'var(--accent)', border: 'none', 'border-radius': '8px', color: '#fff', 'font-size': '13px', 'font-weight': '600', cursor: saving() ? 'default' : 'pointer', opacity: saving() ? '0.6' : '1', ...sans }}>
+            {saving() ? translate('btn_saving') : translate('btn_save')}
+          </button>
+          <Show when={testResult()}>
+            <span style={{ ...sans, 'font-size': '12px', color: testOk() ? 'var(--success, #22c55e)' : 'var(--danger)' }}>
+              {testResult()}
+            </span>
+          </Show>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
 function TabTranslation(props: { showToast: (m: string, v?: string) => void }) {
   const { translate } = useI18n()
   const [enabled, setEnabled] = createSignal(true)
@@ -982,6 +1222,7 @@ export function ServerSettingsModal(props: { user: User; onClose: () => void; sh
     { key: 'stats',    label: translate('admin_tab_stats'),     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> },
     { key: 'users',    label: translate('admin_tab_users'),     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> },
     { key: 'settings', label: translate('admin_tab_settings'),  icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> },
+    { key: 'mail',     label: translate('admin_tab_mail'),      icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><polyline points="22,6 12,13 2,6"/></svg> },
     { key: 'translation', label: translate('admin_tab_translation'), icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> },
     // Last on purpose: nothing here is set or changed, it is only looked up.
     { key: 'info',     label: translate('admin_tab_info'),      icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> },
@@ -1013,6 +1254,7 @@ export function ServerSettingsModal(props: { user: User; onClose: () => void; sh
           <Show when={tab() === 'stats'}><TabStats /></Show>
           <Show when={tab() === 'users'}><TabUsers showToast={props.showToast} /></Show>
           <Show when={tab() === 'settings'}><TabSettings showToast={props.showToast} /></Show>
+          <Show when={tab() === 'mail'}><TabMail showToast={props.showToast} /></Show>
           <Show when={tab() === 'translation'}><TabTranslation showToast={props.showToast} /></Show>
           <Show when={tab() === 'info'}><TabInfo /></Show>
         </div>

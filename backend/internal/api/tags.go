@@ -65,6 +65,15 @@ func (server *Server) TagsStore(responseWriter http.ResponseWriter, request *htt
 	if color == "" {
 		color = "#457b9d"
 	}
+	// The UNIQUE index is case-sensitive, so it would happily accept "Decor"
+	// next to "decor". Report that as the duplicate it is, rather than creating
+	// a second tag that filters and counts separately.
+	var existing int
+	if server.DB.QueryRow("SELECT id FROM tags WHERE user_id=? AND name=? COLLATE NOCASE LIMIT 1",
+		userID(request), name).Scan(&existing) == nil && existing > 0 {
+		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.tag_exists")
+		return
+	}
 	insertResult, failure := server.DB.Exec("INSERT INTO tags (user_id, name, color, source) VALUES (?, ?, ?, 'manual')", userID(request), name, color)
 	if failure != nil {
 		if dbutil.IsUniqueViolation(failure) {

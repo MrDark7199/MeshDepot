@@ -36,14 +36,34 @@ export PLAYWRIGHT_TOKEN
 # On some sites Cloudflare only lets a *headful* Firefox through, and that needs
 # a display. After a container restart a stale lock is left behind; Xvfb then
 # refuses to start and every headful call fails silently with "cannot open
-# display :99". So clear the lock before each start, and respawn if it dies.
+# display". So clear the lock before each start, and respawn if it dies.
+#
+# The display number comes from DISPLAY rather than being fixed at :99. With
+# host networking two containers share a network namespace, and X11 binds an
+# abstract socket - which belongs to that namespace, not to the filesystem. Two
+# instances on the same number therefore fight over it: whichever starts second
+# never gets a display, its headful downloads fail, and the entrypoint respawns
+# Xvfb in a loop that floods the log. Give the second instance DISPLAY=:98 and
+# both run side by side.
+X_DISPLAY="${DISPLAY:-:99}"
+X_NUMBER="${X_DISPLAY#:}"
+X_NUMBER="${X_NUMBER%%.*}"
+case "$X_NUMBER" in
+	''|*[!0-9]*)
+		echo "[entrypoint] DISPLAY='$X_DISPLAY' is not a local display number - falling back to :99"
+		X_NUMBER=99
+		X_DISPLAY=":99"
+		;;
+esac
+export DISPLAY="$X_DISPLAY"
+
 clear_x_locks() {
-	rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
+	rm -f "/tmp/.X${X_NUMBER}-lock" "/tmp/.X11-unix/X${X_NUMBER}" 2>/dev/null || true
 }
 
 clear_x_locks
 while :; do
-	Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp || true
+	Xvfb "$X_DISPLAY" -screen 0 1280x1024x24 -nolisten tcp || true
 	clear_x_locks
 	sleep 1
 done &

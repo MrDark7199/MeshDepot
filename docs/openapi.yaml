@@ -28,6 +28,17 @@ tags:
 
 components:
   schemas:
+    MailSettings:
+      type: object
+      properties:
+        enabled:    { type: boolean, description: Whether notification mail is sent at all }
+        host:       { type: string }
+        port:       { type: integer, default: 587 }
+        username:   { type: string, description: Empty for a relay that offers no AUTH }
+        password:   { type: string, description: '"***" on read, and on write it means "keep the stored one"' }
+        from:       { type: string, description: Falls back to username when empty }
+        from_name:  { type: string }
+        encryption: { type: string, enum: [none, starttls, tls] }
     User:
       type: object
       properties:
@@ -42,6 +53,7 @@ components:
         avatar_url:  { type: string, nullable: true }
         totp_enabled: { type: boolean }
         custom_css:  { type: string, description: The account's own stylesheet, applied on login and on every load }
+        date_format: { type: string, example: 'DD.MM.YYYY', description: "Notation for every date shown; '' follows the display language" }
 
     Design:
       type: object
@@ -1472,9 +1484,10 @@ paths:
       tags: [Users]
       summary: Update own profile
       description: >
-        Every field is optional; only the ones present are written. language and
-        custom_css live on the account rather than in the browser, so they follow
-        the member to another device and survive a reload.
+        Every field is optional; only the ones present are written. language,
+        custom_css and date_format live on the account rather than in the
+        browser, so they follow the member to another device and survive a
+        reload.
       requestBody:
         content:
           application/json:
@@ -1485,6 +1498,7 @@ paths:
                 email:      { type: string, format: email }
                 language:   { type: string, enum: [en, de] }
                 custom_css: { type: string, maxLength: 65536, description: The account's own stylesheet, applied to its documents }
+                date_format: { type: string, enum: ['', 'DD.MM.YYYY', 'DD/MM/YYYY', 'MM/DD/YYYY', 'YYYY-MM-DD', 'D MMM YYYY', 'MMM D, YYYY'], description: "How dates are written for this account; '' follows the display language" }
       responses:
         '200':
           description: Updated profile
@@ -1498,8 +1512,9 @@ paths:
                   email:      { type: string, format: email }
                   language:   { type: string }
                   custom_css: { type: string }
+                  date_format: { type: string }
         '422':
-          description: Invalid email, unsupported language, or a stylesheet over 64 KB
+          description: Invalid email, unsupported language or date format, or a stylesheet over 64 KB
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1921,6 +1936,64 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/HealthChecks' }
 
+  /admin/mail:
+    get:
+      tags: [Admin]
+      summary: Get the outgoing mail configuration
+      description: The stored password is replaced by a placeholder and never returned.
+      responses:
+        '200':
+          description: Mail settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MailSettings'
+    put:
+      tags: [Admin]
+      summary: Save the outgoing mail configuration
+      description: >
+        A password sent as "***" leaves the stored one untouched. Switching the
+        service on is refused while host, port or sender are missing.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MailSettings'
+      responses:
+        '200':
+          description: The saved settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MailSettings'
+        '422':
+          description: Incomplete configuration (error.mail_incomplete)
+  /admin/mail/test:
+    post:
+      tags: [Admin]
+      summary: Send a test message with the supplied settings
+      description: >
+        Uses the settings in the request rather than the stored ones, so a
+        configuration can be tried before saving. The message goes to the
+        administrator's own address; without one the check reports
+        error.mail_no_own_address instead of claiming success.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MailSettings'
+      responses:
+        '200':
+          description: Outcome of the attempt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:      { type: boolean }
+                  sent_to: { type: string }
+                  error:   { type: string }
+                  detail:  { type: string, description: The mail server's own words, for the administrator }
   /admin/settings:
     get:
       tags: [Admin]

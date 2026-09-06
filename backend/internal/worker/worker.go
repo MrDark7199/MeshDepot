@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"meshdepot/internal/health"
+	"meshdepot/internal/notify"
 	"meshdepot/internal/platforms"
 	"meshdepot/internal/queuestate"
 	"meshdepot/internal/safego"
@@ -61,6 +62,8 @@ type Job struct {
 var permanentErrors = []string{
 	"error.unsupported_url", "error.platform_credentials_required",
 	"_no_token", "_auth_failed", "_restricted", "_requires_purchase", "_no_files",
+	// A full account will not empty itself; retrying only repeats the refusal.
+	"error.storage_quota_exceeded",
 }
 
 // isPermanent detects permanent errors (no retry).
@@ -297,6 +300,7 @@ func (downloadWorker *DownloadWorker) process(job Job) {
 			job.ID, job.Platform, procTimeout, job.SourceURL, job.RetryCount+1, maxRetries, suffix)
 		if final {
 			dbutil.ExecLogged(downloadWorker.DB, "UPDATE download_queue SET status='failed', error_msg='error.timeout', done_at=CURRENT_TIMESTAMP WHERE id=?", job.ID)
+			downloadWorker.notifyFailed(job, "error.timeout")
 		} else {
 			dbutil.ExecLogged(downloadWorker.DB, "UPDATE download_queue SET status='pending', started_at=NULL, retry_count=retry_count+1, error_msg='error.timeout' WHERE id=?", job.ID)
 		}
@@ -324,15 +328,58 @@ func (downloadWorker *DownloadWorker) process(job Job) {
 		downloadWorker.logFailure(job, failure, final)
 		if final {
 			dbutil.ExecLogged(downloadWorker.DB, "UPDATE download_queue SET status='failed', error_msg=?, done_at=CURRENT_TIMESTAMP WHERE id=?", failure.Error(), job.ID)
+			downloadWorker.notifyFailed(job, failure.Error())
 		} else {
 			dbutil.ExecLogged(downloadWorker.DB, "UPDATE download_queue SET status='pending', started_at=NULL, retry_count=retry_count+1, error_msg=? WHERE id=?", failure.Error(), job.ID)
 		}
 		return
 	}
 	dbutil.ExecLogged(downloadWorker.DB, "UPDATE download_queue SET status='done', design_id=?, done_at=CURRENT_TIMESTAMP WHERE id=?", designID, job.ID)
+	downloadWorker.notifyDone(job, designID)
 	// A success means the platform is answering normally again: forget any
 	// accumulated block strikes so a later isolated hit starts counting fresh.
 	downloadWorker.clearBlockStrikes(job.Platform)
+}
+
+// notifyFailed and notifyDone tell the member how their download ended.
+//
+// Raised here, where the job reaches its final state, and only there: a retry
+// that is still pending is not an outcome, and notifying on each attempt would
+// report the same download as failed several times before it succeeds.
+//
+// Until now download_done and download_failed existed as switches in the
+// settings but nothing ever sent them - the preference could be set and made no
+// difference.
+func (downloadWorker *DownloadWorker) notifyFailed(job Job, message string) {
+	// The URL travels along so the digest can drop this again if the member
+	// re-queued it and it succeeded before the summary went out.
+	notify.UserWithReference(downloadWorker.DB, job.UserID, "download_failed",
+		"Download failed",
+		readableError(message)+"\n\n"+job.SourceURL, job.SourceURL, nil)
+}
+
+func (downloadWorker *DownloadWorker) notifyDone(job Job, designID int) {
+	name := job.SourceURL
+	var stored string
+	if downloadWorker.DB.QueryRow("SELECT name FROM designs WHERE id = ?", designID).Scan(&stored) == nil && stored != "" {
+		name = stored
+	}
+	designReference := designID
+	notify.User(downloadWorker.DB, job.UserID, "download_done",
+		"Download finished", name, &designReference)
+}
+
+// readableError turns a message of the form <key>:<sentence> into the sentence.
+//
+// Notification bodies are stored as written and never run through the
+// translation table, so a bare key would be shown to the member verbatim. Most
+// platform errors already carry a sentence after the colon; those that do not
+// keep their key, which is still more use than an empty line.
+func readableError(message string) string {
+	if _, sentence, found := strings.Cut(message, ":"); found && strings.TrimSpace(sentence) != "" {
+		return strings.TrimSpace(sentence)
+	}
+	return message
 }
 
 // registerBlockStrike records one consecutive anti-bot/rate-limit hit for the

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"io"
 	"meshdepot/internal/coerce"
+	"meshdepot/internal/dateformat"
 	"net/http"
 	"net/mail"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"meshdepot/internal/auth"
 	"meshdepot/internal/dbutil"
 	"meshdepot/internal/httpx"
+	"meshdepot/internal/quota"
 	"meshdepot/internal/storage"
 )
 
@@ -100,6 +102,17 @@ func (server *Server) UsersUpdateProfile(responseWriter http.ResponseWriter, req
 		assignments = append(assignments, "language = ?")
 		args = append(args, language)
 	}
+	if value, present := body["date_format"]; present {
+		format := strings.TrimSpace(coerce.StringOr(value, ""))
+		// Checked here because the value reaches the formatter as a pattern: an
+		// unknown one would render every date as the pattern itself.
+		if !dateformat.Valid(format) {
+			httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.invalid_date_format")
+			return
+		}
+		assignments = append(assignments, "date_format = ?")
+		args = append(args, format)
+	}
 	if len(assignments) > 0 {
 		args = append(args, currentUserID)
 		if _, failure := server.DB.Exec("UPDATE users SET "+strings.Join(assignments, ", ")+" WHERE id = ?", args...); failure != nil {
@@ -107,7 +120,7 @@ func (server *Server) UsersUpdateProfile(responseWriter http.ResponseWriter, req
 			return
 		}
 	}
-	row, ok := server.fetchRow(responseWriter, "SELECT public_id AS id, name, email, language, custom_css FROM users WHERE id = ? LIMIT 1", currentUserID)
+	row, ok := server.fetchRow(responseWriter, "SELECT public_id AS id, name, email, language, custom_css, date_format FROM users WHERE id = ? LIMIT 1", currentUserID)
 	if !ok {
 		return
 	}
@@ -303,6 +316,10 @@ func (server *Server) UsersStats(responseWriter http.ResponseWriter, request *ht
 		"synced_count":     countScalar("SELECT COUNT(*) FROM designs WHERE user_id = ? AND source_url IS NOT NULL AND source_url != ''"),
 		"platforms":        platformCounts,
 		"newest_design_at": newest,
+		// The member's own limit, 0 when they have none. The page already had the
+		// arithmetic for a fill level but nothing ever supplied a maximum, so it
+		// could never show one.
+		"max_bytes": quota.Of(server.DB, currentUserID).LimitBytes,
 	})
 }
 
