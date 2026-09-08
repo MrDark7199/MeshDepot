@@ -249,6 +249,35 @@ paths:
 
   # ── Health ──────────────────────────────────────────────────────────────────
 
+  /version:
+    get:
+      tags: [System]
+      summary: The contracts this server speaks
+      description: >
+        For clients that are updated separately from the server - the browser
+        extension lives in a browser and updates itself, while a self-hosted
+        MeshDepot is updated when its operator gets round to it. Each entry is a
+        range: the oldest contract still accepted and the newest spoken, and a
+        client is compatible when its own number falls inside.
+
+
+        One route rather than one per feature: a client asking whether it can
+        talk to this server is asking about the server. Public for the same
+        reason health is - the question comes before authentication is possible.
+      responses:
+        '200':
+          description: The supported ranges
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  browser_import:
+                    type: object
+                    properties:
+                      version:     { type: integer, example: 1 }
+                      min_version: { type: integer, example: 1 }
+
   /health:
     get:
       tags: [Public]
@@ -1135,6 +1164,218 @@ paths:
           description: Removed
 
   # ── Downloads ────────────────────────────────────────────────────────────────
+
+  /imports/browser/upload:
+    post:
+      tags: [Downloads]
+      summary: Import a design whose files the extension carries itself
+      description: >
+        The sibling of /imports/browser, for platforms that hand out no link the
+        server can follow. Thingiverse assembles its archive in the browser - the
+        countdown before the download starts - and the result is a blob: address
+        that means nothing outside that browser, so the bytes travel with the
+        request instead.
+
+
+        Authenticated by API key only, like its sibling. A .zip is unpacked; a
+        .3mf is left alone.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [payload, file]
+              properties:
+                payload:
+                  type: string
+                  description: The same JSON as /imports/browser, without files[].url
+                file:
+                  type: array
+                  maxItems: 40
+                  items: { type: string, format: binary }
+      responses:
+        '201':
+          description: Design imported
+        '401':
+          description: Missing, unknown or revoked API key
+        '409':
+          description: A design with this source_url already exists
+        '413':
+          description: The upload exceeded the size limit
+        '422':
+          description: No usable file, unsupported platform, or too many files
+
+  /imports/browser:
+    get:
+      tags: [Downloads]
+      summary: Check that the instance is reachable and the API key is valid
+      description: >
+        Answers both halves of a client's "am I connected?" at once. The public
+        health endpoint says only that the host is up; a client showing
+        "connected" on that basis would still fail the first import with a
+        revoked key. Reaching this means the key passed the middleware.
+      responses:
+        '200':
+          description: Reachable, key accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:          { type: boolean }
+                  user:        { type: string, description: Whose key this is }
+                  version:     { type: integer, description: Same as /version, so one call answers everything }
+                  min_version: { type: integer }
+        '401':
+          description: Missing, unknown or revoked API key
+    post:
+      tags: [Downloads]
+      summary: Import a design collected by the browser extension
+      description: >
+        Takes download links the visitor's own browser produced and stores the
+        design straight away, outside the download queue: the links are presigned
+        and expire about five minutes after the platform issues them, so a queued
+        job would arrive to find them dead. The answer therefore reports the
+        finished import rather than a queue position.
+
+
+        Authenticated by API key only (Authorization: Bearer mdp_...), never by
+        session cookie. The route fetches files from URLs in the request body,
+        and one reachable with an ambient cookie could be set off by any page a
+        signed-in member happens to open.
+
+
+        No credentials for the source platform are needed, stored or seen: the
+        links were created for the visitor's own signed-in session in their
+        browser, and their signature covers the path alone.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_url, files]
+              properties:
+                source_url: { type: string, description: The design's page; also the duplicate key }
+                platform:   { type: string, description: Ignored - the platform is derived from source_url }
+                add_to_collection: { type: boolean, default: false, description: "File the design under the collection \"Manual Website Import\", creating it on first use. The name is the server's; a client cannot choose it." }
+                meta:
+                  type: object
+                  properties:
+                    source_id:   { type: string }
+                    name:        { type: string }
+                    author:      { type: string }
+                    description: { type: string }
+                    license:     { type: string }
+                    cover_url:   { type: string, description: The design's cover; also the first entry of images }
+                    images:      { type: array, maxItems: 24, items: { type: string }, description: Gallery pictures, cover first; deduplicated server-side }
+                    tags:        { type: array, items: { type: string } }
+                files:
+                  type: array
+                  maxItems: 40
+                  items:
+                    type: object
+                    required: [url]
+                    properties:
+                      name: { type: string, description: Fallback only - the CDN's Content-Disposition wins }
+                      url:  { type: string }
+      responses:
+        '201':
+          description: Design imported
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  design_id:     { type: integer }
+                  file_count:    { type: integer }
+                  skipped_count: { type: integer, description: Links that were already dead; the import still counts as done }
+                  platform:      { type: string }
+                  collection:    { type: string, description: The collection the design was filed under, empty when none was asked for }
+        '401':
+          description: Missing, unknown, revoked or expired API key
+        '403':
+          description: >
+            The key was sent over an unencrypted connection from outside the
+            server's own network. A key travels in a header, so plaintext hands
+            it to everyone on the way.
+        '409':
+          description: A design with this source_url already exists
+        '422':
+          description: >
+            No usable link, unsupported platform, too many files, or the
+            account's storage quota is already full
+
+  /api-keys:
+    get:
+      tags: [Users]
+      summary: List the member's own API keys
+      description: Secrets are never returned; each key is identified by its prefix.
+      responses:
+        '200':
+          description: The keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:           { type: integer }
+                    name:         { type: string }
+                    prefix:       { type: string, example: mdp_A1b2c3 }
+                    created_at:   { type: string }
+                    last_used_at: { type: string, nullable: true }
+                    expires_at:   { type: string, nullable: true, description: When the key stops working; null means never }
+                    expired:      { type: integer, description: 1 once expires_at has passed }
+    post:
+      tags: [Users]
+      summary: Create an API key
+      description: >
+        The plaintext key is in this response and nowhere else - only its hash is
+        stored. A member who loses it creates a new one.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 60 }
+                expires_in_days: { type: integer, maximum: 3650, description: "0 or absent means never. The plaintext lives in a client's storage, so an expiry is what keeps a copied profile from being a permanent way in." }
+      responses:
+        '201':
+          description: The new key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:     { type: integer }
+                  name:   { type: string }
+                  prefix:     { type: string }
+                  expires_at: { type: string, nullable: true }
+                  key:        { type: string, description: Shown once, never again }
+        '422':
+          description: Too many keys
+
+  /api-keys/{id}:
+    delete:
+      tags: [Users]
+      summary: Revoke an API key
+      description: >
+        Revoked, not deleted: the row keeps its dates so it stays visible that a
+        key existed and when it was last used.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Revoked
+        '404':
+          description: No such key for this member
 
   /download:
     post:

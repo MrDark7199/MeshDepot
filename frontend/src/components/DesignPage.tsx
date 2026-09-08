@@ -6,6 +6,7 @@ import { useUnsavedChanges } from '../utils/unsavedChanges'
 import { StlViewerModal, is3dFile } from './StlViewer'
 import { displayName, displayDescription } from '../utils/designText'
 import { formatDate, formatDateTime } from '../utils/datetime'
+import { ToggleSwitch } from './ToggleSwitch'
 import { escapeHtml } from '../utils/sanitizeHtml'
 import { errorKey } from '../utils/errorMessage'
 import type { Design, DesignFile, DesignFileEntry, DesignID, DesignImage, Tag, Collection, DesignShare, GcodeMeta, ShareLink } from '../types'
@@ -434,7 +435,10 @@ export function DesignPage(props: DesignPageProps) {
   const [isDeleting, setIsDeleting] = createSignal(false)
   // Preselected: a design deleted on purpose is one the user does not want
   // back, and the sync would otherwise hand it over again on its next run.
-  const [excludeFromSync, setExcludeFromSync] = createSignal(true)
+  // Off by default. Excluding a design from the sync outlives the deletion - the
+  // platform keeps it and MeshDepot deliberately does not fetch it again - and a
+  // lasting decision should be taken on purpose, not by leaving a switch alone.
+  const [excludeFromSync, setExcludeFromSync] = createSignal(false)
 
   // syncTick: reload design+files when a background sync finishes
   createEffect(() => {
@@ -2025,13 +2029,13 @@ export function DesignPage(props: DesignPageProps) {
             <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--text2)', 'margin-bottom': '24px', 'line-height': '1.6' }}
               innerHTML={translate('confirm_delete_design_body').replace('{name}', design() ? escapeHtml(displayName(design()!, lang(), translateDesigns())) : '')} />
             <Show when={design()?.source_url}>
-              <label style={{ display: 'flex', 'align-items': 'flex-start', gap: '9px', cursor: 'pointer', 'margin': '-12px 0 20px',
+              <div style={{ display: 'flex', 'align-items': 'center', gap: '11px', 'margin': '-12px 0 20px',
                 ...sansFont, 'font-size': '13px', color: 'var(--text2)', 'line-height': '1.5' }}>
-                <input type="checkbox" checked={excludeFromSync()}
-                  onChange={e => setExcludeFromSync(e.currentTarget.checked)}
-                  style={{ 'margin-top': '2px', cursor: 'pointer', 'accent-color': 'var(--accent)' }} />
-                <span>{translate('delete_exclude_from_sync')}</span>
-              </label>
+                <ToggleSwitch checked={excludeFromSync()} onChange={setExcludeFromSync} />
+                <span style={{ cursor: 'pointer' }} onClick={() => setExcludeFromSync(!excludeFromSync())}>
+                  {translate('delete_exclude_from_sync')}
+                </span>
+              </div>
             </Show>
             <div style={{ display: 'flex', gap: '11px', 'justify-content': 'flex-end' }}>
               <button onClick={() => setConfirmDelete(false)}

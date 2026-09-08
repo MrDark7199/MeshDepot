@@ -101,6 +101,10 @@ func TestHandlerSendsSecurityHeaders(t *testing.T) {
 }
 
 // The CSP must not allow eval or a foreign origin to sneak back in.
+//
+// No exceptions, in any directive. A design description may carry a video, and
+// the answer to that is a link rather than a frame - embedding one would have
+// meant naming a foreign host here, and that is a door worth keeping shut.
 func TestSecurityPolicyStaysStrict(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	setSecurityHeaders(recorder)

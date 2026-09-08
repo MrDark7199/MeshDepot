@@ -97,3 +97,40 @@ func isTrustedProxy(address string) bool {
 	}
 	return false
 }
+
+// IsSecureConnection reports whether the request reached this server over a
+// connection nobody on the way could read.
+//
+// TLS terminated here is the plain case. Behind a reverse proxy the connection
+// to this process is plaintext by design, so the proxy's own statement is used -
+// but only from a proxy the operator configured as trusted. An
+// X-Forwarded-Proto from anywhere else is a claim by whoever sent the request,
+// and believing it would make the check decorative.
+func IsSecureConnection(request *http.Request) bool {
+	if request.TLS != nil {
+		return true
+	}
+	if !isTrustedProxy(remoteIP(request)) {
+		return false
+	}
+	forwarded := strings.ToLower(strings.TrimSpace(request.Header.Get("X-Forwarded-Proto")))
+	// A proxy may list the whole chain: "https, http".
+	if comma := strings.Index(forwarded, ","); comma >= 0 {
+		forwarded = strings.TrimSpace(forwarded[:comma])
+	}
+	return forwarded == "https"
+}
+
+// IsLocalClient reports whether the peer is this machine or its own network.
+//
+// Used where a plaintext connection is tolerable: a request from the same
+// machine or the same house crosses nothing an outsider could listen on, and a
+// self-hosted MeshDepot on a home network is the ordinary case. From anywhere
+// else, plaintext means the secret in the header is readable on the way.
+func IsLocalClient(request *http.Request) bool {
+	address := net.ParseIP(ClientIP(request))
+	if address == nil {
+		return false
+	}
+	return address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast()
+}

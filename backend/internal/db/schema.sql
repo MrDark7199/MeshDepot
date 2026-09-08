@@ -415,3 +415,29 @@ INSERT OR IGNORE INTO app_settings (key, value) VALUES
     ('translation_enabled', '1'),
     ('queue_block_threshold', '3'),
     ('queue_block_hours', '24');
+
+-- Keys for programmatic access, used by the browser extension and by anything
+-- else that cannot hold a session: the session cookie is SameSite=Strict and is
+-- not sent on a cross-site request.
+--
+-- Only the hash is stored. A key that the server can display again is one it can
+-- also leak, and there is no reason to keep the plaintext: it is shown once at
+-- creation and belongs to whoever wrote it down.
+CREATE TABLE IF NOT EXISTS api_keys (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL,
+    name         TEXT    NOT NULL,
+    key_hash     TEXT    NOT NULL UNIQUE,
+    -- The first characters of the key, so a person can tell two of them apart.
+    prefix       TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at TEXT    DEFAULT NULL,
+    revoked_at   TEXT    DEFAULT NULL,
+    -- When the key stops working. NULL means never, which is a choice rather
+    -- than the default: the plaintext lives in a browser profile, a file on
+    -- somebody's disk, and an expiry is what keeps a copied profile from being
+    -- a permanent way in.
+    expires_at   TEXT    DEFAULT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id);

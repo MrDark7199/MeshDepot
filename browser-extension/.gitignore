@@ -1,0 +1,5 @@
+# Both directories are assembled by build.sh from shared/. Keeping generated
+# copies under version control would mean every change showing up three times and
+# a merge deciding which copy is the real one.
+/firefox/
+/chrome/

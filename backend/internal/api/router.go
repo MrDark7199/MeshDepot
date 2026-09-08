@@ -12,6 +12,11 @@ import (
 func (server *Server) Router() http.Handler {
 	mux := http.NewServeMux()
 
+	// What this server speaks, for clients updated separately from it. Public for
+	// the same reason health is: a client has to be able to ask before it can
+	// authenticate.
+	mux.HandleFunc("GET /api/v1/version", server.Version)
+
 	mux.HandleFunc("GET /api/v1/health", func(responseWriter http.ResponseWriter, _ *http.Request) {
 		httpx.Success(responseWriter, map[string]string{"status": "ok"})
 	})
@@ -56,6 +61,24 @@ func (server *Server) Router() http.Handler {
 
 	// ── Download queue + sync (session-protected) ──
 	mux.Handle("POST /api/v1/download", server.Auth.Require(http.HandlerFunc(server.DownloadQueue)))
+
+	// Import from the browser extension. Authenticated by API key alone, never by
+	// session cookie: the route fetches files from URLs in the request body, and
+	// one reachable with an ambient cookie could be set off by any page a signed-in
+	// member happens to open. It also runs the import during the request instead of
+	// queueing it - the links expire in about five minutes.
+	mux.Handle("POST /api/v1/imports/browser", server.Auth.RequireAPIKey(http.HandlerFunc(server.BrowserImport)))
+	// The same route as a GET: reachability and key validity in one answer, so a
+	// client can say "connected" without guessing at the second half.
+	mux.Handle("GET /api/v1/imports/browser", server.Auth.RequireAPIKey(http.HandlerFunc(server.BrowserImportStatus)))
+	// Files the extension carries itself, for a platform that builds its archive
+	// in the browser and hands out a blob: address the server cannot fetch.
+	mux.Handle("POST /api/v1/imports/browser/upload", server.Auth.RequireAPIKey(http.HandlerFunc(server.BrowserImportUpload)))
+
+	// The member's own API keys.
+	mux.Handle("GET /api/v1/api-keys", server.Auth.Require(http.HandlerFunc(server.APIKeysIndex)))
+	mux.Handle("POST /api/v1/api-keys", server.Auth.Require(http.HandlerFunc(server.APIKeysStore)))
+	mux.Handle("DELETE /api/v1/api-keys/{id}", server.Auth.Require(http.HandlerFunc(server.APIKeysDestroy)))
 	mux.Handle("GET /api/v1/download/queue", server.Auth.Require(http.HandlerFunc(server.DownloadList)))
 	mux.Handle("GET /api/v1/download/{id}", server.Auth.Require(http.HandlerFunc(server.DownloadStatus)))
 	mux.Handle("POST /api/v1/download/{id}/retry", server.Auth.Require(http.HandlerFunc(server.DownloadRetry)))

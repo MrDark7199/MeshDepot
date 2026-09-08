@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MeshDepot Importer</title>
+  <style>
+    /* Light by default, dark when the browser says so. Tokens rather than
+       literal colours, so the two themes cannot drift apart. */
+    :root {
+      --bg: #ffffff; --surface: #f6f7f9; --border: #dfe3e8;
+      --text: #1d2229; --muted: #6b7681; --accent: #457b9d;
+      --good: #1a6b32; --good-bg: #eefaf0; --good-border: #b6e2c1;
+      --bad: #8a2020;  --bad-bg: #fdeeee;  --bad-border: #f0bcbc;
+      --info: #23496b; --info-bg: #eef4fa; --info-border: #b9d3ea;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1d2229; --surface: #252b34; --border: #3a424c;
+        --text: #f2f4f7; --muted: #98a2ad; --accent: #6fa8cc;
+        --good: #8fd694; --good-bg: #1e2f23; --good-border: #2f5637;
+        --bad: #f08a8a;  --bad-bg: #2f2020;  --bad-border: #5c3030;
+        --info: #a8c8e4; --info-bg: #1f2a35; --info-border: #33475a;
+      }
+    }
+
+    /* Sized for the toolbar panel. Opened in a tab - which happens only for the
+       one-time permission grant - the same page simply centres itself. */
+    /* A toolbar panel is capped at 600px tall by the browser, so the settings
+       have to fit rather than rely on scrolling: a message that lands below the
+       fold looks like nothing happened. */
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0;
+      background: var(--bg); color: var(--text); font-size: 13px;
+      width: 420px; }
+    body.in-tab { width: auto; }
+    .page { padding: 16px; }
+    /* The settings view is the tall one; its spacing is tightened so the Save
+       button and the message under it stay on screen together. */
+    #settingsView label { margin: 12px 0 4px; }
+    #settingsView .hint { margin-top: 4px; }
+    #settingsView .toggle-row { margin-top: 14px; }
+    #settingsView .actions { margin-top: 16px; }
+    body.in-tab .page { max-width: 520px; margin: 0 auto; padding: 24px; }
+
+    header { display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 20px; }
+    h1 { font-size: 17px; margin: 0; }
+    .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+    button { font-family: inherit; font-size: 13px; cursor: pointer; border-radius: 8px; }
+    .primary { padding: 9px 16px; border: none; background: var(--accent); color: #fff; font-weight: 600; }
+    .ghost { padding: 8px 14px; border: 1px solid var(--border); background: transparent; color: var(--text); }
+
+    .card { background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 16px; }
+
+    .state { display: flex; align-items: center; gap: 10px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
+    .dot.good { background: #22c55e; }
+    .dot.bad { background: #ef4444; }
+    .dot.busy { background: #eab308; }
+    .state-text { font-weight: 600; }
+    .state-detail { color: var(--muted); font-size: 12px; margin-top: 6px; line-height: 1.6; }
+
+    label { display: block; font-size: 12px; font-weight: 600; margin: 16px 0 5px; }
+    input[type=text], input[type=password] { width: 100%; padding: 9px 11px; font-size: 13px;
+      border: 1px solid var(--border); border-radius: 8px; box-sizing: border-box;
+      background: var(--bg); color: var(--text); }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 5px; line-height: 1.6; }
+
+    /* Slider, not a checkbox: asked for, and it reads as on/off at a glance. */
+    .toggle-row { display: flex; align-items: center; gap: 12px; margin-top: 20px; }
+    .toggle { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .track { position: absolute; inset: 0; background: var(--border); border-radius: 11px;
+      transition: background 0.18s; cursor: pointer; }
+    .track::after { content: ''; position: absolute; width: 18px; height: 18px; left: 2px; top: 2px;
+      background: #fff; border-radius: 50%; transition: left 0.18s; box-shadow: 0 1px 3px rgba(0,0,0,0.35); }
+    .toggle input:checked + .track { background: var(--accent); }
+    .toggle input:checked + .track::after { left: 20px; }
+    /* The switch is a label bound to its checkbox: the input itself is sized to
+       nothing so only the track shows, and without the binding a click would land
+       on decoration and change nothing. */
+    .toggle-label { font-size: 13px; cursor: pointer; }
+
+    #status { margin-top: 16px; padding: 10px 12px; border-radius: 8px; font-size: 12px;
+      line-height: 1.6; display: none; }
+    #status.info { background: var(--info-bg); border: 1px solid var(--info-border); color: var(--info); }
+    #status.good { background: var(--good-bg); border: 1px solid var(--good-border); color: var(--good); }
+    #status.bad  { background: var(--bad-bg);  border: 1px solid var(--bad-border);  color: var(--bad); }
+
+    .actions { display: flex; gap: 8px; margin-top: 22px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Main view: is this thing connected? -->
+  <section id="mainView">
+    <header>
+      <div>
+        <h1>MeshDepot Importer</h1>
+        <div class="sub">Import designs into your own library.</div>
+      </div>
+      <button class="ghost" id="openSettings">Settings</button>
+    </header>
+
+    <div class="card">
+      <div class="state">
+        <span class="dot" id="dot"></span>
+        <span class="state-text" id="stateText">Checking…</span>
+      </div>
+      <div class="state-detail" id="stateDetail"></div>
+    </div>
+
+    <div class="card" style="margin-top:10px">
+      <div class="state">
+        <span class="dot" id="siteDot"></span>
+        <span class="state-text" id="siteText">Site access</span>
+      </div>
+      <div class="state-detail" id="siteDetail"></div>
+      <button class="primary" id="grantSites" style="margin-top:12px; display:none">
+        Allow access to the model sites
+      </button>
+    </div>
+
+    <div class="card" style="margin-top:10px">
+      <div class="state-text" style="font-size:13px">Downloads</div>
+      <div class="state-detail" id="diagnostics">…</div>
+    </div>
+
+    <div class="state-detail" style="margin-top:16px">
+      Open a model page and press <strong>Import to MeshDepot</strong> at the
+      bottom right, then press the site's own download button. The import is sent
+      by itself once you stop downloading.
+      <div style="margin-top:8px">Works on MakerWorld, Printables, Thingiverse
+      and MyMiniFactory.</div>
+    </div>
+  </section>
+
+  <!-- Settings view -->
+  <section id="settingsView" class="hidden">
+    <header>
+      <div>
+        <h1>Settings</h1>
+        <div class="sub">Where the imports go.</div>
+      </div>
+      <button class="ghost" id="closeSettings">Back</button>
+    </header>
+
+    <label for="instanceUrl">MeshDepot address</label>
+    <input type="text" id="instanceUrl" placeholder="http://localhost:9000">
+    <div class="hint">Address and port of your instance. Saving asks Firefox for
+      permission to contact that host.</div>
+
+    <label for="apiKey">API key</label>
+    <input type="password" id="apiKey" placeholder="mdp_…">
+    <div class="hint">In MeshDepot under Account settings → API keys. It is shown
+      once when created.</div>
+
+    <div class="toggle-row">
+      <label class="toggle" for="cancelDownload">
+        <input type="checkbox" id="cancelDownload" checked>
+        <span class="track"></span>
+      </label>
+      <label class="toggle-label" for="cancelDownload">Remove the file from the Downloads folder</label>
+    </div>
+    <div class="hint">MeshDepot fetches the file from the link itself, so the copy
+      the browser saves is usually not wanted.</div>
+
+    <div class="toggle-row">
+      <label class="toggle" for="addToCollection">
+        <input type="checkbox" id="addToCollection">
+        <span class="track"></span>
+      </label>
+      <label class="toggle-label" for="addToCollection">Put imports in a collection</label>
+    </div>
+    <div class="hint">Imported designs are also filed under
+      &ldquo;Manual Website Import&rdquo; in MeshDepot, so everything that came in
+      through the extension stays together. Off by default.</div>
+
+    <div class="actions">
+      <button class="primary" id="save">Save</button>
+    </div>
+    <div id="status"></div>
+  </section>
+
+</div>
+<script src="platforms.js"></script>
+<script src="options.js"></script>
+</body>
+</html>

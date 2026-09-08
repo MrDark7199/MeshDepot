@@ -174,6 +174,13 @@ export const api = {
     return upload(`/users/${encodeURIComponent(userId)}/avatar`, formData)
   },
   deleteAvatar:        (userId: string) => request('DELETE', `/users/${encodeURIComponent(userId)}/avatar`),
+
+  // API keys: how a client that cannot hold a session cookie authenticates. The
+  // browser extension is the reason they exist - its requests are cross-site and
+  // the session cookie is SameSite=Strict.
+  apiKeys:             () => request<any[]>('GET', '/api-keys'),
+  createApiKey:        (name: string, expiresInDays: number) => request<any>('POST', '/api-keys', { name, expires_in_days: expiresInDays }),
+  revokeApiKey:        (id: number) => request('DELETE', `/api-keys/${id}`),
   changePassword:      (userId: string, data: Record<string, unknown>) => request('POST', `/users/${encodeURIComponent(userId)}/change-password`, data),
   forcePasswordChange: (userId: string, newPassword: string) => request('POST', `/users/${encodeURIComponent(userId)}/force-password`, { new_password: newPassword }),
   getUserStats:        (userId: string) => request('GET', `/users/${encodeURIComponent(userId)}/stats`),

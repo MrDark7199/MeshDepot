@@ -1,0 +1,85 @@
+{
+  "manifest_version": 3,
+  "name": "MeshDepot Importer",
+  "version": "0.1.0",
+  "description": "Import the MakerWorld design you are looking at into your own MeshDepot instance.",
+  "permissions": [
+    "cookies",
+    "downloads",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://makerworld.com/*",
+    "https://*.makerworld.com/*",
+    "https://www.printables.com/*",
+    "https://printables.com/*",
+    "https://www.thingiverse.com/*",
+    "https://thingiverse.com/*",
+    "https://www.myminifactory.com/*",
+    "https://myminifactory.com/*"
+  ],
+  "optional_host_permissions": [
+    "*://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://makerworld.com/*",
+        "https://*.makerworld.com/*",
+        "https://www.printables.com/*",
+        "https://printables.com/*",
+        "https://www.thingiverse.com/*",
+        "https://thingiverse.com/*",
+        "https://www.myminifactory.com/*",
+        "https://myminifactory.com/*"
+      ],
+      "js": [
+        "compat.js",
+        "platforms.js",
+        "bridge.js",
+        "panel.js",
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "page.js",
+        "platforms.js"
+      ],
+      "matches": [
+        "https://makerworld.com/*",
+        "https://*.makerworld.com/*",
+        "https://www.printables.com/*",
+        "https://printables.com/*",
+        "https://www.thingiverse.com/*",
+        "https://thingiverse.com/*",
+        "https://www.myminifactory.com/*",
+        "https://myminifactory.com/*"
+      ]
+    }
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "MeshDepot Importer",
+    "default_popup": "options.html"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "meshdepot-importer@meshdepot.local",
+      "strict_min_version": "115.0"
+    }
+  },
+  "background": {
+    "scripts": [
+      "compat.js",
+      "platforms.js",
+      "background.js"
+    ]
+  }
+}

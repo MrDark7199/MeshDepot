@@ -117,6 +117,22 @@ func migrate(database *sql.DB) {
 		// How dates are written for this account. Empty means "follow the display
 		// language", which is what everyone had until now.
 		"ALTER TABLE users ADD COLUMN date_format TEXT NOT NULL DEFAULT ''",
+		// Programmatic access for clients that cannot hold a session cookie; see
+		// schema.sql for why only the hash is kept.
+		`CREATE TABLE IF NOT EXISTS api_keys (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id      INTEGER NOT NULL,
+			name         TEXT    NOT NULL,
+			key_hash     TEXT    NOT NULL UNIQUE,
+			prefix       TEXT    NOT NULL,
+			created_at   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_used_at TEXT    DEFAULT NULL,
+			revoked_at   TEXT    DEFAULT NULL,
+			FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+		)`,
+		"CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id)",
+		// An expiry for keys; NULL keeps the old behaviour of never expiring.
+		"ALTER TABLE api_keys ADD COLUMN expires_at TEXT DEFAULT NULL",
 		// "your own storage is nearly full", as opposed to storage_80, which is
 		// about the server as a whole and only concerns admins.
 		"ALTER TABLE notification_prefs ADD COLUMN user_storage_80 INTEGER NOT NULL DEFAULT 1",

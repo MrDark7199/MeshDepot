@@ -25,6 +25,10 @@ export const descriptionCss = `
   .design-description code, .design-description pre { font-family: 'DM Mono', monospace; font-size: 0.92em; }
   .design-description pre { margin: 0 0 10px; white-space: pre-wrap; }
   .design-description hr { margin: 14px 0; border: none; border-top: 1px solid var(--border); }
+  .design-description .design-video-link { display: inline-block; margin: 0 0 10px; padding: 9px 14px;
+    background: var(--surface); border: 1px solid var(--border2); border-radius: 9px;
+    color: var(--text2); text-decoration: none; font-weight: 600; }
+  .design-description .design-video-link:hover { border-color: var(--accent); color: var(--accent-light); }
 `
 
 /**

@@ -10,6 +10,7 @@ import { DesignPage } from './components/DesignPage'
 import { api } from './services/api'
 import { browserHandlesClick, gridHref } from './utils/navlink'
 import { UserAvatar } from './components/UserAvatar'
+import { ToggleSwitch } from './components/ToggleSwitch'
 import type { Design, DesignID, Tag, QueueItem, QueueBlock, DownloadJob, Filters, Collection, SyncStatus, SyncStep } from './types'
 import { createNotificationsStore } from './hooks/useNotifications'
 import { createSyncProgressStore } from './hooks/useSyncProgress'
@@ -1309,13 +1310,15 @@ function ConfirmModal(props: { title: string; body: string; hint?: string; confi
           </p>
         </Show>
         <Show when={props.checkboxLabel}>
-          <label style={{ display:'flex', 'align-items':'flex-start', gap:'9px', cursor:'pointer',
+          <div style={{ display:'flex', 'align-items':'center', gap:'11px',
             'font-family':"'DM Sans',sans-serif", 'font-size':'13px', color:'var(--text2)', 'line-height':'1.5' }}>
-            <input type="checkbox" checked={props.checkboxChecked ?? false}
-              onChange={e => props.onCheckboxChange?.(e.currentTarget.checked)}
-              style={{ 'margin-top':'2px', cursor:'pointer', 'accent-color':'var(--accent)' }} />
-            <span>{props.checkboxLabel}</span>
-          </label>
+            <ToggleSwitch checked={props.checkboxChecked ?? false}
+              onChange={value => props.onCheckboxChange?.(value)} />
+            <span style={{ cursor:'pointer' }}
+              onClick={() => props.onCheckboxChange?.(!(props.checkboxChecked ?? false))}>
+              {props.checkboxLabel}
+            </span>
+          </div>
         </Show>
         <div style={{ height:'10px' }} />
         <div style={{ display:'flex', gap:'10px', 'justify-content':'flex-end' }}>
@@ -1483,7 +1486,8 @@ function MainApp() {
   const [allCollections, setAllCollections] = createSignal<Collection[]>([])
   const [showSyncAllConfirm, setShowSyncAllConfirm] = createSignal(false)
   const [pendingDelete, setPendingDelete] = createSignal<Design | null>(null)
-  const [excludeFromSync, setExcludeFromSync] = createSignal(true)
+  // Off by default; see the same signal in DesignPage for why.
+  const [excludeFromSync, setExcludeFromSync] = createSignal(false)
   const [page, setPage] = createSignal(1)
   const [hasPlatformAccount, setHasPlatformAccount] = createSignal(false)
 

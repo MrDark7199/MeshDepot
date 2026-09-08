@@ -47,6 +47,71 @@ const normalizeHex = (hex: string): string => {
 }
 
 /**
+ * WCAG 2.1 relative luminance of linear-light RGB components (0..1).
+ *
+ * Gamma-linearized and weighted by cone sensitivity - not the naive
+ * 0.299/0.587/0.114 average, which works on sRGB values and is well off for
+ * saturated colours.
+ */
+const relativeLuminance = (r: number, g: number, b: number): number => {
+  const lin = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4))
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+/**
+ * The darkest a model may be drawn before its shape stops being readable.
+ *
+ * Roughly #3a3a3a. Below this the lighting has nothing to work with: Babylon
+ * multiplies the diffuse colour by the light, and anything times a value near
+ * zero stays near zero - so a black part arrives as a flat silhouette with no
+ * edges, no curvature and no accents.
+ */
+const MIN_MODEL_LUMINANCE = 0.04
+
+/**
+ * Lifts a colour read from a file until the model is actually legible.
+ *
+ * Applies only to colours the file dictates, never to one somebody picked: a
+ * member who deliberately sets a part to black gets black.
+ *
+ * How it lifts depends on what is there. A colour with some hue left is scaled
+ * up, which keeps it recognisably the same colour - a very dark red becomes a
+ * dark red rather than pink. A colour that is essentially black has no hue to
+ * preserve and is mixed towards white instead, because scaling zero by anything
+ * is still zero.
+ */
+const legibleModelHex = (hex: string): string => {
+  const normalized = normalizeHex(hex)
+  const r = parseInt(normalized.slice(1, 3), 16) / 255
+  const g = parseInt(normalized.slice(3, 5), 16) / 255
+  const b = parseInt(normalized.slice(5, 7), 16) / 255
+  if (relativeLuminance(r, g, b) >= MIN_MODEL_LUMINANCE) return normalized
+
+  const toHex = (value: number) =>
+    Math.round(Math.min(1, Math.max(0, value)) * 255).toString(16).padStart(2, '0')
+
+  const brightest = Math.max(r, g, b)
+  if (brightest > 0.06) {
+    // Enough colour to scale. Stepping rather than solving for the factor: the
+    // luminance curve is not linear, and a loop of at most a few dozen steps is
+    // both exact enough and obvious to read.
+    for (let factor = 1.05; factor <= 20; factor += 0.05) {
+      const lifted = [r * factor, g * factor, b * factor]
+      if (relativeLuminance(lifted[0], lifted[1], lifted[2]) >= MIN_MODEL_LUMINANCE) {
+        return '#' + lifted.map(toHex).join('')
+      }
+    }
+  }
+  for (let mix = 0.02; mix < 1; mix += 0.01) {
+    const lifted = [r + (1 - r) * mix, g + (1 - g) * mix, b + (1 - b) * mix]
+    if (relativeLuminance(lifted[0], lifted[1], lifted[2]) >= MIN_MODEL_LUMINANCE) {
+      return '#' + lifted.map(toHex).join('')
+    }
+  }
+  return normalized
+}
+
+/**
  * True if the normal buffer carries at least one non-degenerate normal. STL files may
  * ship zero-length facet normals (e.g. our marching-cubes resin reconstruction), which
  * would leave the mesh unlit; callers recompute normals from geometry when this is false.
@@ -463,15 +528,8 @@ export function StlViewerModal(props: StlViewerModalProps) {
     axis(new Vector3(cx, ay, cz + axisLen), new Color3(0.38, 0.52, 1), 'axisZ')
   }
 
-  /**
-   * WCAG 2.1 relative luminance (gamma-linearized, weighted by cone sensitivity). Not the same as
-   * the naive 0.299/0.587/0.114 average, which works on sRGB values and is well off for saturated
-   * colours.
-   */
-  const relLuminance = (c: Color3): number => {
-    const lin = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4))
-    return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
-  }
+  /** WCAG 2.1 relative luminance of a Babylon colour; see relativeLuminance above. */
+  const relLuminance = (c: Color3): number => relativeLuminance(c.r, c.g, c.b)
 
   /**
    * Picks a line colour that stays visible on a freely configurable background.
@@ -1980,7 +2038,8 @@ export function StlViewerModal(props: StlViewerModalProps) {
     const groupFor = (key: string): BuiltGroup => {
       let g = groupMap.get(key)
       if (!g) {
-        const hex = key === 'default' ? DEFAULT_HEX : (colorForExtruder(key) || DEFAULT_HEX)
+        // Lifted when the file asks for something too dark to show its own shape.
+        const hex = key === 'default' ? DEFAULT_HEX : legibleModelHex(colorForExtruder(key) || DEFAULT_HEX)
         const material = makeMaterial('mat_' + key, hex, scene)
         const label = settings.plateNameForExtruder.get(key) || (key === 'default' ? 'Model' : 'Extruder ' + key)
         g = { label, material, meshes: [], defaultHex: normalizeHex(hex) }

@@ -50,6 +50,12 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	directory := t.TempDir()
 
+	// The suite serves its files from 127.0.0.1, which is exactly what the
+	// download guard refuses. Lifted for the duration of a test and put back
+	// afterwards; the guard has its own test in the platforms package.
+	platforms.AllowPrivateDownloadsForTest = true
+	t.Cleanup(func() { platforms.AllowPrivateDownloadsForTest = false })
+
 	database, failure := db.Open(filepath.Join(directory, "meshdepot.db"))
 	if failure != nil {
 		t.Fatalf("open database: %v", failure)
@@ -148,6 +154,11 @@ type request struct {
 	token    string
 	headers  map[string]string
 	noCookie bool
+	// remoteAddr overrides the peer address. httptest hands out 192.0.2.1, a
+	// public one, and routes that refuse a plaintext connection from outside the
+	// network judge by exactly that - so tests speak from loopback unless they
+	// are about the refusal itself.
+	remoteAddr string
 }
 
 // response holds what the router answered, already decoded where possible.
@@ -201,6 +212,10 @@ func (testHarness *harness) do(call request) response {
 	}
 
 	httpRequest := httptest.NewRequest(call.method, call.path, body)
+	httpRequest.RemoteAddr = "127.0.0.1:54321"
+	if call.remoteAddr != "" {
+		httpRequest.RemoteAddr = call.remoteAddr
+	}
 	if call.body != nil && call.rawBody == nil {
 		httpRequest.Header.Set("Content-Type", "application/json")
 	}

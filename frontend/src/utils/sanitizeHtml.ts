@@ -44,6 +44,70 @@ const IMAGE_HOST_ALLOWLIST = [
   'myminifactory.com', 'thangs.com',
 ]
 
+/**
+ * Video services whose player may be embedded, and the address to embed.
+ *
+ * Descriptions carry build videos, and dropping the frame silently leaves a
+ * sentence pointing at nothing - "watch the build video here:" and then blank.
+ *
+ * Recognising the service is only for the wording of the link and for turning an
+ * embed address back into a watchable one: youtube.com/embed/ID is a page that
+ * refuses to be visited directly, while watch?v=ID is the one a person wants.
+ */
+const VIDEO_PATTERNS: { pattern: RegExp; watch: (id: string) => string; label: string }[] = [
+  {
+    pattern: /^https?:\/\/(?:www\.)?youtube(?:-nocookie)?\.com\/embed\/([A-Za-z0-9_-]{6,20})/i,
+    watch: id => 'https://www.youtube.com/watch?v=' + id,
+    label: 'YouTube',
+  },
+  {
+    pattern: /^https?:\/\/(?:www\.)?youtube\.com\/watch\?v=([A-Za-z0-9_-]{6,20})/i,
+    watch: id => 'https://www.youtube.com/watch?v=' + id,
+    label: 'YouTube',
+  },
+  {
+    pattern: /^https?:\/\/youtu\.be\/([A-Za-z0-9_-]{6,20})/i,
+    watch: id => 'https://youtu.be/' + id,
+    label: 'YouTube',
+  },
+  {
+    pattern: /^https?:\/\/(?:player\.)?vimeo\.com\/(?:video\/)?(\d{6,12})/i,
+    watch: id => 'https://vimeo.com/' + id,
+    label: 'Vimeo',
+  },
+]
+
+/** Recognises an embeddable video address, or null. */
+function videoEmbed(url: string): { watch: string; label: string } | null {
+  for (const entry of VIDEO_PATTERNS) {
+    const match = entry.pattern.exec(url.trim())
+    if (match) return { watch: entry.watch(match[1]), label: entry.label }
+  }
+  return null
+}
+
+/**
+ * The link that replaces an embedded video.
+ *
+ * Not a player: embedding one would mean naming a foreign host in the site's
+ * Content-Security-Policy, and that policy is currently free of them. It would
+ * also report every viewer's address and view time to that service for a
+ * description written by a stranger - the same objection this file already
+ * raises against off-platform images.
+ *
+ * A link costs one click and no such promises. Built as nodes rather than
+ * markup, so nothing goes back through a parser.
+ */
+function videoLink(url: string, label: string): HTMLElement {
+  const link = document.createElement('a')
+  link.className = 'design-video-link'
+  link.setAttribute('href', url)
+  link.setAttribute('target', '_blank')
+  link.setAttribute('rel', 'noopener noreferrer')
+  link.textContent = label ? '▶  Watch on ' + label : '▶  Watch video'
+  return link
+}
+
 /** True if the image URL points at (a subdomain of) an allowlisted platform host. */
 function isAllowedImageHost(url: string): boolean {
   let host: string
@@ -121,6 +185,15 @@ export function sanitizeHtml(html: string, options: SanitizeOptions = {}): Docum
     const element = node as Element
     const tag = element.tagName.toLowerCase()
 
+    // A frame is never rendered, but it should not vanish either: a description
+    // that says "watch the build video here:" and then shows nothing is worse
+    // than one that offers the link. Recognised services get their name on it.
+    if (tag === 'iframe') {
+      const source = (element.getAttribute('src') || '').trim()
+      if (!isSafeUrl(source, true) || !/^https?:/i.test(source)) return []
+      const video = videoEmbed(source)
+      return [videoLink(video ? video.watch : source, video ? video.label : '')]
+    }
     if (DROP_WITH_CONTENT.has(tag)) return []
 
     const cleanChildren: Node[] = []

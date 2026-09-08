@@ -6,7 +6,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -244,36 +243,9 @@ func downloadProcess(database *sql.DB, configuration config.Config, registry pla
 		translate.New(database).ApplyToDesign(designID, result.Name, description, true)
 		// Raised after the design is stored, so the figure the member is told
 		// about is the one they can go and look at.
-		warnIfStorageNearlyFull(database, job.UserID)
+		notify.StorageNearlyFull(database, job.UserID)
 		return designID, nil
 	}
-}
-
-// warnIfStorageNearlyFull tells a member once their own storage crosses the
-// warning threshold.
-//
-// Only on the crossing: the check runs after every download, and a notification
-// on each one past 80% would turn the bell into a counter of downloads rather
-// than a warning. The previous state is derived from the size just added, which
-// is what makes "was below before" answerable without keeping a flag.
-func warnIfStorageNearlyFull(database *sql.DB, userID int) {
-	usage := quota.Of(database, userID)
-	if !usage.NearlyFull() {
-		return
-	}
-	var lastAdded int64
-	database.QueryRow(`
-		SELECT COALESCE(df.size_bytes, 0)
-		FROM design_files df JOIN designs d ON d.id = df.design_id
-		WHERE d.user_id = ? ORDER BY df.id DESC LIMIT 1`, userID).Scan(&lastAdded)
-	before := quota.Usage{UsedBytes: usage.UsedBytes - lastAdded, LimitBytes: usage.LimitBytes}
-	if before.NearlyFull() {
-		return
-	}
-	notify.User(database, userID, "user_storage_80",
-		"Your storage is nearly full",
-		fmt.Sprintf("%d%% of your storage quota is in use. Delete designs or versions you no longer need, or ask an administrator for more space.", usage.Percent()),
-		nil)
 }
 
 // syncProcess builds the Process function of the sync worker: reload the design

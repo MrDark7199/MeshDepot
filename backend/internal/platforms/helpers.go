@@ -111,6 +111,12 @@ func directGet(rawURL string, headers map[string]string) ([]byte, int) {
 	return fetch(&http.Client{Timeout: defaultTimeoutSecond * time.Second}, http.MethodGet, rawURL, "", headers)
 }
 
+// directGetWith is directGet through a caller-supplied client, so an address
+// that came from a client can be fetched through the guarded one.
+func directGetWith(client *http.Client, rawURL string, headers map[string]string) ([]byte, int) {
+	return fetch(client, http.MethodGet, rawURL, "", headers)
+}
+
 // directPost performs a direct HTTP POST with a raw body.
 func directPost(rawURL, body string, headers map[string]string) ([]byte, int) {
 	return fetch(apiClient(), http.MethodPost, rawURL, body, headers)
@@ -149,6 +155,16 @@ func (deps Deps) torPost(rawURL, body string, headers map[string]string) ([]byte
 // raster formats on the allowlist. suffix only keeps the file names apart when
 // several images are stored within the same nanosecond.
 func storeImage(user storage.UserLayout, imageURL string, suffix int) string {
+	return storeImageWith(user, imageURL, suffix, false)
+}
+
+// storeImageGuarded is storeImage for a picture address a client supplied. See
+// outboundguard.go.
+func storeImageGuarded(user storage.UserLayout, imageURL string, suffix int) string {
+	return storeImageWith(user, imageURL, suffix, true)
+}
+
+func storeImageWith(user storage.UserLayout, imageURL string, suffix int, guarded bool) string {
 	if imageURL == "" {
 		return ""
 	}
@@ -159,7 +175,12 @@ func storeImage(user storage.UserLayout, imageURL string, suffix int) string {
 	if failure := storage.MkdirAll(directory); failure != nil {
 		return ""
 	}
-	body, _ := directGet(imageURL, nil)
+	var body []byte
+	if guarded {
+		body, _ = directGetWith(guardedDownloadClient(), imageURL, nil)
+	} else {
+		body, _ = directGet(imageURL, nil)
+	}
 	if len(body) <= minImageFileBytes {
 		return ""
 	}
@@ -180,12 +201,29 @@ func storeImage(user storage.UserLayout, imageURL string, suffix int) string {
 // image, so the "checking images" category becomes visible during sync
 // (otherwise it would be a single moment invisible to the polling).
 func downloadAllImages(user storage.UserLayout, imageURLs []string, progress func(step, label string, current, total int)) []string {
+	return downloadAllImagesWith(user, imageURLs, progress, false)
+}
+
+// downloadAllImagesGuarded is downloadAllImages for addresses a client supplied.
+func downloadAllImagesGuarded(user storage.UserLayout, imageURLs []string) []string {
+	return downloadAllImagesWith(user, imageURLs, nil, true)
+}
+
+func downloadAllImagesWith(user storage.UserLayout, imageURLs []string,
+	progress func(step, label string, current, total int), guarded bool) []string {
+
 	var saved []string
 	for index, imageURL := range imageURLs {
 		if progress != nil {
 			progress("downloading_images", "", index+1, len(imageURLs))
 		}
-		if storedPath := storeImage(user, imageURL, len(saved)); storedPath != "" {
+		storedPath := ""
+		if guarded {
+			storedPath = storeImageGuarded(user, imageURL, len(saved))
+		} else {
+			storedPath = storeImage(user, imageURL, len(saved))
+		}
+		if storedPath != "" {
 			saved = append(saved, storedPath)
 		}
 	}
@@ -393,13 +431,24 @@ func generateTotp(secret string) string {
 // streamDownload streams a URL to disk (follows redirects) and returns the
 // written size + HTTP status (for 403/magic-byte checks).
 func streamDownload(rawURL, destPath string, headers map[string]string) (int64, int) {
+	return streamDownloadWith(downloadClient(), rawURL, destPath, headers)
+}
+
+// streamDownloadGuarded is streamDownload for an address this server did not
+// choose. Every connection is checked against the private ranges - see
+// outboundguard.go for why that check belongs at the socket and not at the URL.
+func streamDownloadGuarded(rawURL, destPath string, headers map[string]string) (int64, int) {
+	return streamDownloadWith(guardedDownloadClient(), rawURL, destPath, headers)
+}
+
+func streamDownloadWith(client *http.Client, rawURL, destPath string, headers map[string]string) (int64, int) {
 	// The URL is passed through unsanitised: these are presigned CDN links whose
 	// signature covers the path.
 	request, failure := newOutboundRequest(http.MethodGet, rawURL, "", headers)
 	if failure != nil {
 		return 0, 0
 	}
-	response, failure := downloadClient().Do(request)
+	response, failure := client.Do(request)
 	if failure != nil {
 		recordRequest(rawURL, requestKindDownload, 0)
 		return 0, 0
