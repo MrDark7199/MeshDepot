@@ -1,21 +1,17 @@
 package platforms
 
-// Outbound request accounting.
+// Outbound request accounting. Nothing is blocked: the point is to learn what one
+// download really costs. The cooldown paces whole jobs, while a single job issues
+// a metadata call, a full browser page load with its subresources, a presigned
+// URL lookup per instance and the transfer.
 //
-// Every request that leaves the process for a platform is counted here. Nothing
-// is blocked yet: the point of this phase is to learn what one download really
-// costs. The download cooldown paces whole jobs, while a single job turns out to
-// issue a metadata call, a full browser page load with all its subresources, a
-// presigned URL lookup per instance and the file transfer - so "300 seconds
-// between jobs" says nothing about how many requests leave the process.
-//
-// The recorder is package-level state on purpose. fetch(), streamDownload() and
-// the browser callback are package-level too, and threading a dependency through
-// every one of the thirty-odd call sites for a counter would be a poor trade.
+// The recorder is package-level state on purpose: fetch(), streamDownload() and
+// the browser callback are too, and threading a counter through thirty call sites
+// would be a poor trade.
 
 import (
 	"database/sql"
-	"log"
+	"meshdepot/internal/dbutil"
 	"net/url"
 	"strings"
 	"sync"
@@ -23,9 +19,10 @@ import (
 	"time"
 
 	"meshdepot/internal/safego"
+
+	"meshdepot/internal/logx"
 )
 
-// requestKind classifies an outbound request in the statistics.
 type requestKind string
 
 const (
@@ -35,25 +32,20 @@ const (
 )
 
 const (
-	// requestFlushInterval is how often buffered records reach the database.
-	// Writes are batched because a single page load produces a burst of events
-	// and the database runs on one connection.
+	// Writes are batched: a single page load produces a burst of events and the
+	// database runs on one connection.
 	requestFlushInterval = 5 * time.Second
-	// requestFlushThreshold forces a flush before the interval when a burst
-	// fills the buffer.
+	// requestFlushThreshold forces a flush before the interval on a burst.
 	requestFlushThreshold = 200
-	// requestRetention is how long records are kept. Long enough to look at a
-	// full day of syncing, short enough to stay small.
+	// requestRetention is long enough for a full day of syncing, short enough to
+	// stay small.
 	requestRetention = 48 * time.Hour
-	// requestSummaryInterval is how often the counts are logged, so the numbers
-	// show up without querying the database.
+	// requestSummaryInterval logs the counts, so they show up without a query.
 	requestSummaryInterval = 5 * time.Minute
 )
 
-// platformHostSuffixes maps a host suffix to the platform it belongs to. Suffix
-// matching keeps a platform's CDN and login hosts with the platform itself -
-// MakerWorld files come from bblmw.com and its login from bambulab.com, and both
-// count against MakerWorld.
+// platformHostSuffixes keeps a platform's CDN and login hosts with the platform:
+// MakerWorld files come from bblmw.com and its login from bambulab.com.
 var platformHostSuffixes = map[string]string{
 	"makerworld.com":    "makerworld",
 	"bblmw.com":         "makerworld",
@@ -66,8 +58,8 @@ var platformHostSuffixes = map[string]string{
 	"thangs.com":        "thangs",
 }
 
-// platformForURL resolves which platform a URL belongs to, or "" when the host
-// is none of ours - unrelated CDNs and avatar hosts are not counted.
+// platformForURL returns "" for hosts that are none of ours - unrelated CDNs and
+// avatar hosts are not counted.
 func platformForURL(rawURL string) string {
 	parsed, failure := url.Parse(rawURL)
 	if failure != nil {
@@ -85,7 +77,6 @@ func platformForURL(rawURL string) string {
 	return ""
 }
 
-// requestRecord is one counted outbound request.
 type requestRecord struct {
 	platform string
 	kind     requestKind
@@ -93,7 +84,6 @@ type requestRecord struct {
 	at       time.Time
 }
 
-// requestRecorder buffers records and writes them in batches.
 type requestRecorder struct {
 	db     *sql.DB
 	mutex  sync.Mutex
@@ -104,12 +94,11 @@ type requestRecorder struct {
 	lastPrune   time.Time
 }
 
-// activeRecorder is nil until StartRequestAccounting wires it up; every record
-// call is a no-op until then, which is what tests and one-off tools want.
+// activeRecorder is nil until StartRequestAccounting wires it up, so every record
+// call is a no-op until then.
 var activeRecorder atomic.Pointer[requestRecorder]
 
-// StartRequestAccounting connects the counter to the database and starts the
-// flush loop. It returns immediately.
+// StartRequestAccounting connects the counter and starts the flush loop.
 func StartRequestAccounting(database *sql.DB, stop <-chan struct{}) {
 	if database == nil {
 		return
@@ -137,8 +126,7 @@ func StartRequestAccounting(database *sql.DB, stop <-chan struct{}) {
 	})
 }
 
-// recordRequest counts one outbound request. Requests to hosts that belong to no
-// platform are ignored.
+// recordRequest ignores hosts that belong to no platform.
 func recordRequest(rawURL string, kind requestKind, status int) {
 	recorder := activeRecorder.Load()
 	if recorder == nil {
@@ -151,13 +139,12 @@ func recordRequest(rawURL string, kind requestKind, status int) {
 	recorder.add(requestRecord{platform: platform, kind: kind, status: status, at: time.Now()})
 }
 
-// RecordBrowserRequest counts one request a browser page issued. Exported for
-// the browser runner, which reports every request its pages make.
+// RecordBrowserRequest is exported for the browser runner, which reports every
+// request its pages make.
 func RecordBrowserRequest(rawURL string) {
 	recordRequest(rawURL, requestKindPage, 0)
 }
 
-// add buffers a record and flushes early when a burst fills the buffer.
 func (recorder *requestRecorder) add(record requestRecord) {
 	recorder.mutex.Lock()
 	recorder.buffer = append(recorder.buffer, record)
@@ -168,9 +155,9 @@ func (recorder *requestRecorder) add(record requestRecord) {
 	}
 }
 
-// flush writes the buffered records, logs the periodic summary and prunes old
-// rows. A failing write drops the batch: these are statistics, not data worth
-// stalling a download for.
+// flush writes the buffered records, logs the summary and prunes old rows. A
+// failing write drops the batch: these are statistics, not data worth stalling a
+// download for.
 func (recorder *requestRecorder) flush() {
 	recorder.mutex.Lock()
 	batch := recorder.buffer
@@ -187,8 +174,18 @@ func (recorder *requestRecorder) flush() {
 			_ = transaction.Rollback()
 			return
 		}
+		// Counted rather than logged per row: a database that refuses one insert
+		// refuses the next two hundred as well, and the point of this is one line,
+		// not a flood of them.
+		refused := 0
 		for _, record := range batch {
-			_, _ = statement.Exec(record.platform, string(record.kind), record.status, record.at.UTC().Format(time.DateTime))
+			if _, failure := statement.Exec(record.platform, string(record.kind), record.status,
+				record.at.UTC().Format(time.DateTime)); failure != nil {
+				refused++
+			}
+		}
+		if refused > 0 {
+			logx.Warnf("[requests] %d of %d records could not be stored", refused, len(batch))
 		}
 		_ = statement.Close()
 		if transaction.Commit() != nil {
@@ -215,11 +212,11 @@ func (recorder *requestRecorder) flush() {
 
 	for platform, count := range summary {
 		if count > 0 {
-			log.Printf("[requests] %s: %d request(s) in the last %s", platform, count, requestSummaryInterval)
+			logx.Debugf("[requests] %s: %d request(s) in the last %s", platform, count, requestSummaryInterval)
 		}
 	}
 	if duePrune {
 		cutoff := time.Now().UTC().Add(-requestRetention).Format(time.DateTime)
-		_, _ = recorder.db.Exec("DELETE FROM platform_requests WHERE at < ?", cutoff)
+		dbutil.ExecLogged(recorder.db, "DELETE FROM platform_requests WHERE at < ?", cutoff)
 	}
 }

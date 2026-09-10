@@ -1,6 +1,5 @@
-// Package tor manages the Tor daemon as a supervised subprocess inside the app
-// container and provides a SOCKS5 HTTP client plus circuit rotation (replacement
-// for the separate tor container).
+// Package tor manages the Tor daemon as a supervised subprocess and provides a
+// SOCKS5 HTTP client plus circuit rotation.
 package tor
 
 import (
@@ -19,29 +18,23 @@ import (
 )
 
 const (
-	// controlPassword + matching hash (as in the previous tor container).
+	// controlPassword and its hash, as in the previous tor container.
 	controlPassword = "meshdepot"
 	hashedPassword  = "16:C9A55C897571F08260917354D70C4C1154427E7F361B74FF64DCA19B37"
 )
 
-// SocksAddr and controlAddr are where the supervised tor daemon listens. The
-// container shares the host's network stack, so these are host ports: they sit
-// in one contiguous block with the app (9000) and the Firefox resolver (9001)
-// rather than on Tor's defaults, which would collide with a Tor already running
-// on the machine. Both are overridable so a deployment that does have such a
-// collision can move them without a rebuild.
-//
-// SocksAddr is exported because the admin health check dials it to report
-// whether Tor is up; a second copy of the literal there would drift the first
-// time this moves.
+// The container shares the host's network stack, so these are host ports: one
+// contiguous block with the app (9000) and the Firefox resolver (9001) rather
+// than Tor's defaults, which would collide with a Tor already on the machine.
+// Overridable so such a deployment can move them without a rebuild. SocksAddr is
+// exported because the admin health check dials it.
 var (
 	SocksAddr   = addressFromEnvironment("TOR_SOCKS_ADDR", "127.0.0.1:9002")
 	controlAddr = addressFromEnvironment("TOR_CONTROL_ADDR", "127.0.0.1:9003")
 )
 
-// addressFromEnvironment reads one address, falling back when it is unset or
-// blank. A blank value is treated as unset rather than as "listen on any port":
-// an empty variable in a compose file is a mistake, not an instruction.
+// addressFromEnvironment treats a blank value as unset: an empty variable in a
+// compose file is a mistake, not an instruction.
 func addressFromEnvironment(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return value
@@ -49,7 +42,6 @@ func addressFromEnvironment(key, fallback string) string {
 	return fallback
 }
 
-// Supervisor starts and supervises the tor daemon.
 type Supervisor struct {
 	binaryPath string
 	dataDir    string
@@ -62,8 +54,8 @@ func New(binaryPath string) *Supervisor {
 	return &Supervisor{binaryPath: binaryPath, dataDir: "/tmp/meshdepot-tor"}
 }
 
-// Start starts tor and a watchdog that restarts it on exit. It runs until ctx
-// is cancelled. It returns once tor has bootstrapped (or on timeout).
+// Start runs tor and a watchdog that restarts it on exit, until ctx is cancelled.
+// It returns once tor has bootstrapped, or on timeout.
 func (supervisor *Supervisor) Start(ctx context.Context) error {
 	_ = os.MkdirAll(supervisor.dataDir, 0o700)
 	safego.Go("tor-watchdog", func() { supervisor.supervise(ctx) })
@@ -73,7 +65,6 @@ func (supervisor *Supervisor) Start(ctx context.Context) error {
 	return nil
 }
 
-// supervise starts tor and restarts it on an unexpected exit.
 func (supervisor *Supervisor) supervise(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
@@ -98,7 +89,6 @@ func (supervisor *Supervisor) supervise(ctx context.Context) {
 	}
 }
 
-// waitBootstrap polls until the SOCKS port accepts connections.
 func (supervisor *Supervisor) waitBootstrap(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -112,7 +102,6 @@ func (supervisor *Supervisor) waitBootstrap(timeout time.Duration) error {
 	return fmt.Errorf("tor: SOCKS port %s not reachable after %s", SocksAddr, timeout)
 }
 
-// HTTPClient returns an HTTP client that goes through the Tor SOCKS5 proxy.
 func (supervisor *Supervisor) HTTPClient(timeout time.Duration) (*http.Client, error) {
 	dialer, failure := proxy.SOCKS5("tcp", SocksAddr, nil, proxy.Direct)
 	if failure != nil {
@@ -129,7 +118,6 @@ func (supervisor *Supervisor) HTTPClient(timeout time.Duration) (*http.Client, e
 	return &http.Client{Transport: transport, Timeout: timeout}, nil
 }
 
-// NewCircuit requests a new Tor route (new IP) via the control port.
 func (supervisor *Supervisor) NewCircuit() error {
 	conn, failure := net.DialTimeout("tcp", controlAddr, 3*time.Second)
 	if failure != nil {

@@ -11,7 +11,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// newTestDatabase opens an initialised database in a fresh directory.
 func newTestDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 	database := openTestDatabase(t, filepath.Join(t.TempDir(), "meshdepot.db"))
@@ -49,8 +48,6 @@ func TestOpenEnablesForeignKeysAndWAL(t *testing.T) {
 	}
 }
 
-// A single pool slot is what keeps web requests and worker goroutines from
-// producing "database is locked".
 func TestOpenLimitsToASingleConnection(t *testing.T) {
 	database := openTestDatabase(t, filepath.Join(t.TempDir(), "meshdepot.db"))
 	if maximum := database.Stats().MaxOpenConnections; maximum != 1 {
@@ -58,7 +55,6 @@ func TestOpenLimitsToASingleConnection(t *testing.T) {
 	}
 }
 
-// A path with spaces or a '?' must not be swallowed by the DSN parser.
 func TestOpenEscapesThePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mesh depot?db.sqlite")
 	database := openTestDatabase(t, path)
@@ -116,8 +112,8 @@ func TestInitSchemaSeedsTheDefaultAdmin(t *testing.T) {
 	if state != "active" || admin != 1 {
 		t.Fatalf("the seed account is not an active admin: %s/%d", state, admin)
 	}
-	// The credentials are public knowledge, so the account has to be replaced
-	// on first use.
+	// The credentials are public knowledge, so the account has to be replaced on
+	// first use.
 	if mustChange != 1 {
 		t.Fatal("must_change_password is not set on the seed account")
 	}
@@ -143,8 +139,6 @@ func TestInitSchemaIsIdempotent(t *testing.T) {
 	}
 }
 
-// The seed only runs on an empty user table, so an existing installation never
-// gets a second admin back.
 func TestInitSchemaDoesNotSeedWhenUsersExist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "meshdepot.db")
 	database := openTestDatabase(t, path)
@@ -202,7 +196,6 @@ func TestMigrateAddsTheLaterColumns(t *testing.T) {
 	}
 }
 
-// The dead table must not come back on a database that still has it.
 func TestMigrateDropsUserSessions(t *testing.T) {
 	database := newTestDatabase(t)
 	database.Exec("CREATE TABLE user_sessions (id INTEGER PRIMARY KEY)")
@@ -216,8 +209,7 @@ func TestMigrateDropsUserSessions(t *testing.T) {
 	}
 }
 
-// Sessions written by the older code used RFC3339; those rows have to be
-// normalized to the layout every other time column uses.
+// Sessions written by the older code used RFC3339 and have to be normalized.
 func TestMigrateNormalizesSessionExpiry(t *testing.T) {
 	database := newTestDatabase(t)
 	var userID int
@@ -236,9 +228,8 @@ func TestMigrateNormalizesSessionExpiry(t *testing.T) {
 	}
 }
 
-// On a database from before the column existed the ALTER succeeds, and only then
-// does the one-time backfill run: imported tags all carry #457b9d, so a tag with
-// any other colour was a deliberate choice.
+// On a database from before the column the ALTER succeeds, and only then does the
+// backfill run: imported tags all carry #457b9d.
 func TestMigrateBackfillsTagSourceOnFirstAdd(t *testing.T) {
 	database := newTestDatabase(t)
 	var userID int
@@ -262,8 +253,6 @@ func TestMigrateBackfillsTagSourceOnFirstAdd(t *testing.T) {
 	}
 }
 
-// The backfill only runs on the boot that first adds tags.source, so on a later
-// boot a manual tag must not be reclassified.
 func TestMigrateBackfillsTagSourceOnlyOnce(t *testing.T) {
 	database := newTestDatabase(t)
 	var userID int
@@ -304,10 +293,8 @@ func columnExists(t *testing.T, database *sql.DB, table, column string) bool {
 	return false
 }
 
-// The old seeds allowed 15 s (30 s for makerworld) - short enough to get an
-// account rate-limited, and no longer accepted by the settings form. An
-// existing installation must be lifted instead of keeping a value nobody can
-// reproduce.
+// The old seeds allowed 15 s, short enough to get an account rate-limited, and
+// the settings form no longer accepts them.
 func TestMigrateLiftsCooldownsBelowTheMinimum(t *testing.T) {
 	database := newTestDatabase(t)
 	database.Exec("UPDATE app_settings SET value = '15' WHERE key = 'download_cooldown_printables'")
@@ -329,8 +316,6 @@ func TestMigrateLiftsCooldownsBelowTheMinimum(t *testing.T) {
 	}
 }
 
-// A value the admin chose above the floor survives every restart - migrate runs
-// on each boot.
 func TestMigrateKeepsCooldownsAboveTheMinimum(t *testing.T) {
 	database := newTestDatabase(t)
 	database.Exec("UPDATE app_settings SET value = '120' WHERE key = 'download_cooldown_default'")
@@ -345,9 +330,8 @@ func TestMigrateKeepsCooldownsAboveTheMinimum(t *testing.T) {
 	}
 }
 
-// The interval used to be stored but never read, so a member could have saved
-// any number down to a single day. Now that the scheduler honours it, such a
-// value would re-download a whole library every day.
+// The interval used to be stored but never read, so a member could have saved a
+// single day - which now re-downloads a whole library daily.
 func TestMigrateLiftsDesignUpdateIntervalsBelowTheFloor(t *testing.T) {
 	database := newTestDatabase(t)
 	seedMember(t, database, "kurz")
@@ -366,8 +350,6 @@ func TestMigrateLiftsDesignUpdateIntervalsBelowTheFloor(t *testing.T) {
 	}
 }
 
-// The floor comes from the setting, so raising it as an admin lifts everyone
-// below it on the next boot.
 func TestMigrateFollowsARaisedDesignUpdateFloor(t *testing.T) {
 	database := newTestDatabase(t)
 	seedMember(t, database, "kurz")
@@ -383,7 +365,6 @@ func TestMigrateFollowsARaisedDesignUpdateFloor(t *testing.T) {
 	}
 }
 
-// seedMember adds an active member; notification_prefs reference users.
 func seedMember(t *testing.T, database *sql.DB, name string) {
 	t.Helper()
 	if _, failure := database.Exec("INSERT INTO users (email, hash, name, state, public_id) VALUES (NULL, 'x', ?, 'active', ?)", name, publicid.New()); failure != nil {
@@ -391,8 +372,6 @@ func seedMember(t *testing.T, database *sql.DB, name string) {
 	}
 }
 
-// Every account needs an outward identifier: it addresses the account in every
-// URL and every storage path, so a row without one is unreachable.
 func TestSeededAdminHasAPublicID(t *testing.T) {
 	database := newTestDatabase(t)
 
@@ -405,9 +384,8 @@ func TestSeededAdminHasAPublicID(t *testing.T) {
 	}
 }
 
-// An installation from before the column gets its ids on the next boot. The
-// backfill runs on every start, so an insert path that ever forgets the column
-// heals itself instead of leaving an unaddressable account behind.
+// An installation from before the column gets its ids on the next boot, and the
+// backfill runs on every start, so a forgetful insert path heals itself.
 func TestMigrateBackfillsPublicIDForExistingRows(t *testing.T) {
 	database := newTestDatabase(t)
 	if _, failure := database.Exec(
@@ -431,20 +409,17 @@ func TestMigrateBackfillsPublicIDForExistingRows(t *testing.T) {
 	}
 }
 
-// Designs the publishing bug left without a cover: they kept their gallery, so
-// the detail view showed the images while the overview card - which reads
-// cover_path alone - stayed on the grey placeholder. The first gallery image is
-// what the cover would have been.
+// Designs the publishing bug left without a cover kept their gallery, so the
+// detail view showed images while the card stayed on the placeholder.
 func TestMigrateBackfillsMissingDesignCovers(t *testing.T) {
 	database := newTestDatabase(t)
 	database.Exec("INSERT INTO users (email, hash, name, state, public_id) VALUES ('o@example.org', 'x', 'o', 'active', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')")
 	// Each row needs its own public id: the unique index makes a second one that
-	// forgets the column fail outright, which is what keeps an unaddressable
-	// design from ever being stored.
+	// forgets the column fail outright.
 	database.Exec("INSERT INTO designs (id, public_id, user_id, name, source_platform) VALUES (1, ?, 1, 'Ohne Titelbild', 'thingiverse')", publicid.New())
 	database.Exec("INSERT INTO design_images (design_id, path, sort_order) VALUES (1, '1/second.png', 1), (1, '1/first.png', 0)")
-	// A design with no images at all has nothing to fall back on, and one with a
-	// chosen cover must keep it.
+	// A design with no images has nothing to fall back on, and one with a chosen
+	// cover must keep it.
 	database.Exec("INSERT INTO designs (id, public_id, user_id, name, source_platform) VALUES (2, ?, 1, 'Ganz ohne Bild', 'manual')", publicid.New())
 	database.Exec("INSERT INTO designs (id, public_id, user_id, name, source_platform, cover_path) VALUES (3, ?, 1, 'Mit Titelbild', 'thingiverse', '3/chosen.png')", publicid.New())
 	database.Exec("INSERT INTO design_images (design_id, path, sort_order) VALUES (3, '3/other.png', 0)")
@@ -467,9 +442,8 @@ func TestMigrateBackfillsMissingDesignCovers(t *testing.T) {
 	}
 }
 
-// Designs whose card shows a cover while their gallery marks none: the flag the
-// detail view reads was only ever written by the API paths, never by the
-// downloader.
+// Designs whose card shows a cover while their gallery marks none: the flag was
+// only ever written by the API paths, never by the downloader.
 func TestMigrateMarksTheCoverImageInTheGallery(t *testing.T) {
 	database := newTestDatabase(t)
 	mustExec := func(query string, args ...any) {
@@ -479,8 +453,8 @@ func TestMigrateMarksTheCoverImageInTheGallery(t *testing.T) {
 		}
 	}
 	mustExec("INSERT INTO users (email, hash, name, state, public_id) VALUES ('o@example.org', 'x', 'o', 'active', ?)", publicid.New())
-	// The cover is a hard link beside the pictures directory, so its path is not
-	// one of the gallery paths: the first image is what the marker falls back to.
+	// The cover is a hard link beside the pictures directory, so its path is not one
+	// of the gallery paths and the first image is the fallback.
 	mustExec("INSERT INTO designs (id, public_id, user_id, name, source_platform, cover_path) VALUES (1, ?, 1, 'Geladen', 'thingiverse', '1/cover.png')", publicid.New())
 	mustExec("INSERT INTO design_images (design_id, path, sort_order) VALUES (1, '1/second.png', 1), (1, '1/first.png', 0)")
 	// A design whose cover_path names one of its images marks that one.
@@ -503,8 +477,6 @@ func TestMigrateMarksTheCoverImageInTheGallery(t *testing.T) {
 	}
 }
 
-// Two accounts sharing an id would collide in the storage tree, where the id is
-// the directory name.
 func TestPublicIDIsUnique(t *testing.T) {
 	database := newTestDatabase(t)
 	value := publicid.New()

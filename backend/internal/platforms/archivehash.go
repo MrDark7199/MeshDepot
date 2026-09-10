@@ -2,20 +2,14 @@ package platforms
 
 // Content hashing for archive formats.
 //
-// Some platforms build the archive at download time rather than serving a
-// stored one. MakerWorld does: two downloads of an unchanged model give two
-// .3mf of identical size whose bytes differ only in the ZIP per-entry
-// "last modified" fields - verified on a real pair, where 176 bytes differed
-// and every one sat at offset 10..13 of a local file header, while all 22
-// entries carried identical names and CRC32s.
+// Some platforms build the archive at download time. MakerWorld does: two
+// downloads of an unchanged model give two .3mf whose bytes differ only in the
+// ZIP per-entry "last modified" fields - on a real pair, 176 bytes differed and
+// every one sat in a local file header, while all 22 entries carried identical
+// names and CRC32s.
 //
-// A byte hash of such a file changes on every sync, so the sync sees a new file
-// and publishes a version that contains nothing new. Hashing what the archive
-// *holds* instead of how it was packed makes the comparison stable.
-//
-// This only affects the comparison. Blobs stay addressed by their byte hash:
-// two archives with the same contents but different bytes really are different
-// files on disk, and a stored blob must keep resolving to what was downloaded.
+// A byte hash of such a file changes on every sync, so hashing what the archive
+// holds rather than how it was packed keeps the comparison stable.
 
 import (
 	"archive/zip"
@@ -26,21 +20,15 @@ import (
 	"sort"
 )
 
-// zipMagic is the local file header signature every ZIP starts with. 3MF, and
-// the .zip a few platforms hand out, are ZIP containers.
+// zipMagic is the local file header signature. 3MF and .zip are both containers.
 var zipMagic = []byte{'P', 'K', 0x03, 0x04}
 
-// ContentHash returns a hash that identifies what a file contains, ignoring how
-// it was packed.
+// ContentHash identifies what a file contains, ignoring how it was packed. For a
+// ZIP it comes from each entry's name, uncompressed size and CRC32, sorted by
+// name, all read from the central directory so nothing is decompressed.
 //
-// For a ZIP container it is derived from the entries: each name with its
-// uncompressed size and CRC32, sorted by name, so neither the packing order nor
-// the timestamps nor the compression level can change it. The CRCs come from
-// the central directory, so nothing is decompressed.
-//
-// Everything else - and any archive that cannot be read - falls back to
-// byteHash. A file we cannot interpret must compare by its bytes; guessing
-// would be worse than the duplicate versions this avoids.
+// Everything else, and any archive that cannot be read, falls back to byteHash: a
+// file we cannot interpret must compare by its bytes.
 func ContentHash(path string, byteHash string) string {
 	file, failure := os.Open(path)
 	if failure != nil {
@@ -69,9 +57,7 @@ func ContentHash(path string, byteHash string) string {
 
 	lines := make([]string, 0, len(reader.File))
 	for _, entry := range reader.File {
-		// Directory entries carry no content and some packers emit them and
-		// some do not - including them would reintroduce a difference that
-		// says nothing about the model.
+		// Directory entries carry no content and some packers emit them, some do not.
 		if entry.FileInfo().IsDir() {
 			continue
 		}

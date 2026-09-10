@@ -1,22 +1,18 @@
 package platforms
 
 // Library sync. For each active platform account it imports the platform
-// collections into the local library: new designs land in the download_queue,
-// known ones are linked directly, collection members not yet present are noted as
-// pending_collection_assignments. (Likes are deliberately not synced.)
+// collections: new designs land in the download_queue, known ones are linked
+// directly, and members not yet present are noted as
+// pending_collection_assignments. Likes are deliberately not synced.
 //
-// HTTP: thingiverse/printables/makerworld/thangs go via Tor (API), cults3d
-// scrapes HTML (cookie session), myminifactory uses the data-library endpoints
-// with a session cookie. (Note: MMF is behind Cloudflare in the original and is
-// fetched there via Firefox - rod is Chromium-only, so the HTTP path here may be
-// CF-blocked; live test pending.)
+// thingiverse, printables, makerworld and thangs go through Tor; cults3d scrapes
+// HTML with a cookie session; myminifactory uses its data-library endpoints.
 
 import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"meshdepot/internal/coerce"
 	"meshdepot/internal/dbutil"
 	"net/http"
@@ -24,25 +20,23 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"meshdepot/internal/logx"
 )
 
-// libraryCollection is a platform collection with its design URLs.
 type libraryCollection struct {
 	id, name string
 	urls     []string
 }
 
-// libraryAccount is a platform account to be synced.
 type libraryAccount struct {
 	userID          int
 	platform        string
 	syncCollections int
 }
 
-// LibrarySyncEnabled reports the server-wide switch (app_settings
-// library_sync_enabled). It outranks every per-account setting: when the admin
-// turns the library sync off, no account syncs, no matter what the user
-// configured. A missing row counts as enabled, which is what the schema seeds.
+// LibrarySyncEnabled reports the server-wide switch, which outranks every
+// per-account setting. A missing row counts as enabled, as the schema seeds it.
 func LibrarySyncEnabled(database *sql.DB) bool {
 	var value string
 	if database.QueryRow("SELECT value FROM app_settings WHERE key='library_sync_enabled'").Scan(&value) != nil {
@@ -51,26 +45,22 @@ func LibrarySyncEnabled(database *sql.DB) bool {
 	return value != "0"
 }
 
-// RunLibrarySync processes all active platform accounts (entry point for the
-// scheduler).
+// RunLibrarySync processes all active platform accounts, for the scheduler.
 func RunLibrarySync(deps Deps) {
 	if !LibrarySyncEnabled(deps.DB) {
-		log.Printf("[library-sync] disabled server-side - nothing to do")
+		logx.Infof("[library-sync] disabled server-side - nothing to do")
 		return
 	}
 	runLibraryAccounts(deps, deps.loadLibraryAccounts(
 		`SELECT user_id, platform, sync_collections FROM platform_accounts WHERE state='active'`))
 }
 
-// RunLibrarySyncFor processes the accounts of exactly one user (optionally
-// restricted to one platform) - the manual "Sync now" trigger.
-//
-// The server switch is checked here as well, not only in the handlers: this is
-// the last point every caller passes through, so a forgotten check upstream
-// cannot start a sync the admin switched off.
+// RunLibrarySyncFor processes one user's accounts, optionally one platform - the
+// manual "sync now". The server switch is checked here as well, since this is
+// the last point every caller passes through.
 func RunLibrarySyncFor(deps Deps, userID int, platform string) {
 	if !LibrarySyncEnabled(deps.DB) {
-		log.Printf("[library-sync] disabled server-side - user %d skipped", userID)
+		logx.Infof("[library-sync] disabled server-side - user %d skipped", userID)
 		return
 	}
 	query := `SELECT user_id, platform, sync_collections FROM platform_accounts WHERE state='active' AND user_id=?`
@@ -82,7 +72,6 @@ func RunLibrarySyncFor(deps Deps, userID int, platform string) {
 	runLibraryAccounts(deps, deps.loadLibraryAccounts(query, args...))
 }
 
-// loadLibraryAccounts reads the accounts to be synced.
 func (deps Deps) loadLibraryAccounts(query string, args ...any) []libraryAccount {
 	rows, failure := deps.DB.Query(query, args...)
 	if failure != nil {
@@ -99,11 +88,11 @@ func (deps Deps) loadLibraryAccounts(query string, args ...any) []libraryAccount
 	return accounts
 }
 
-// runLibraryAccounts fetches the collections for each account and fills
-// queue / collections / pending assignments.
+// runLibraryAccounts fetches each account's collections and fills the queue,
+// the collections and the pending assignments.
 func runLibraryAccounts(deps Deps, accounts []libraryAccount) {
 	if len(accounts) == 0 {
-		log.Printf("[library-sync] no active accounts to sync")
+		logx.Infof("[library-sync] no active accounts to sync")
 		return
 	}
 	for _, account := range accounts {
@@ -112,39 +101,37 @@ func runLibraryAccounts(deps Deps, accounts []libraryAccount) {
 		}
 		var collections []libraryCollection
 		if account.platform == "cults3d" {
-			// Prefer the official GraphQL API (basic auth nickname:apiKey) - not
-			// behind Cloudflare and therefore reliable. Without an API key, fall back
-			// to the Firefox-resolver scrape (Firefox passes the JS challenge).
+			// The official GraphQL API is not behind Cloudflare and therefore reliable.
+			// Without an API key, fall back to the Firefox scrape, which passes the JS
+			// challenge.
 			if nickname, apiKey := deps.cults3dAPICreds(account.userID); nickname != "" && apiKey != "" {
 				collections = cults3dFetchCollectionsAPI(nickname, apiKey)
 			} else if deps.Cfg.PlaywrightURL != "" {
 				email, password := deps.cults3dCredentials(account.userID)
 				if email == "" || password == "" {
-					log.Printf("[library-sync] cults3d (user %d): no credentials/API key - skipped", account.userID)
+					logx.Infof("[library-sync] cults3d (user %d): no credentials/API key - skipped", account.userID)
 					continue
 				}
 				collections = cults3dFetchCollectionsFirefox(deps.Cfg.PlaywrightURL, email, password)
 			} else {
-				log.Printf("[library-sync] cults3d (user %d): no API key and no Firefox resolver - skipped", account.userID)
+				logx.Infof("[library-sync] cults3d (user %d): no API key and no Firefox resolver - skipped", account.userID)
 				continue
 			}
 		} else {
 			token, username := deps.libraryToken(account.userID, account.platform)
 			if token == "" {
-				log.Printf("[library-sync] %s (user %d): no token/login - skipped", account.platform, account.userID)
+				logx.Infof("[library-sync] %s (user %d): no token/login - skipped", account.platform, account.userID)
 				continue
 			}
 			collections = deps.fetchCollections(account.platform, token, username)
 		}
 		queued := deps.importCollections(account.userID, account.platform, collections)
-		log.Printf("[library-sync] %s (user %d): %d new design(s) enqueued", account.platform, account.userID, queued)
+		logx.Infof("[library-sync] %s (user %d): %d new design(s) enqueued", account.platform, account.userID, queued)
 	}
 }
 
-// importCollections writes fetched collections into the DB: known designs are
-// linked directly, new ones enqueued and their collection assignment noted as
-// pending (linked after the download). Returns the number of newly enqueued
-// designs.
+// importCollections links known designs, enqueues new ones and notes their
+// collection assignment as pending. Returns the number newly enqueued.
 func (deps Deps) importCollections(userID int, platform string, collections []libraryCollection) int {
 	queued := 0
 	for _, collection := range collections {
@@ -167,13 +154,12 @@ func (deps Deps) importCollections(userID int, platform string, collections []li
 	return queued
 }
 
-// cults3dCollectionIDPattern extracts "nickname/slug" from a printlist URL
-// (= source_platform_collection_id, compatible with the previous scrape variant).
+// cults3dCollectionIDPattern extracts "nickname/slug" from a printlist URL,
+// compatible with the previous scrape variant.
 var cults3dCollectionIDPattern = regexp.MustCompile(`(?i)/design-collections/([^/?#]+/[^/?#]+)`)
 
-// cults3dFetchCollectionsAPI fetches the Cults3D collections via the official
-// GraphQL API (basic auth nickname:apiKey). Unlike the HTML scrape this is not
-// behind Cloudflare and therefore reliable. Returns the model URLs per printlist.
+// cults3dFetchCollectionsAPI uses the official GraphQL API, which unlike the
+// HTML scrape is not behind Cloudflare. Returns the model URLs per printlist.
 func cults3dFetchCollectionsAPI(nickname, apiKey string) []libraryCollection {
 	const query = `query={ myself { printlistsBatch(limit:100){ results { name url creationsBatch(limit:100){ results { url } } } } } }`
 	request, failure := http.NewRequest(http.MethodPost, "https://cults3d.com/graphql", strings.NewReader(query))
@@ -184,7 +170,7 @@ func cults3dFetchCollectionsAPI(nickname, apiKey string) []libraryCollection {
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response, failure := (&http.Client{Timeout: 60 * time.Second}).Do(request)
 	if failure != nil {
-		log.Printf("[library-sync] cults3d API unreachable: %v", failure)
+		logx.Errorf("[library-sync] cults3d API unreachable: %v", failure)
 		return nil
 	}
 	defer response.Body.Close()
@@ -212,7 +198,7 @@ func cults3dFetchCollectionsAPI(nickname, apiKey string) []libraryCollection {
 		return nil
 	}
 	if len(parsed.Errors) > 0 {
-		log.Printf("[library-sync] cults3d API error: %s", parsed.Errors[0].Message)
+		logx.Errorf("[library-sync] cults3d API error: %s", parsed.Errors[0].Message)
 		return nil
 	}
 	var output []libraryCollection
@@ -232,8 +218,7 @@ func cults3dFetchCollectionsAPI(nickname, apiKey string) []libraryCollection {
 	return output
 }
 
-// cults3dAPICreds returns nickname + API key from the token field (format
-// "nickname:apiKey", encrypted). Empty if no API key is stored.
+// cults3dAPICreds reads the token field, stored encrypted as "nickname:apiKey".
 func (deps Deps) cults3dAPICreds(userID int) (nickname, apiKey string) {
 	var encryptedToken sql.NullString
 	_ = deps.DB.QueryRow(
@@ -252,10 +237,9 @@ func (deps Deps) cults3dAPICreds(userID int) (nickname, apiKey string) {
 	return "", ""
 }
 
-// cults3dFetchCollectionsFirefox fetches the Cults3D collections via the Firefox
-// resolver sidecar (POST /collections/cults3d): Firefox logs in and reads the
-// rendered collection pages - passing Cloudflare's JS challenge, which headless
-// Chromium fails. On error/empty the account is skipped.
+// cults3dFetchCollectionsFirefox drives the Firefox resolver sidecar: Firefox
+// logs in and reads the rendered pages, passing the Cloudflare JS challenge that
+// headless Chromium fails. On error or an empty result the account is skipped.
 func cults3dFetchCollectionsFirefox(playwrightURL, email, password string) []libraryCollection {
 	requestBody, _ := json.Marshal(map[string]any{"email": email, "password": password})
 	endpoint := strings.TrimRight(playwrightURL, "/") + "/collections/cults3d"
@@ -268,7 +252,7 @@ func cults3dFetchCollectionsFirefox(playwrightURL, email, password string) []lib
 	client := &http.Client{Timeout: 240 * time.Second}
 	response, failure := client.Do(request)
 	if failure != nil {
-		log.Printf("[library-sync] cults3d resolver unreachable: %v", failure)
+		logx.Errorf("[library-sync] cults3d resolver unreachable: %v", failure)
 		return nil
 	}
 	defer response.Body.Close()
@@ -284,7 +268,7 @@ func cults3dFetchCollectionsFirefox(playwrightURL, email, password string) []lib
 		return nil
 	}
 	if parsed.Error != "" {
-		log.Printf("[library-sync] cults3d resolver error: %s", parsed.Error)
+		logx.Errorf("[library-sync] cults3d resolver error: %s", parsed.Error)
 		return nil
 	}
 	var output []libraryCollection
@@ -294,21 +278,19 @@ func cults3dFetchCollectionsFirefox(playwrightURL, email, password string) []lib
 	return output
 }
 
-// cults3dCredentials returns the decrypted login email + password of the Cults3D
-// account (for the browser login during the library sync).
+// cults3dCredentials returns the decrypted login for the browser login.
 func (deps Deps) cults3dCredentials(userID int) (email, password string) {
 	account := deps.loadAccount(userID, "cults3d")
 	return account.Username, account.Password
 }
 
-// libraryToken returns token + username for an account, with a refresh via
-// auto-login where the platform supports one.
+// libraryToken returns token and username, refreshed by auto-login where the
+// platform supports one.
 func (deps Deps) libraryToken(userID int, platform string) (token, username string) {
 	account := deps.loadAccount(userID, platform)
 
-	// MyMiniFactory: the API key (token) is enough for profile/collections - no
-	// login/session cookie needed. Likes are not reachable via the key (only via
-	// the Cloudflare web session) and are therefore not synced.
+	// MyMiniFactory: the API key alone covers profile and collections. Likes are
+	// only reachable through the Cloudflare web session and are not synced.
 	if platform == "myminifactory" {
 		return account.Token, account.Username
 	}
@@ -333,24 +315,24 @@ func (deps Deps) fetchCollections(platform, token, username string) []libraryCol
 	return nil
 }
 
-// ── Thingiverse (REST, Tor) ──────────────────────────────────────────────────
+// - Thingiverse (REST, Tor) -------------------------
 
 func (deps Deps) thingiverseHeaders(token string) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + token, "Accept": "application/json"}
 }
 func (deps Deps) thingiverseFetchCollections(token, username string) []libraryCollection {
-	// /users/me/collections is broken on Thingiverse - the real username must be
-	// used, otherwise no collections come back.
+	// /users/me/collections is broken on Thingiverse; the real username must be used
+	// or no collections come back.
 	if username == "" {
-		log.Printf("[library-sync][thingiverse] collections: skipped - no username set")
+		logx.Infof("[library-sync][thingiverse] collections: skipped - no username set")
 		return nil
 	}
-	// API directly (no Tor): api.thingiverse.com partly blocks Tor exit IPs with 403.
+	// Not through Tor: api.thingiverse.com blocks some Tor exit IPs with 403.
 	collectionsURL := "https://api.thingiverse.com/users/" + url.PathEscape(username) + "/collections"
 	body, code := directGet(collectionsURL, deps.thingiverseHeaders(token))
 	var collections []map[string]any
 	if json.Unmarshal(body, &collections) != nil {
-		log.Printf("[library-sync][thingiverse] collections: failed (HTTP %d)", code)
+		logx.Errorf("[library-sync][thingiverse] collections: failed (HTTP %d)", code)
 		return nil
 	}
 	var output []libraryCollection
@@ -382,7 +364,7 @@ func (deps Deps) thingiverseFetchCollections(token, username string) []libraryCo
 	return output
 }
 
-// ── Printables (GraphQL, Tor) ────────────────────────────────────────────────
+// - Printables (GraphQL, Tor) ------------------------
 
 func (deps Deps) printablesHeaders(token string) map[string]string {
 	return map[string]string{"Content-Type": "application/json", "Authorization": "Bearer " + token}
@@ -456,7 +438,7 @@ func (deps Deps) printablesFetchCollections(token string) []libraryCollection {
 	return output
 }
 
-// printablesParsePrintList reads items[].print.id + cursor from a GraphQL field.
+// printablesParsePrintList reads items[].print.id and the cursor from a field.
 func printablesParsePrintList(body []byte, field string) ([]string, string) {
 	var data struct {
 		Data map[string]struct {
@@ -484,7 +466,7 @@ func printablesParsePrintList(body []byte, field string) ([]string, string) {
 	return urls, entry.Cursor
 }
 
-// ── MakerWorld (REST, Tor) ───────────────────────────────────────────────────
+// - MakerWorld (REST, Tor) --------------------------
 
 func (deps Deps) makerworldHeaders(token string) map[string]string {
 	return map[string]string{
@@ -547,7 +529,7 @@ func makerworldHitID(hit map[string]any) string {
 	return ""
 }
 
-// ── Thangs (REST, Tor) ───────────────────────────────────────────────────────
+// - Thangs (REST, Tor) ----------------------------
 
 func (deps Deps) thangsHeaders(token string) map[string]string {
 	return map[string]string{"Authorization": token, "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -581,11 +563,10 @@ func (deps Deps) thangsFetchCollections(token, username string) []libraryCollect
 	return output
 }
 
-// thangsItems reads the model/collection list from the possible field names.
+// thangsItems reads the list from the possible field names.
 func thangsItems(body []byte) []map[string]any {
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(body, &raw) != nil {
-		// possibly a top-level array
 		var array []map[string]any
 		if json.Unmarshal(body, &array) == nil {
 			return array
@@ -603,19 +584,18 @@ func thangsItems(body []byte) []map[string]any {
 	return nil
 }
 
-// ── MyMiniFactory (REST API v2, API key only) ────────────────────────────────
-// The API key alone is enough for the user's public collections; a login/session
-// cookie is not needed. The username identifies whose collections are pulled (the
-// key does not resolve the identity). Likes are behind the Cloudflare web session
-// and not reachable via the key → no likes sync.
+// - MyMiniFactory (REST API v2, API key only) ----------------
+// The key covers the user's public collections but does not resolve the
+// identity, so the username says whose are pulled. Likes are behind the
+// Cloudflare web session and are not synced.
 
 var myMiniFactoryAPIHeaders = map[string]string{
 	"Accept":     "application/json",
 	"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 }
 
-// myMiniFactoryFetchCollections loads the user's public collections via the v2
-// API and, for each collection, the contained object IDs (paginated).
+// myMiniFactoryFetchCollections loads the public collections and, per
+// collection, the object IDs it holds.
 func (deps Deps) myMiniFactoryFetchCollections(apiKey, username string) []libraryCollection {
 	if apiKey == "" || username == "" {
 		return nil
@@ -646,8 +626,7 @@ func (deps Deps) myMiniFactoryFetchCollections(apiKey, username string) []librar
 	return output
 }
 
-// myMiniFactoryCollectionObjectURLs returns the object URLs of a collection
-// (paginated, 100 per page until a page is empty/incomplete).
+// myMiniFactoryCollectionObjectURLs pages 100 at a time until a page is short.
 func (deps Deps) myMiniFactoryCollectionObjectURLs(collectionID, apiKey string) []string {
 	var urls []string
 	for page := 1; page <= 100; page++ {
@@ -678,30 +657,35 @@ func (deps Deps) myMiniFactoryCollectionObjectURLs(collectionID, apiKey string) 
 }
 
 // IsExcludedFromSync reports whether the user deleted this design and asked for
-// it to stay gone. A design is matched by (platform, source id) where the URL
-// yields an id, and by its URL otherwise, so an entry written from either side
-// still matches.
+// it to stay gone. Matched by (platform, source id) where the URL yields one and
+// by URL otherwise, so an entry written from either side still matches.
+//
+// A probe the database could not answer counts as excluded. The two mistakes
+// are not equal: a design wrongly held back appears on the next run, while one
+// wrongly brought back is the very thing the member deleted and asked to be rid
+// of.
 func IsExcludedFromSync(db *sql.DB, userID int, platform, sourceID, designURL string) bool {
 	if sourceID != "" {
-		var id int
-		if db.QueryRow("SELECT id FROM sync_exclusions WHERE user_id=? AND source_platform=? AND source_id=? LIMIT 1",
-			userID, platform, sourceID).Scan(&id) == nil {
+		found, known := dbutil.Exists(db,
+			"SELECT id FROM sync_exclusions WHERE user_id=? AND source_platform=? AND source_id=? LIMIT 1",
+			userID, platform, sourceID)
+		if found || !known {
 			return true
 		}
 	}
 	if designURL != "" {
-		var id int
-		if db.QueryRow("SELECT id FROM sync_exclusions WHERE user_id=? AND source_url=? LIMIT 1",
-			userID, designURL).Scan(&id) == nil {
+		found, known := dbutil.Exists(db,
+			"SELECT id FROM sync_exclusions WHERE user_id=? AND source_url=? LIMIT 1", userID, designURL)
+		if found || !known {
 			return true
 		}
 	}
 	return false
 }
 
-// LiftSyncExclusion removes the block for a design. Importing it by hand is the
-// way back: without this the user could never get an excluded design again, and
-// the import would appear to do nothing on the next sync.
+// LiftSyncExclusion removes the block. Importing by hand is the way back:
+// without this an excluded design could never be had again, and the import would
+// appear to do nothing on the next sync.
 func LiftSyncExclusion(db *sql.DB, userID int, platform, sourceID, designURL string) {
 	if sourceID != "" {
 		dbutil.ExecLogged(db, "DELETE FROM sync_exclusions WHERE user_id=? AND source_platform=? AND source_id=?",
@@ -712,24 +696,32 @@ func LiftSyncExclusion(db *sql.DB, userID int, platform, sourceID, designURL str
 	}
 }
 
-// queueIfNew enqueues a design URL into the download_queue if it is neither in
-// the library nor already in the queue. Returns the new queue ID or 0 (skipped).
+// queueIfNew enqueues a design URL if it is neither in the library nor already
+// queued. Returns the new queue ID, or 0 when skipped.
 func queueIfNew(db *sql.DB, designURL, platform string, userID int) int {
-	var id int
-	if db.QueryRow("SELECT id FROM designs WHERE user_id=? AND source_url=? LIMIT 1", userID, designURL).Scan(&id) == nil {
+	// Every probe below skips the design when the answer is unknown as well as
+	// when it is yes: a database that cannot say whether this design is already
+	// here would otherwise have it downloaded a second time. The next sync run
+	// asks again.
+	if found, known := dbutil.Exists(db,
+		"SELECT id FROM designs WHERE user_id=? AND source_url=? LIMIT 1", userID, designURL); found || !known {
 		return 0
 	}
-	// A design the user deleted and excluded stays gone. Without this the sync
-	// downloaded it again on every run and the user had to delete it again.
+	// A design the user deleted and excluded stays gone; it used to come back on
+	// every run.
 	if IsExcludedFromSync(db, userID, platform, extractLibSourceID(designURL, platform), designURL) {
 		return 0
 	}
 	if sourceID := extractLibSourceID(designURL, platform); sourceID != "" {
-		if db.QueryRow("SELECT id FROM designs WHERE user_id=? AND source_platform=? AND source_id=? LIMIT 1", userID, platform, sourceID).Scan(&id) == nil {
+		if found, known := dbutil.Exists(db,
+			"SELECT id FROM designs WHERE user_id=? AND source_platform=? AND source_id=? LIMIT 1",
+			userID, platform, sourceID); found || !known {
 			return 0
 		}
 	}
-	if db.QueryRow("SELECT id FROM download_queue WHERE user_id=? AND source_url=? AND status IN ('pending','downloading') LIMIT 1", userID, designURL).Scan(&id) == nil {
+	if found, known := dbutil.Exists(db,
+		"SELECT id FROM download_queue WHERE user_id=? AND source_url=? AND status IN ('pending','downloading') LIMIT 1",
+		userID, designURL); found || !known {
 		return 0
 	}
 	insertResult, failure := db.Exec("INSERT INTO download_queue (user_id, source_url, platform, status) VALUES (?,?,?,'pending')", userID, designURL, platform)
@@ -775,18 +767,15 @@ func findLocalDesign(db *sql.DB, designURL string, userID int) int {
 	return 0
 }
 
-// findOrCreateCollection maps a platform collection onto a local one. The match
-// runs over the platform's ID, never over the name, so renaming a collection on
-// the platform keeps every design assigned to it instead of growing a second,
-// empty copy beside the old one.
+// findOrCreateCollection maps a platform collection onto a local one, matching
+// on the platform's ID and never on the name, so a rename on the platform keeps
+// every design assigned instead of growing an empty copy beside it.
 //
-// Whether that new name also reaches the local library depends on who named it
-// last, and source_name is what answers that: it holds the name the platform
-// reported the previous time, so an untouched collection reads exactly
-// "[Label] source_name" here. As long as it does, the sync follows a rename on
-// the platform. Anything else means the user renamed it locally, and then the
-// local name stays - the same rule the designs follow, where the sync never
-// overwrites a title either.
+// Whether that new name also reaches the library depends on who named it last,
+// which source_name answers: it holds the name the platform reported last time,
+// so an untouched collection reads exactly "[Label] source_name". Anything else
+// means the user renamed it locally, and then the local name stays - the same
+// rule the designs follow.
 func findOrCreateCollection(db *sql.DB, userID int, platform, platformID, name string) int {
 	label := Label(platform)
 	prefixed := "[" + label + "] " + name
@@ -798,10 +787,8 @@ func findOrCreateCollection(db *sql.DB, userID int, platform, platformID, name s
 		"SELECT id, name, source_name FROM collections WHERE user_id=? AND source_platform=? AND source_platform_collection_id=? LIMIT 1",
 		userID, platform, platformID).Scan(&id, &existingName, &reportedName)
 	if failure == nil && id > 0 {
-		// A row from before the column existed says nothing about who named it
-		// last. Treating it as "in sync" would hand the next platform rename a
-		// name it may not own, so it counts as renamed locally: the column is
-		// filled below, and only a rename *after* that moves the local name.
+		// A row from before the column existed says nothing about who named it last, so
+		// it counts as renamed locally: only a rename after this moves the local name.
 		previous := reportedName.String
 		if !reportedName.Valid {
 			previous = ""
@@ -832,8 +819,7 @@ var (
 	libraryThingPattern  = regexp.MustCompile(`(?i)thing:(\d+)`)
 	libraryModelsPattern = regexp.MustCompile(`(?i)/models/(\d+)`)
 	libraryObjectPattern = regexp.MustCompile(`(?i)/object/(\w+)`)
-	// Cults3D source ID = last path segment (slug, incl. hyphens) - matches the
-	// source_id that the Cults3D download stores via filepath.Base.
+	// Cults3D source ID = last path segment, matching what the download stores.
 	libraryCults3dPattern = regexp.MustCompile(`/([^/?#]+)/?$`)
 	libraryTailPattern    = regexp.MustCompile(`[/:](\w+)/?$`)
 )

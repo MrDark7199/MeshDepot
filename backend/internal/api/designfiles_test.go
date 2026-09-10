@@ -15,14 +15,13 @@ import (
 	"meshdepot/internal/storage"
 )
 
-// uploadVersion posts a new file version with the given files in the "file"
-// field, plus the version number and the notes the form sends alongside them.
+// uploadVersion posts a new version with the given files, plus the version number
+// and notes the form sends alongside.
 func (testHarness *harness) uploadVersion(designID int, version, notes string, files map[string][]byte) response {
 	testHarness.t.Helper()
 	return testHarness.postFiles(fmt.Sprintf("/api/v1/designs/%s/files", testHarness.designPID(designID)), version, notes, files)
 }
 
-// addEntries posts further files into an existing version.
 func (testHarness *harness) addEntries(designID, fileID int, files map[string][]byte) response {
 	testHarness.t.Helper()
 	return testHarness.postFiles(fmt.Sprintf("/api/v1/designs/%s/files/%d/entries", testHarness.designPID(designID), fileID), "", "", files)
@@ -63,7 +62,6 @@ func (testHarness *harness) postFiles(path, version, notes string, files map[str
 	})
 }
 
-// zipArchive builds a ZIP in memory from the given paths.
 func zipArchive(t *testing.T, files map[string][]byte) []byte {
 	t.Helper()
 	buffer := &bytes.Buffer{}
@@ -83,15 +81,13 @@ func zipArchive(t *testing.T, files map[string][]byte) []byte {
 	return buffer.Bytes()
 }
 
-// stlBytes and stlBytesAlternate are the smallest things that pass for a model
-// file. The content never matters, only that two uploads differ so the
-// content-addressed blob store keeps them apart.
+// The content never matters, only that two uploads differ, so the
+// content-addressed store keeps them apart.
 var (
 	stlBytes          = []byte("solid wuerfel\nendsolid wuerfel\n")
 	stlBytesAlternate = []byte("solid kugel\nendsolid kugel\n")
 )
 
-// relativePaths reads the relative paths of all entries of a version.
 func (testHarness *harness) relativePaths(versionID int) map[string]bool {
 	testHarness.t.Helper()
 	rows, failure := testHarness.database.Query(
@@ -140,8 +136,6 @@ func TestFilesStoreCreatesAVersion(t *testing.T) {
 	}
 }
 
-// A new version takes over as the current one; the previous one keeps its files
-// but loses the flag.
 func TestFilesStoreDemotesThePreviousVersion(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit Dateien")
@@ -212,7 +206,6 @@ func TestFilesStoreNeedsAFile(t *testing.T) {
 	}
 }
 
-// A shared user may read the design but not change its files.
 func TestFilesStoreRefusesAShareRecipient(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.adminID, "Geteiltes Design")
@@ -231,8 +224,8 @@ func TestFilesStoreRefusesAShareRecipient(t *testing.T) {
 	}
 }
 
-// A design the user has no access to at all answers 404 - not the 403 a share
-// recipient gets, which would confirm the design exists.
+// A design with no access at all answers 404, not the 403 a share recipient gets,
+// which would confirm it exists.
 func TestFilesStoreRefusesAForeignDesign(t *testing.T) {
 	testHarness := newHarness(t)
 	foreign := testHarness.insertDesign(testHarness.adminID, "Fremd")
@@ -244,8 +237,8 @@ func TestFilesStoreRefusesAForeignDesign(t *testing.T) {
 	}
 }
 
-// Identical bytes are stored once. Both entries point at the same blob, and the
-// second upload gets a duplicate warning naming the other design.
+// Identical bytes are stored once: both entries point at one blob, and the second
+// upload gets a warning naming the other design.
 func TestFilesStoreWarnsAboutDuplicateContentInAnotherDesign(t *testing.T) {
 	testHarness := newHarness(t)
 	firstDesign := testHarness.insertDesign(testHarness.userID, "Erstes Design")
@@ -262,9 +255,8 @@ func TestFilesStoreWarnsAboutDuplicateContentInAnotherDesign(t *testing.T) {
 	if warning["design_name"] != "Erstes Design" || warning["filename"] != "kopie.stl" {
 		t.Fatalf("the warning carries %v", warning)
 	}
-	// Each design publishes the content in its own version directory, but both
-	// entries point at one blob - deduplication happens at the inode, not at the
-	// path.
+	// Each design publishes into its own version directory, but both entries point at
+	// one blob - deduplication happens at the inode.
 	blobs := testHarness.count("SELECT COUNT(DISTINCT blob_hash) FROM design_file_entries")
 	if blobs != 1 {
 		t.Fatalf("the identical content produced %d blobs", blobs)
@@ -296,8 +288,6 @@ func TestFilesStoreWarnsAboutDuplicateContentInAnotherDesign(t *testing.T) {
 	}
 }
 
-// Content that only exists in another user's library is none of this user's
-// business - no warning may leak it.
 func TestFilesStoreDoesNotWarnAboutAForeignLibrary(t *testing.T) {
 	testHarness := newHarness(t)
 	ownDesign := testHarness.insertDesign(testHarness.userID, "Eigenes Design")

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"meshdepot/internal/logx"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,15 +11,13 @@ import (
 	"meshdepot/internal/publicid"
 )
 
-// requireCollection checks existence + ownership of a collection.
 func (server *Server) requireCollection(responseWriter http.ResponseWriter, collectionID, currentUserID int) (map[string]any, bool) {
 	return server.fetchRow(responseWriter, "SELECT * FROM collections WHERE id = ? AND user_id = ? LIMIT 1", collectionID, currentUserID)
 }
 
-// CollectionsIndex returns all collections of the user incl. design_count.
 func (server *Server) CollectionsIndex(responseWriter http.ResponseWriter, request *http.Request) {
-	// Hidden collections are left out unless they are asked for: the collection
-	// tab needs them to offer unhiding, everything else must not show them.
+	// Hidden collections are left out unless asked for: the collection tab needs them
+	// to offer unhiding.
 	hiddenClause := "AND c.is_hidden = 0"
 	if request.URL.Query().Get("include_hidden") == "1" {
 		hiddenClause = ""
@@ -43,11 +42,17 @@ func (server *Server) CollectionsStore(responseWriter http.ResponseWriter, reque
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.name_required")
 		return
 	}
-	// No two collections of the same name for one user - the same name twice only
-	// confuses the picker and the filter. Case-insensitive, matching the client's
-	// own "already exists" check. Hidden collections count too.
+	// No two collections of one user share a name - it only confuses the picker.
+	// Case-insensitive, matching the client's own check. Hidden ones count too.
 	var existing int
-	server.DB.QueryRow("SELECT COUNT(*) FROM collections WHERE user_id = ? AND name = ? COLLATE NOCASE", userID(request), name).Scan(&existing)
+	if failure := server.DB.QueryRow("SELECT COUNT(*) FROM collections WHERE user_id = ? AND name = ? COLLATE NOCASE",
+		userID(request), name).Scan(&existing); failure != nil {
+		// Read as "no such name", a failed count creates the duplicate this
+		// check exists to prevent, and nothing in the schema would catch it.
+		logx.Errorf("[api] collection name check failed (user %d): %v", userID(request), failure)
+		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
+		return
+	}
 	if existing > 0 {
 		httpx.Error(responseWriter, http.StatusConflict, "error.collection_name_taken")
 		return
@@ -65,7 +70,6 @@ func (server *Server) CollectionsStore(responseWriter http.ResponseWriter, reque
 	httpx.SuccessStatus(responseWriter, http.StatusCreated, row, "Collection created")
 }
 
-// boolToInt maps a JSON boolean to the 0/1 the schema stores.
 func boolToInt(value bool) int {
 	if value {
 		return 1
@@ -73,7 +77,7 @@ func boolToInt(value bool) int {
 	return 0
 }
 
-// CollectionsUpdate changes name, description and whether the collection is hidden.
+// CollectionsUpdate changes name, description and whether it is hidden.
 func (server *Server) CollectionsUpdate(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	id, ok := pathInt(request, "id")
@@ -88,11 +92,9 @@ func (server *Server) CollectionsUpdate(responseWriter http.ResponseWriter, requ
 	_ = httpx.DecodeJSON(request, &body)
 	var assignments []string
 	var args []any
-	// Field names are restricted below, but the values have to be checked too:
-	// raw JSON went into the query, so an object value produced a driver error
-	// (500) and "" produced a nameless collection - exactly what CollectionsStore
-	// rejects. Same column, same rules.
-	// Hiding is a flag, not text, so it is read before the text fields below.
+	// The values need checking as well as the field names: raw JSON went into the
+	// query, so an object produced a 500 and "" a nameless collection. Hiding is a
+	// flag, so it is read before the text fields.
 	if value, present := body["is_hidden"]; present {
 		hidden, isBool := value.(bool)
 		if !isBool {
@@ -130,7 +132,6 @@ func (server *Server) CollectionsUpdate(responseWriter http.ResponseWriter, requ
 	httpx.SuccessMessage(responseWriter, nil, "Updated")
 }
 
-// CollectionsDestroy deletes a collection (designs are kept).
 func (server *Server) CollectionsDestroy(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	id, ok := pathInt(request, "id")
@@ -148,7 +149,6 @@ func (server *Server) CollectionsDestroy(responseWriter http.ResponseWriter, req
 	httpx.SuccessMessage(responseWriter, nil, "Deleted")
 }
 
-// CollectionDesigns returns all designs of a collection (own + shared).
 func (server *Server) CollectionDesigns(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	id, ok := pathInt(request, "id")
@@ -174,8 +174,7 @@ func (server *Server) CollectionDesigns(responseWriter http.ResponseWriter, requ
 	httpx.Success(responseWriter, rows)
 }
 
-// CollectionAddableDesigns returns, paginated, designs that can still be added to
-// the collection (own/shared, not already contained).
+// CollectionAddableDesigns returns, paginated, the designs not already in it.
 func (server *Server) CollectionAddableDesigns(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	id, ok := pathInt(request, "id")
@@ -193,7 +192,6 @@ func (server *Server) CollectionAddableDesigns(responseWriter http.ResponseWrite
 
 	whereClause := `(d.user_id = ? OR ds_check.shared_with_user_id = ?)
 		AND d.id NOT IN (SELECT design_id FROM design_collections WHERE collection_id = ?)`
-	// baseArgs in order of appearance in baseQuery: join-uid, where-uid, where-uid, cid
 	baseArgs := []any{currentUserID, currentUserID, currentUserID, id}
 	if search != "" {
 		whereClause += " AND (d.name LIKE ? ESCAPE '\\' OR d.author LIKE ? ESCAPE '\\' OR d.description LIKE ? ESCAPE '\\' OR tr_name_de.content LIKE ? ESCAPE '\\')"
@@ -207,7 +205,6 @@ func (server *Server) CollectionAddableDesigns(responseWriter http.ResponseWrite
 	var total int
 	_ = server.DB.QueryRow("SELECT COUNT(*) "+baseQuery, baseArgs...).Scan(&total)
 
-	// List: additional CASE-uid at the start.
 	listArgs := append([]any{currentUserID}, baseArgs...)
 	items, _ := dbutil.QueryMaps(server.DB,
 		`SELECT d.public_id AS id, d.name, d.author, d.source_platform, d.cover_path,
@@ -216,7 +213,6 @@ func (server *Server) CollectionAddableDesigns(responseWriter http.ResponseWrite
 	httpx.Success(responseWriter, map[string]any{"items": items, "total": total})
 }
 
-// CollectionAddDesigns adds designs (own/shared only, INSERT OR IGNORE).
 func (server *Server) CollectionAddDesigns(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	id, ok := pathInt(request, "id")
@@ -227,9 +223,8 @@ func (server *Server) CollectionAddDesigns(responseWriter http.ResponseWriter, r
 	if _, ok := server.requireCollection(responseWriter, id, currentUserID); !ok {
 		return
 	}
-	// Public ids, like everywhere else the client names a design. An id it
-	// cannot resolve is skipped rather than refused: the list it was picked from
-	// may have changed underneath, and the rest of the selection is still valid.
+	// Public ids, as everywhere the client names a design. An unresolvable one is
+	// skipped rather than refused: the list it was picked from may have changed.
 	var body struct {
 		DesignIDs []string `json:"design_ids"`
 	}

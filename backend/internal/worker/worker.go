@@ -1,13 +1,11 @@
-// Package worker implements the download-queue processing as goroutines
-// (replacement for the DownloadWorker shell loops). The engine handles atomic
-// claiming, timeout reset, retries and per-platform cooldowns; the actual
-// platform processing is injected via Process.
+// Package worker processes the download queue: atomic claiming, timeout reset,
+// retries and per-platform cooldowns. The platform work itself is injected via
+// Process, so this package does not depend on the platforms package.
 package worker
 
 import (
 	"database/sql"
 	"errors"
-	"log"
 	"meshdepot/internal/dbutil"
 	"strconv"
 	"strings"
@@ -19,29 +17,26 @@ import (
 	"meshdepot/internal/platforms"
 	"meshdepot/internal/queuestate"
 	"meshdepot/internal/safego"
+
+	"meshdepot/internal/logx"
 )
 
-// tickInterval is how often the loop looks for a claimable job.
 const tickInterval = 2 * time.Second
 
-// maxRetries is the maximum number of attempts per job.
 const maxRetries = 3
 
-// stuckTimeout is the duration after which a hanging 'downloading' job is reset.
 const stuckTimeout = 15 * time.Minute
 
-// defaultBlockThreshold is how many anti-bot/rate-limit hits in a row a platform
-// may take before its whole queue is auto-paused. Overridable via the
-// queue_block_threshold app setting.
+// defaultBlockThreshold is how many anti-bot hits in a row a platform may take
+// before its queue is auto-paused. Overridable via queue_block_threshold.
 const defaultBlockThreshold = 3
 
-// defaultBlockHours is how long an automatic platform block lasts. Overridable
-// via the queue_block_hours app setting.
+// defaultBlockHours is how long an automatic block lasts. Overridable via
+// queue_block_hours.
 const defaultBlockHours = 24
 
-// errDownloadPanicked is the job failure reported when Process panicked. The
-// panic itself (with stack) is logged by safego; the job is retried like any
-// other transient failure.
+// errDownloadPanicked is reported when Process panicked. safego logs the stack;
+// the job is retried like any other transient failure.
 var errDownloadPanicked = errors.New("error.download_panic")
 
 // Job describes a download task.
@@ -50,9 +45,8 @@ type Job struct {
 	Platform  string
 	SourceURL string
 	UserID    int
-	// UserPublicID addresses the owner's storage tree. It is read together with
-	// the job rather than looked up later: the download runs with an open
-	// transaction at the end, and the database has a single connection, so a
+	// UserPublicID addresses the owner's storage tree. Read together with the job:
+	// the download ends in an open transaction, and with a single connection a
 	// lookup at that point would deadlock.
 	UserPublicID string
 	RetryCount   int
@@ -66,7 +60,6 @@ var permanentErrors = []string{
 	"error.storage_quota_exceeded",
 }
 
-// isPermanent detects permanent errors (no retry).
 func isPermanent(message string) bool {
 	for _, signature := range permanentErrors {
 		if strings.Contains(message, signature) {
@@ -76,16 +69,14 @@ func isPermanent(message string) bool {
 	return false
 }
 
-// softRateLimitErrors are temporary rate limits/anti-bot captchas - not a real
-// error but "try again later". Such jobs are NOT burned as failed after
-// maxRetries; they stay pending and are retried, spaced out after the cooldown,
-// until they succeed (download "bit by bit").
+// softRateLimitErrors are temporary rate limits and captchas - "try again
+// later" rather than a failure. Such jobs are never burned after maxRetries;
+// they stay pending and are retried, spaced out, until they succeed.
 var softRateLimitErrors = []string{
 	"error.makerworld_captcha",
 	"error.cults3d_captcha",
 }
 
-// isSoftRateLimit detects temporary rate-limit/captcha errors.
 func isSoftRateLimit(message string) bool {
 	for _, signature := range softRateLimitErrors {
 		if strings.Contains(message, signature) {
@@ -98,23 +89,20 @@ func isSoftRateLimit(message string) bool {
 // DownloadWorker processes the download_queue.
 type DownloadWorker struct {
 	DB *sql.DB
-	// Process runs the actual platform download + the saving and returns the new
-	// design_id. Injected by main.go so the worker does not depend on the
-	// platforms package.
+	// Process runs the platform download and the saving, and returns the new
+	// design_id. Injected by main.go.
 	Process func(Job) (int, error)
 	// CooldownFor returns the cooldown of a platform in seconds (from app_settings).
 	CooldownFor func(platform string) int
-	// Heartbeat records the liveness of the loop for the health endpoint. Wired
-	// by main.go; nil elsewhere, which the registry tolerates.
+	// Heartbeat records the loop's liveness for the health endpoint. Wired by
+	// main.go; nil elsewhere, which the registry tolerates.
 	Heartbeat *health.Registry
 
 	mutex     sync.Mutex
 	cooldowns map[string]time.Time // platform -> free from
-	// blockStrikes counts consecutive anti-bot/rate-limit hits per platform. It
-	// is reset to zero on the platform's next success or once it triggers an
-	// automatic block. In-memory on purpose: a restart empties the queue's
-	// momentum anyway, and the block itself (which must survive a restart) lives
-	// in app_settings via the queuestate package.
+	// blockStrikes counts consecutive anti-bot hits per platform, reset on the next
+	// success or once a block is triggered. In memory on purpose: the block itself
+	// has to survive a restart and lives in app_settings via queuestate.
 	blockStrikes map[string]int
 
 	// finished is closed when the loop has left after stop - see Wait.
@@ -132,25 +120,19 @@ func NewDownloadWorker(db *sql.DB, process func(Job) (int, error), cooldownFor f
 	}
 }
 
-// otherPlatformsRunner is the sentinel for the catch-all runner: it processes
-// any queued job whose platform is not one of the known per-platform runners, so
-// a job from a future or unexpected platform is never stranded.
+// otherPlatformsRunner is the sentinel for the catch-all runner, so a job from
+// an unexpected platform is never stranded.
 const otherPlatformsRunner = "\x00other"
 
-// runnerPlatforms lists the per-platform runners plus the catch-all. Each known
-// download platform gets its own runner; the catch-all covers everything else.
+// runnerPlatforms lists the per-platform runners plus the catch-all.
 func runnerPlatforms() []string {
 	return append(append([]string{}, queuestate.Platforms...), otherPlatformsRunner)
 }
 
-// Start runs the processing until stop is closed. Instead of a single loop that
-// takes one job at a time - where a slow download on one platform stalled every
-// other platform behind it (issue #8) - it runs one runner goroutine per
-// platform (plus a catch-all), each claiming and processing only its own
-// platform's jobs. A coordinator keeps the health heartbeat fresh and resets
-// hanging jobs, so the health endpoint stays live even while every runner is
-// busy. Each runner ticks every 2 s and honours its platform's cooldown and
-// pause independently, so rate limits are still respected per platform.
+// Start runs the processing until stop is closed. One runner goroutine per
+// platform plus a catch-all, because a single loop let a slow download on one
+// platform stall every other platform behind it (issue #8). A coordinator keeps
+// the heartbeat fresh and resets hanging jobs while every runner is busy.
 func (downloadWorker *DownloadWorker) Start(stop <-chan struct{}) {
 	downloadWorker.Heartbeat.Register(health.DownloadWorker, tickInterval)
 	var group sync.WaitGroup
@@ -180,16 +162,14 @@ func (downloadWorker *DownloadWorker) Start(stop <-chan struct{}) {
 		})
 	}
 
-	// The queue is only truly idle once every runner has left after stop, so the
-	// finished signal (see Wait) is closed only then.
+	// The queue is only idle once every runner has left after stop.
 	safego.Go("download-worker.finisher", func() {
 		group.Wait()
 		close(downloadWorker.finished)
 	})
 }
 
-// runPlatform is one platform's runner loop: every tick it claims and processes
-// one job of that platform, until stop is closed.
+// runPlatform claims and processes one job of its platform per tick.
 func (downloadWorker *DownloadWorker) runPlatform(stop <-chan struct{}, platform string) {
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -204,7 +184,6 @@ func (downloadWorker *DownloadWorker) runPlatform(stop <-chan struct{}, platform
 	}
 }
 
-// runOne claims and processes a single job for one platform (or the catch-all).
 func (downloadWorker *DownloadWorker) runOne(platform string) {
 	job, ok := downloadWorker.claimNextFor(platform)
 	if !ok {
@@ -214,11 +193,8 @@ func (downloadWorker *DownloadWorker) runOne(platform string) {
 }
 
 // Wait blocks until the loop has left after stop, at most for the given
-// duration. RunOnce is synchronous, so a returned loop means no job is halfway
-// through its file writes and DB rows - exactly the state A1 describes. Waiting
-// forever is not an option either: the download of a large model may still have
-// minutes to go, and the supervisor kills the process long before that. Reports
-// whether the loop actually finished.
+// duration - the download of a large model may have minutes to go, and the
+// supervisor kills the process long before that. Reports whether it finished.
 func (downloadWorker *DownloadWorker) Wait(limit time.Duration) bool {
 	select {
 	case <-downloadWorker.finished:
@@ -228,10 +204,8 @@ func (downloadWorker *DownloadWorker) Wait(limit time.Duration) bool {
 	}
 }
 
-// procTimeout limits the duration of a single download. If a job hangs longer
-// (typically a blocked headless browser or a dead network/Tor connection) it is
-// aborted so the single worker loop - and thus the rest of the queue - does NOT
-// freeze with it. A timeout counts as a failed attempt.
+// procTimeout limits a single download, typically a blocked headless browser or
+// a dead Tor connection. A timeout counts as a failed attempt.
 const procTimeout = 10 * time.Minute
 
 // procResult bundles the result of a Process call for the timeout select.
@@ -250,31 +224,22 @@ func (downloadWorker *DownloadWorker) RunOnce() {
 	downloadWorker.process(job)
 }
 
-// process runs one claimed job to completion: the download runs under a timeout
-// in its own goroutine (a hang must not freeze the runner), and the job's final
-// queue status is written here - never in Process - so a late-returning
-// straggler goroutine can no longer overwrite it. Shared by RunOnce (single
-// shot, used by the tests) and the per-platform runners.
+// process runs one claimed job to completion. The download runs under a timeout
+// in its own goroutine, and the final queue status is written here rather than
+// in Process, so a late-returning straggler cannot overwrite it.
 func (downloadWorker *DownloadWorker) process(job Job) {
-	// Working marks the loop busy for the health endpoint while the job runs, so a
-	// download that takes minutes is not misread as a dead loop. The registry
-	// counts overlapping runners (busyDepth), so the worker stays "busy" until the
-	// last runner finishes.
+	// Marks the loop busy while the job runs, so a download taking minutes is not
+	// misread as a dead loop. The registry counts overlapping runners.
 	endBusy := downloadWorker.Heartbeat.Working(health.DownloadWorker)
 	defer endBusy()
 	downloadWorker.markCooldown(job.Platform)
 
-	// Run Process in its own goroutine with a timeout: a hanging download must not
-	// block the worker loop (a single ticker) - otherwise the whole queue stalls
-	// behind that one job. The channel is buffered so a late-returning goroutine
-	// does not block forever; its result is simply discarded after the timeout. All
-	// status updates of the download_queue happen exclusively here (not in
-	// Process), so the straggler goroutine can no longer overwrite the job status.
+	// Buffered, so a late-returning goroutine does not block forever; its result is
+	// discarded after the timeout.
 	done := make(chan procResult, 1)
 	go func() {
-		// A panic inside Process (unchecked type assertions on foreign platform
-		// JSON) would otherwise take the whole process down. Report it as a normal
-		// job failure so the queue keeps running and the job can be retried.
+		// A panic inside Process - unchecked type assertions on foreign platform JSON -
+		// would otherwise take the process down. Reported as a normal job failure.
 		result := procResult{failure: errDownloadPanicked}
 		safego.Run("download-worker.Process", func() {
 			designID, failure := downloadWorker.Process(job)
@@ -295,7 +260,7 @@ func (downloadWorker *DownloadWorker) process(job Job) {
 		if final {
 			suffix = "marked as permanently failed"
 		}
-		log.Printf("[worker] Job #%d (%s): download TIMEOUT after %s - aborted so the "+
+		logx.Errorf("[worker] Job #%d (%s): download TIMEOUT after %s - aborted so the "+
 			"queue keeps running (hanging browser/network?). URL=%s attempt %d/%d, %s.",
 			job.ID, job.Platform, procTimeout, job.SourceURL, job.RetryCount+1, maxRetries, suffix)
 		if final {
@@ -309,16 +274,15 @@ func (downloadWorker *DownloadWorker) process(job Job) {
 
 	if failure != nil {
 		downloadWorker.markCooldown(job.Platform) // block again from now on on failure
-		// Temporary rate limit/captcha: do NOT burn the job - leave it pending,
-		// retry_count untouched; it is retried, spaced out after the cooldown, until
-		// it succeeds (download "bit by bit").
+		// Temporary rate limit or captcha: leave the job pending with retry_count
+		// untouched, so it is retried spaced out until it succeeds.
 		if isSoftRateLimit(failure.Error()) {
 			if downloadWorker.registerBlockStrike(job.Platform, failure.Error()) {
-				log.Printf("[worker] Job #%d (%s): anti-bot/rate-limit block threshold reached - the whole %s "+
+				logx.Warnf("[worker] Job #%d (%s): anti-bot/rate-limit block threshold reached - the whole %s "+
 					"queue is auto-paused and resumes on its own. URL=%s detail: %v",
 					job.ID, job.Platform, job.Platform, job.SourceURL, failure)
 			} else {
-				log.Printf("[worker] Job #%d (%s): temporarily blocked by anti-bot/rate-limit - stays in the queue, "+
+				logx.Warnf("[worker] Job #%d (%s): temporarily blocked by anti-bot/rate-limit - stays in the queue, "+
 					"will be retried after the cooldown. URL=%s detail: %v", job.ID, job.Platform, job.SourceURL, failure)
 			}
 			dbutil.ExecLogged(downloadWorker.DB, "UPDATE download_queue SET status='pending', started_at=NULL, error_msg=? WHERE id=?", failure.Error(), job.ID)
@@ -336,20 +300,13 @@ func (downloadWorker *DownloadWorker) process(job Job) {
 	}
 	dbutil.ExecLogged(downloadWorker.DB, "UPDATE download_queue SET status='done', design_id=?, done_at=CURRENT_TIMESTAMP WHERE id=?", designID, job.ID)
 	downloadWorker.notifyDone(job, designID)
-	// A success means the platform is answering normally again: forget any
-	// accumulated block strikes so a later isolated hit starts counting fresh.
+	// The platform is answering normally again, so a later isolated hit starts fresh.
 	downloadWorker.clearBlockStrikes(job.Platform)
 }
 
-// notifyFailed and notifyDone tell the member how their download ended.
-//
-// Raised here, where the job reaches its final state, and only there: a retry
-// that is still pending is not an outcome, and notifying on each attempt would
-// report the same download as failed several times before it succeeds.
-//
-// Until now download_done and download_failed existed as switches in the
-// settings but nothing ever sent them - the preference could be set and made no
-// difference.
+// notifyFailed and notifyDone tell the member how their download ended. Raised
+// only where the job reaches its final state: a pending retry is not an outcome,
+// and notifying per attempt would report one download as failed several times.
 func (downloadWorker *DownloadWorker) notifyFailed(job Job, message string) {
 	// The URL travels along so the digest can drop this again if the member
 	// re-queued it and it succeeded before the summary went out.
@@ -369,12 +326,9 @@ func (downloadWorker *DownloadWorker) notifyDone(job Job, designID int) {
 		"Download finished", name, &designReference)
 }
 
-// readableError turns a message of the form <key>:<sentence> into the sentence.
-//
-// Notification bodies are stored as written and never run through the
-// translation table, so a bare key would be shown to the member verbatim. Most
-// platform errors already carry a sentence after the colon; those that do not
-// keep their key, which is still more use than an empty line.
+// readableError turns <key>:<sentence> into the sentence. Notification bodies
+// are stored as written and never run through the translation table, so a bare
+// key would reach the member verbatim.
 func readableError(message string) string {
 	if _, sentence, found := strings.Cut(message, ":"); found && strings.TrimSpace(sentence) != "" {
 		return strings.TrimSpace(sentence)
@@ -382,10 +336,9 @@ func readableError(message string) string {
 	return message
 }
 
-// registerBlockStrike records one consecutive anti-bot/rate-limit hit for the
-// platform. Once the configured threshold is reached it auto-pauses the whole
-// platform (via queuestate) for the configured number of hours and resets the
-// counter. Reports whether this call is the one that triggered the pause.
+// registerBlockStrike records one consecutive anti-bot hit. At the configured
+// threshold it pauses the whole platform via queuestate and resets the counter.
+// Reports whether this call is the one that triggered the pause.
 func (downloadWorker *DownloadWorker) registerBlockStrike(platform, reason string) bool {
 	downloadWorker.mutex.Lock()
 	downloadWorker.blockStrikes[platform]++
@@ -406,15 +359,14 @@ func (downloadWorker *DownloadWorker) registerBlockStrike(platform, reason strin
 	return true
 }
 
-// clearBlockStrikes forgets the platform's accumulated block strikes.
 func (downloadWorker *DownloadWorker) clearBlockStrikes(platform string) {
 	downloadWorker.mutex.Lock()
 	delete(downloadWorker.blockStrikes, platform)
 	downloadWorker.mutex.Unlock()
 }
 
-// settingInt reads a positive integer app setting, falling back to fallback when
-// the row is missing, blank or not a positive number.
+// settingInt reads a positive integer app setting, falling back when the row is
+// missing, blank or not a positive number.
 func (downloadWorker *DownloadWorker) settingInt(key string, fallback int) int {
 	var value string
 	if downloadWorker.DB.QueryRow("SELECT value FROM app_settings WHERE key=?", key).Scan(&value) != nil {
@@ -426,10 +378,8 @@ func (downloadWorker *DownloadWorker) settingInt(key string, fallback int) int {
 	return fallback
 }
 
-// logFailure writes a precise log line per failed attempt, distinguishing the
-// failure phase (cf. platforms.DownloadError): "no metadata" (model info not
-// found) vs. "files failed" (model found, but no download succeeded). For all
-// other errors the generic fallback applies.
+// logFailure distinguishes the failure phase (cf. platforms.DownloadError): no
+// metadata found, versus a model found whose files would not download.
 func (downloadWorker *DownloadWorker) logFailure(job Job, failure error, final bool) {
 	suffix := "will be retried automatically"
 	if final {
@@ -439,15 +389,15 @@ func (downloadWorker *DownloadWorker) logFailure(job Job, failure error, final b
 	var downloadError *platforms.DownloadError
 	switch {
 	case errors.As(failure, &downloadError) && downloadError.Stage == platforms.StageMetadata:
-		log.Printf("[worker] Job #%d (%s): model metadata could NOT be loaded "+
+		logx.Errorf("[worker] Job #%d (%s): model metadata could NOT be loaded "+
 			"- no info (name etc.) was found at all. URL=%s attempt %d/%d, %s. Detail: %v",
 			job.ID, job.Platform, job.SourceURL, attempt, maxRetries, suffix, failure)
 	case errors.As(failure, &downloadError) && downloadError.Stage == platforms.StageFiles:
-		log.Printf("[worker] Job #%d (%s): model found, but the FILES could NOT "+
+		logx.Errorf("[worker] Job #%d (%s): model found, but the FILES could NOT "+
 			"be downloaded. URL=%s attempt %d/%d, %s. Detail: %v",
 			job.ID, job.Platform, job.SourceURL, attempt, maxRetries, suffix, failure)
 	default:
-		log.Printf("[worker] Job #%d (%s): download failed. URL=%s attempt %d/%d, %s. Detail: %v",
+		logx.Errorf("[worker] Job #%d (%s): download failed. URL=%s attempt %d/%d, %s. Detail: %v",
 			job.ID, job.Platform, job.SourceURL, attempt, maxRetries, suffix, failure)
 	}
 }
@@ -461,8 +411,7 @@ func (downloadWorker *DownloadWorker) ResetStuck() {
 		WHERE status='downloading' AND (started_at IS NULL OR started_at < ?) AND retry_count >= ?`, cutoff, maxRetries)
 }
 
-// claimNext selects the next processable job (respecting cooldown) and claims it
-// atomically (UPDATE ... WHERE status='pending').
+// claimNext claims the next processable job atomically, respecting cooldown.
 func (downloadWorker *DownloadWorker) claimNext() (Job, bool) {
 	rows, failure := downloadWorker.DB.Query(`SELECT dq.id, dq.platform, dq.source_url, dq.user_id, COALESCE(u.public_id, ''), dq.retry_count
 		FROM download_queue dq JOIN users u ON u.id = dq.user_id
@@ -480,8 +429,7 @@ func (downloadWorker *DownloadWorker) claimNext() (Job, bool) {
 	rows.Close()
 
 	for _, job := range candidates {
-		// A manually paused or auto-blocked platform is skipped entirely - its
-		// jobs stay pending and are picked up again once the platform runs again.
+		// A paused or auto-blocked platform is skipped entirely; its jobs stay pending.
 		if queuestate.Suspended(downloadWorker.DB, job.Platform, time.Now()) {
 			continue
 		}
@@ -499,16 +447,13 @@ func (downloadWorker *DownloadWorker) claimNext() (Job, bool) {
 	return Job{}, false
 }
 
-// claimNextFor is the per-platform variant used by the runners: it claims the
-// oldest pending job of one platform (or, for the catch-all sentinel, of any
-// platform without its own runner), honouring that platform's cooldown and
-// pause. Scoping the claim to one platform is what lets platforms download in
-// parallel without one blocking another.
+// claimNextFor is the per-platform variant used by the runners; the catch-all
+// sentinel covers every platform without its own runner. Scoping the claim to
+// one platform is what lets platforms download in parallel.
 func (downloadWorker *DownloadWorker) claimNextFor(platform string) (Job, bool) {
 	catchAll := platform == otherPlatformsRunner
 	if !catchAll {
-		// A concrete platform: one suspension/cooldown check covers all its jobs,
-		// so a paused platform costs nothing but the check.
+		// One check covers every job of a concrete platform.
 		if queuestate.Suspended(downloadWorker.DB, platform, time.Now()) || downloadWorker.onCooldown(platform) {
 			return Job{}, false
 		}
@@ -559,7 +504,6 @@ func (downloadWorker *DownloadWorker) claimNextFor(platform string) (Job, bool) 
 	return Job{}, false
 }
 
-// onCooldown checks whether the platform is currently blocked.
 func (downloadWorker *DownloadWorker) onCooldown(platform string) bool {
 	downloadWorker.mutex.Lock()
 	defer downloadWorker.mutex.Unlock()
@@ -567,7 +511,6 @@ func (downloadWorker *DownloadWorker) onCooldown(platform string) bool {
 	return ok && time.Now().Before(until)
 }
 
-// markCooldown resets the platform's cooldown (from now on).
 func (downloadWorker *DownloadWorker) markCooldown(platform string) {
 	seconds := 0
 	if downloadWorker.CooldownFor != nil {

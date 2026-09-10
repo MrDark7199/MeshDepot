@@ -1,12 +1,10 @@
 /**
- * Runs on every supported model page: puts the button there and keeps it in step
- * with the page.
- *
- * The parts around it: platforms.js knows the sites, bridge.js reaches into the
- * page's world, panel.js is what the visitor sees.
+ * Runs on every supported model page and puts the button there. platforms.js
+ * knows the sites, bridge.js reaches into the page's world, panel.js is what the
+ * visitor sees.
  */
 
-// ── The button ───────────────────────────────────────────────────────────────
+// - The button --------------------------------
 
 const BUTTON_IDENTIFIER = 'meshdepot-import-button'
 
@@ -35,19 +33,12 @@ function createButton() {
 }
 
 /**
- * Keeps the button in step with the page.
- *
- * MakerWorld is a single-page application: moving from the model list to a
- * design never reloads the document, so a one-off check at startup would put
- * the button on the wrong pages and miss the right ones. The URL is polled
- * rather than hooked into the history API, which is a great deal less to go
- * wrong for a check this cheap.
+ * These sites are single-page applications, so moving to a design never reloads
+ * the document. Polling the URL is far less to go wrong than hooking the history
+ * API for a check this cheap.
  */
 let lastSeenDesign = null
 function synchroniseButton() {
-  // Reloading the extension leaves this script running with nothing behind it.
-  // It cannot recover - the tab has to be reloaded - so it takes its own button
-  // off the page rather than leaving one that does nothing.
   if (extensionGone()) {
     removeButton()
     removePanel()
@@ -59,28 +50,18 @@ function synchroniseButton() {
   if (key === lastSeenDesign) return
   lastSeenDesign = key
 
-  // Compared by design, not by address. These sites put their tabs in the URL,
-  // so opening Files counted as leaving the page: the panel vanished mid-import,
-  // and the import it had already scheduled went out unseen a few seconds later.
-  // Switching tabs is exactly what someone does on the way to the download.
+  // Compared by design, not by address: these sites put their tabs in the URL,
+  // so opening Files counted as leaving the page and tore down a running import.
   removeButton()
   closePanel()
   if (!current) return
   createButton()
 
-  // On every platform now, and as early as possible. The helper does two things
-  // only the page itself can: it sees the site resolve its own download links,
-  // and it holds on to a blob the page is about to revoke. Both are needed before
-  // the visitor presses anything.
-  // Failure is expected on a site that refuses injected scripts, and costs
-  // nothing: the helper only adds an earlier way of catching a download.
   injectPageScript().catch(() => {})
 }
 
-// The helper goes in at once, before the site's own scripts run: it watches the
-// site resolve its own download links, and a link seen going past never has to be
-// asked for. Waiting for the button click would inject it long after those calls
-// are done.
+// At once, before the site's own scripts run: the helper watches the site resolve
+// its download links, and a link seen going past never has to be asked for.
 const startingDesign = meshdepotCurrentDesign()
 if (startingDesign) {
   injectPageScript().catch(() => {})

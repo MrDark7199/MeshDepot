@@ -1,44 +1,40 @@
-// Package maildigest collects pending notification e-mails and sends them as
-// one message per member.
+// Package maildigest collects pending notification e-mails into one message per
+// member. Without it, forty queued downloads of which thirty-four fail produce
+// thirty-four e-mails, and the reader stops at the third to look for the off
+// switch.
 //
-// Without it a batch behaves badly: forty queued downloads of which thirty-four
-// fail produce thirty-four separate e-mails, and the reader stops at the third
-// and looks for the off switch. One message per member per interval keeps the
-// same information and costs one notification.
-//
-// The delay buys something the immediate send cannot have: the message is
-// assembled when it goes out, not when the event happened, so anything that has
-// resolved in the meantime is left out. A download that was re-queued and
-// succeeded no longer appears. What remains is still worth saying so, which is
-// why the message says it may be a few minutes old.
+// The delay also buys something an immediate send cannot have: the message is
+// assembled when it goes out, so anything resolved in the meantime is left out -
+// which is why it says it may be a few minutes old.
 package maildigest
 
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	"meshdepot/internal/dateformat"
 	"meshdepot/internal/mail"
 	"meshdepot/internal/quota"
+
+	"meshdepot/internal/logx"
 )
 
-// Interval is how often pending mail is collected and sent.
 const Interval = 10 * time.Minute
 
-// Queue records one notification for sending. It is a no-op when the member has
-// no address, so callers do not have to check first.
+// Queue is a no-op when the member has no address, so callers need not check.
 func Queue(database *sql.DB, userID int, notificationType, title, body, reference string) {
 	var address string
 	database.QueryRow("SELECT COALESCE(email, '') FROM users WHERE id = ?", userID).Scan(&address)
 	if strings.TrimSpace(address) == "" {
 		return
 	}
-	_, _ = database.Exec(
+	if _, failure := database.Exec(
 		"INSERT INTO notification_mail_queue (user_id, type, title, body, reference) VALUES (?, ?, ?, ?, ?)",
-		userID, notificationType, title, body, reference)
+		userID, notificationType, title, body, reference); failure != nil {
+		logx.Errorf("[maildigest] queueing %s for user %d failed: %v", notificationType, userID, failure)
+	}
 }
 
 type pending struct {
@@ -47,13 +43,11 @@ type pending struct {
 	reference                           string
 }
 
-// Send collects everything pending and sends one message per member.
 func Send(database *sql.DB, decryptor mail.Decryptor) {
 	config, ready := mail.Load(database, decryptor)
 	if !ready {
-		// Mail is off or incomplete. The rows stay pending rather than being
-		// dropped: switching it on should not lose what happened in between, and
-		// the staleness check keeps the eventual message honest.
+		// Mail is off or incomplete. The rows stay pending rather than being dropped:
+		// switching it on should not lose what happened in between.
 		return
 	}
 
@@ -100,10 +94,9 @@ func sendFor(database *sql.DB, config mail.Config, userID int) {
 		return
 	}
 
-	// Marked before the send, and for everything collected - including what the
-	// staleness check drops. A failed send must not leave rows behind that pile
-	// up and go out multiplied on the next run; the event is already in the
-	// member's bell either way.
+	// Marked before the send, and for everything collected: a failed send must not
+	// leave rows that pile up and go out multiplied on the next run. The event is in
+	// the member's bell either way.
 	markSent(database, allIDs)
 
 	var current []pending
@@ -118,16 +111,12 @@ func sendFor(database *sql.DB, config mail.Config, userID int) {
 
 	subject, body := compose(current, dateformat.Of(database, userID))
 	if failure := mail.Send(config, address, subject, body); failure != nil {
-		log.Printf("[maildigest] sending to user %d failed: %v", userID, failure)
+		logx.Errorf("[maildigest] sending to user %d failed: %v", userID, failure)
 	}
 }
 
-// stillRelevant reports whether an entry is worth sending now.
-//
-// Only the cases that can genuinely resolve are checked. A finished download
-// stays true forever, and a failure is only recorded once the job has stopped
-// retrying - so the two that can go stale are a failure the member re-queued
-// successfully, and a storage warning they have since acted on.
+// stillRelevant checks only the cases that can genuinely resolve: a failure the
+// member re-queued successfully, and a storage warning they have acted on.
 func stillRelevant(database *sql.DB, userID int, item pending) bool {
 	switch item.notificationType {
 	case "download_failed":
@@ -146,17 +135,18 @@ func stillRelevant(database *sql.DB, userID int, item pending) bool {
 	}
 }
 
+// A row that stays unmarked is picked up again on the next run, so the member
+// gets the same digest twice. Nothing here can prevent that; it can say it.
 func markSent(database *sql.DB, ids []int) {
 	for _, id := range ids {
-		_, _ = database.Exec("UPDATE notification_mail_queue SET sent_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+		if _, failure := database.Exec("UPDATE notification_mail_queue SET sent_at = CURRENT_TIMESTAMP WHERE id = ?", id); failure != nil {
+			logx.Errorf("[maildigest] entry %d could not be marked as sent - it will go out again: %v", id, failure)
+		}
 	}
 }
 
-// compose builds subject and body.
-//
-// A single entry keeps its own title as the subject, the way an immediate send
-// would read. Several get a counted subject instead: "Download failed" repeated
-// for a batch of thirty-four says nothing about what arrived.
+// compose keeps a single entry's own title as the subject; several get a counted
+// one, since "Download failed" repeated thirty-four times says nothing.
 func compose(items []pending, pattern string) (subject, body string) {
 	if len(items) == 1 {
 		subject = items[0].title
@@ -169,7 +159,7 @@ func compose(items []pending, pattern string) (subject, body string) {
 		builder.WriteString("• ")
 		builder.WriteString(item.title)
 		if item.when != "" {
-			// In the account's own notation, the same as everywhere in the interface.
+			// In the account's own notation, as everywhere in the interface.
 			builder.WriteString("  (" + dateformat.Timestamp(item.when, pattern) + ")")
 		}
 		builder.WriteString("\n")
@@ -180,9 +170,8 @@ func compose(items []pending, pattern string) (subject, body string) {
 		}
 		builder.WriteString("\n")
 	}
-	// Said plainly, because the delay is the one thing about this message that
-	// could otherwise mislead: it is a summary of the last few minutes, not a
-	// report of this second.
+	// Said plainly, because the delay is the one thing that could mislead: this is a
+	// summary of the last few minutes.
 	builder.WriteString("---\n")
 	builder.WriteString(fmt.Sprintf(
 		"This is a summary and is sent at most every %d minutes, so some of it may already be dealt with.\n"+

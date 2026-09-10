@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"log"
 	"math"
 	"meshdepot/internal/coerce"
 	"mime/multipart"
@@ -24,30 +23,28 @@ import (
 	"meshdepot/internal/platforms"
 	"meshdepot/internal/printmeta"
 	"meshdepot/internal/storage"
+
+	"meshdepot/internal/logx"
 )
 
 const downloadTokenTTL = 30 * time.Minute
 
-// storedFile is the metadata of a file placed in the blob store. gcodeMeta holds
-// the JSON of the extracted print parameters for sliced files (G-code as well as
-// the resin formats), otherwise empty. The column keeps its historic name.
+// storedFile is the metadata of a file in the blob store. gcodeMeta holds the
+// extracted print parameters as JSON, for resin formats as well; the column
+// keeps its historic name.
 type storedFile struct {
 	filename, blobPath, fileHash, blobHash, relativePath string
 	size                                                 int64
 	gcodeMeta                                            string
 }
 
-// maxVersionNumber bounds a version number. The value ends up in path names and
-// is sorted with CAST(version AS REAL); anything beyond this is a typo, not a
-// version.
+// maxVersionNumber bounds a version number: it ends up in path names and is
+// sorted with CAST(version AS REAL).
 const maxVersionNumber = 100000
 
-// numericVersion checks whether value is a plain number (decimals allowed: 3, 3.0, 2.1).
-//
-// ParseFloat also accepts "NaN", "Inf" and overflowing literals like "1e400".
-// Those would be formatted into path names as "NaN"/"+Inf" and make the
-// CAST(version AS REAL) ordering in SaveSyncVersion unpredictable, so they are
-// rejected along with negative values.
+// numericVersion checks whether value is a plain number. ParseFloat also accepts
+// "NaN", "Inf" and "1e400", which would reach path names and make the version
+// ordering unpredictable, so they are rejected along with negative values.
 func numericVersion(value string) bool {
 	if value == "" {
 		return false
@@ -62,8 +59,8 @@ func numericVersion(value string) bool {
 	return parsed >= 0 && parsed <= maxVersionNumber
 }
 
-// decodeEntryMeta replaces the gcode_meta JSON field (string from the DB) with a
-// real object so the frontend can read the print parameters directly.
+// decodeEntryMeta turns the gcode_meta JSON string from the DB into a real
+// object, so the frontend can read the print parameters directly.
 func decodeEntryMeta(entries []map[string]any) {
 	for _, entry := range entries {
 		metaJSON, ok := entry["gcode_meta"].(string)
@@ -80,7 +77,6 @@ func decodeEntryMeta(entries []map[string]any) {
 	}
 }
 
-// requireDesignAccess grants access for the owner OR shared users.
 func (server *Server) requireDesignAccess(responseWriter http.ResponseWriter, designID, currentUserID int) (designRow, bool) {
 	design, found, failure := scanDesign(server.DB.QueryRow("SELECT "+designColumns+` FROM designs d
 		WHERE d.id = ? AND (d.user_id = ? OR EXISTS (
@@ -89,8 +85,8 @@ func (server *Server) requireDesignAccess(responseWriter http.ResponseWriter, de
 	return design, server.rowOK(responseWriter, found, failure)
 }
 
-// requireOwnedDesign is requireDesignAccess plus the restriction to the owner:
-// shared users may read a design, but may not change its files.
+// requireOwnedDesign is requireDesignAccess plus the owner restriction: shared
+// users may read a design, but not change its files.
 func (server *Server) requireOwnedDesign(responseWriter http.ResponseWriter, designID, currentUserID int) (designRow, bool) {
 	design, ok := server.requireDesignAccess(responseWriter, designID, currentUserID)
 	if !ok {
@@ -103,7 +99,6 @@ func (server *Server) requireOwnedDesign(responseWriter http.ResponseWriter, des
 	return design, true
 }
 
-// FilesIndex returns all versions of a design incl. their file entries.
 func (server *Server) FilesIndex(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -122,9 +117,9 @@ func (server *Server) FilesIndex(responseWriter http.ResponseWriter, request *ht
 	httpx.Success(responseWriter, versions)
 }
 
-// FilesStore uploads a new file version (multiple files possible; ZIP is
-// extracted, everything into the blob store). The version number must be a number
-// and must not already exist in the design. Only the owner may upload.
+// FilesStore uploads a new file version; a ZIP is extracted, everything goes
+// into the blob store. The version number must be a number not already in the
+// design. Only the owner may upload.
 func (server *Server) FilesStore(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -173,10 +168,9 @@ func (server *Server) FilesStore(responseWriter http.ResponseWriter, request *ht
 		notesValue = notes
 	}
 
-	// Demoting the previous version, creating the new one and writing its entries
-	// is one unit: an abort in between left the design either with no current
-	// version at all or with a current version that has no entries - in both cases
-	// the UI shows an empty file list and the upload is lost.
+	// One unit: an abort in between left the design either with no current version
+	// at all or with a current version that has no entries, and in both cases the
+	// upload is lost behind an empty file list.
 	transaction, failure := server.DB.Begin()
 	if failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.internal")
@@ -221,8 +215,8 @@ func (server *Server) FilesStore(responseWriter http.ResponseWriter, request *ht
 	httpx.SuccessStatus(responseWriter, http.StatusCreated, saved, "File uploaded")
 }
 
-// FilesAddEntries adds further files (multiselect, ZIP allowed) into an EXISTING
-// version without creating a new version.
+// FilesAddEntries adds further files into an existing version without creating
+// a new one.
 func (server *Server) FilesAddEntries(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -251,8 +245,7 @@ func (server *Server) FilesAddEntries(responseWriter http.ResponseWriter, reques
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.file_required")
 		return
 	}
-	// Collect existing filenames of this version (case-insensitive) to prevent name
-	// collisions within the version.
+	// Case-insensitive, to prevent name collisions within the version.
 	existing, _ := dbutil.QueryMaps(server.DB, "SELECT filename FROM design_file_entries WHERE design_file_id = ?", fileID)
 	existingNames := make(map[string]bool, len(existing))
 	for _, entry := range existing {
@@ -264,17 +257,15 @@ func (server *Server) FilesAddEntries(responseWriter http.ResponseWriter, reques
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.internal")
 		return
 	}
-	// If one of the (possibly ZIP-extracted) filenames collides with a file already
-	// present in the version, the version is not changed.
+	// A collision with a file already in the version leaves the version unchanged.
 	for _, storedItem := range stored {
 		if existingNames[strings.ToLower(storedItem.filename)] {
 			httpx.Error(responseWriter, http.StatusConflict, "error.filename_exists")
 			return
 		}
 	}
-	// Entries and the counters of their version must land together: entries
-	// without the counter update make the version report a wrong file count and
-	// size forever, and there is no place that recomputes it.
+	// Entries and their version's counters must land together, or the version
+	// reports a wrong file count and size forever - nothing recomputes it.
 	transaction, failure := server.DB.Begin()
 	if failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.internal")
@@ -296,7 +287,7 @@ func (server *Server) FilesAddEntries(responseWriter http.ResponseWriter, reques
 		{"UPDATE designs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", []any{designID}},
 	} {
 		if _, failure := transaction.Exec(statement.query, statement.args...); failure != nil {
-			log.Printf("[api] add entries: %v", failure)
+			logx.Errorf("[api] add entries: %v", failure)
 			writeFailed = true
 		}
 	}
@@ -316,8 +307,8 @@ func (server *Server) FilesAddEntries(responseWriter http.ResponseWriter, reques
 	httpx.SuccessStatus(responseWriter, http.StatusCreated, saved, "Files added")
 }
 
-// storeUploads places all uploaded files in the blob store (ZIP is extracted) and
-// parses G-code metadata. Returns all entries and the total size.
+// storeUploads places the uploaded files in the blob store, extracting a ZIP and
+// parsing G-code metadata. Returns the entries and the total size.
 func (server *Server) storeUploads(headers []*multipart.FileHeader, user storage.UserLayout) ([]storedFile, int64) {
 	var stored []storedFile
 	var total int64
@@ -345,17 +336,14 @@ func (server *Server) storeUploads(headers []*multipart.FileHeader, user storage
 // insertEntries writes the file entries of a version and collects duplicate
 // warnings (same hash in another design of the same user).
 //
-// It takes a querier rather than reaching for server.DB: the callers run inside
-// a transaction, and with SetMaxOpenConns(1) a second connection would deadlock
-// against the open one. A failed insert is returned instead of only logged, so
-// the caller can roll the version back rather than publish a version whose
-// entry list is short a file.
+// It takes a querier rather than server.DB: the callers run inside a
+// transaction, and with SetMaxOpenConns(1) a second connection deadlocks. A
+// failed insert is returned so the caller can roll the version back.
 func (server *Server) insertEntries(querier dbutil.Querier, versionID, designID, currentUserID int, versionDir string, stored []storedFile) ([]map[string]any, error) {
 	warnings := []map[string]any{}
 	for _, storedItem := range stored {
-		// The blob carries the content, the version directory the structure: the
-		// entry is published as a hard link so the version stays a directory of
-		// real files without storing an unchanged file twice.
+		// The blob carries the content, the version directory the structure: published
+		// as a hard link, so the version stays a directory of real files.
 		published := filepath.Join(versionDir, sanitizeUploadPath(storedItem.relativePath, storedItem.filename))
 		if failure := blobstore.Link(storedItem.blobPath, published); failure != nil {
 			return nil, failure
@@ -396,7 +384,6 @@ func (server *Server) extractZip(readerAt io.ReaderAt, size int64, user storage.
 		}
 		return nil, 0
 	}
-	// Detect a common top folder.
 	var names []string
 	for _, zipFile := range zipReader.File {
 		if !strings.HasSuffix(zipFile.Name, "/") {
@@ -433,9 +420,9 @@ func (server *Server) extractZip(readerAt io.ReaderAt, size int64, user storage.
 			relativePath = strings.TrimPrefix(relativePath, topFolder)
 		}
 		relativePath = strings.TrimLeft(strings.ReplaceAll(strings.ReplaceAll(relativePath, "../", ""), "..\\", ""), "/")
-		// Declared size first: a zip entry may expand to far more than the
-		// archive itself (zip bomb), and the upload limit only bounds the
-		// compressed bytes. The LimitReader then bounds a lying header too.
+		// Declared size first: an entry may expand to far more than the archive itself,
+		// and the upload limit only bounds the compressed bytes. The LimitReader then
+		// bounds a lying header too.
 		if zipFile.UncompressedSize64 > maxZipEntryBytes {
 			continue
 		}
@@ -458,8 +445,8 @@ func (server *Server) extractZip(readerAt io.ReaderAt, size int64, user storage.
 	return stored, total
 }
 
-// FilesDestroy deletes a version (blobs are kept); if needed promotes the newest
-// remaining version to current.
+// FilesDestroy deletes a version, keeping the blobs, and promotes the newest
+// remaining version to current if needed.
 func (server *Server) FilesDestroy(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -480,8 +467,8 @@ func (server *Server) FilesDestroy(responseWriter http.ResponseWriter, request *
 	}
 	released := entriesToRelease(server.DB, "dfe.design_file_id = ?", fileID)
 
-	// Deleting the row and promoting a successor is one unit: in between, the
-	// design has no current version, and nothing would ever set one again.
+	// One unit: in between, the design has no current version and nothing would
+	// ever set one again.
 	transaction, failure := server.DB.Begin()
 	if failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
@@ -513,11 +500,9 @@ func (server *Server) FilesDestroy(responseWriter http.ResponseWriter, request *
 	httpx.SuccessMessage(responseWriter, nil, "Deleted")
 }
 
-// FilesDeleteEntry deletes a single file (entry) from a version. If the version
-// becomes empty it is removed entirely and, if needed, the newest remaining
-// version is promoted to current. The published file goes with the row, and the
-// blob behind it once no other version links the same content. Only the owner
-// may delete.
+// FilesDeleteEntry deletes a single file from a version, removing the version
+// entirely once it is empty and promoting a successor if needed. The published
+// file goes with the row, and the blob once no other version links the content.
 func (server *Server) FilesDeleteEntry(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -538,9 +523,8 @@ func (server *Server) FilesDeleteEntry(responseWriter http.ResponseWriter, reque
 	}
 	released := entriesToRelease(server.DB, "dfe.id = ?", entryID)
 
-	// Delete, recount and (if the version is now empty) drop the version: without a
-	// transaction a failure in the middle leaves the version with counters that no
-	// longer match its entries.
+	// Without a transaction a failure in the middle leaves the version with counters
+	// that no longer match its entries.
 	transaction, failure := server.DB.Begin()
 	if failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
@@ -552,9 +536,8 @@ func (server *Server) FilesDeleteEntry(responseWriter http.ResponseWriter, reque
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 		return
 	}
-	// Recompute the version counter/size from the remaining entries. The error must
-	// be checked: read as "no entries left" it would drop the whole version (plus its
-	// entries via ON DELETE CASCADE) because of a transient busy timeout.
+	// The error must be checked: read as "no entries left" a transient busy timeout
+	// would drop the whole version, and its entries with it.
 	aggregate, found, failure := dbutil.QueryMap(transaction, "SELECT COUNT(*) AS cnt, COALESCE(SUM(size_bytes), 0) AS total FROM design_file_entries WHERE design_file_id = ?", fileID)
 	if failure != nil || !found {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
@@ -598,9 +581,8 @@ type releasedEntry struct {
 	blobHash   string
 }
 
-// entriesToRelease lists the published files behind a delete. It has to run
-// before the rows go: afterwards nothing connects the design to its content any
-// more, and the blobs would stay forever.
+// entriesToRelease has to run before the rows go: afterwards nothing connects
+// the design to its content and the blobs would stay forever.
 func entriesToRelease(querier dbutil.Querier, condition string, args ...any) []releasedEntry {
 	rows, failure := querier.Query(`SELECT COALESCE(dfe.path, ''), COALESCE(NULLIF(dfe.blob_hash, ''), dfe.file_hash, '')
 		FROM design_file_entries dfe
@@ -621,9 +603,9 @@ func entriesToRelease(querier dbutil.Querier, condition string, args ...any) []r
 }
 
 // releaseEntries removes the published files and, with the last of them, the
-// blob behind the content. Called after the commit, never before: an orphan
-// blob only costs disk, while content another version still links must not go.
-// The link count decides, so a file shared with a second version survives.
+// blob behind the content. Called after the commit: an orphan blob only costs
+// disk, while content another version still links must not go. The link count
+// decides, so a file shared with a second version survives.
 func releaseEntries(user storage.UserLayout, entries []releasedEntry) {
 	for _, entry := range entries {
 		blobPath := ""
@@ -631,15 +613,14 @@ func releaseEntries(user storage.UserLayout, entries []releasedEntry) {
 			blobPath = user.Blob(entry.blobHash)
 		}
 		if failure := blobstore.Unlink(blobPath, user.Abs(entry.storedPath)); failure != nil {
-			log.Printf("[api] release %s: %v", entry.storedPath, failure)
+			logx.Errorf("[api] release %s: %v", entry.storedPath, failure)
 		}
 	}
 }
 
-// promoteNewestVersion makes the newest remaining version of a design the current
-// one. It is a no-op unless the version just deleted was the current one; ok=false
-// means a statement failed and the caller must roll back. A design without a
-// current version shows an empty file list even though its files are still there.
+// promoteNewestVersion makes the newest remaining version current, and is a
+// no-op unless the one just deleted was current. ok=false means a statement
+// failed and the caller must roll back.
 func (server *Server) promoteNewestVersion(querier dbutil.Querier, designID int, wasCurrent bool) bool {
 	if !wasCurrent {
 		return true
@@ -657,7 +638,7 @@ func (server *Server) promoteNewestVersion(querier dbutil.Querier, designID int,
 	return true
 }
 
-// FilesDownload returns all files of a version as a ZIP (or the single file directly).
+// FilesDownload returns a version as a ZIP, or a single file directly.
 func (server *Server) FilesDownload(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -701,9 +682,9 @@ func (server *Server) FilesDownload(responseWriter http.ResponseWriter, request 
 		if !fileExists(entryPath) {
 			continue
 		}
-		// relative_path keeps the directory structure the downloader stored; using the
-		// bare filename would collapse parts/left/body.stl and parts/right/body.stl
-		// into two entries named body.stl, and most unpackers silently keep only one.
+		// relative_path keeps the downloader's directory structure: the bare filename
+		// would collapse parts/left/body.stl and parts/right/body.stl into one name,
+		// and most unpackers silently keep only one of them.
 		zipEntryWriter, failure := zipWriter.Create(zipEntryName(entry))
 		if failure != nil {
 			continue
@@ -717,8 +698,7 @@ func (server *Server) FilesDownload(responseWriter http.ResponseWriter, request 
 	}
 }
 
-// entryFilename is the name a single file is offered under - never empty, so a
-// download does not end up unnamed.
+// entryFilename is never empty, so a download does not end up unnamed.
 func entryFilename(entry fileEntryRow) string {
 	if entry.Filename == "" {
 		return "file"
@@ -727,9 +707,8 @@ func entryFilename(entry fileEntryRow) string {
 }
 
 // zipEntryName is the path an entry gets inside the exported ZIP: the stored
-// relative_path (so the directory layout survives the round trip), falling back to
-// the bare filename. Leading slashes and ".." segments are dropped - a ZIP that
-// contains them makes careless extractors write outside the target directory.
+// relative_path, falling back to the bare filename. Leading slashes and ".."
+// segments are dropped, since careless extractors write outside the target.
 func zipEntryName(entry fileEntryRow) string {
 	name := entry.RelativePath
 	if name == "" {
@@ -748,7 +727,6 @@ func zipEntryName(entry fileEntryRow) string {
 	return strings.Join(segments, "/")
 }
 
-// FilesServeEntry streams a single file (3D preview), CORS open.
 func (server *Server) FilesServeEntry(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -776,7 +754,6 @@ func (server *Server) FilesServeEntry(responseWriter http.ResponseWriter, reques
 	serveInline(responseWriter, entryPath, entryFilename(entry))
 }
 
-// FilesServeStl returns the first STL/OBJ/3MF of a version (legacy).
 func (server *Server) FilesServeStl(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -803,7 +780,6 @@ func (server *Server) FilesServeStl(responseWriter http.ResponseWriter, request 
 	serveInline(responseWriter, entryPath, entryFilename(entry))
 }
 
-// FilesCreateToken creates a one-time download token (slicer without a session).
 func (server *Server) FilesCreateToken(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -829,7 +805,6 @@ func (server *Server) FilesCreateToken(responseWriter http.ResponseWriter, reque
 	httpx.JSON(responseWriter, http.StatusOK, map[string]string{"token": token})
 }
 
-// FilesServeByToken streams a file via a one-time token without a session.
 func (server *Server) FilesServeByToken(responseWriter http.ResponseWriter, request *http.Request) {
 	tokenData, ok := server.downloadTokens.Take(request.PathValue("token"))
 	if !ok {
@@ -869,7 +844,6 @@ func fileExists(path string) bool {
 	return failure == nil
 }
 
-// serveInline streams a file with open CORS (for the 3D preview).
 func serveInline(responseWriter http.ResponseWriter, path, filename string) {
 	file, failure := os.Open(path)
 	if failure != nil {
@@ -884,7 +858,6 @@ func serveInline(responseWriter http.ResponseWriter, path, filename string) {
 	io.Copy(responseWriter, file)
 }
 
-// serveAttachment streams a file as a download (Content-Disposition).
 func serveAttachment(responseWriter http.ResponseWriter, path, filename string) {
 	file, failure := os.Open(path)
 	if failure != nil {
@@ -902,9 +875,8 @@ func serveAttachment(responseWriter http.ResponseWriter, path, filename string) 
 }
 
 // sanitizeUploadPath picks the path an uploaded entry gets inside the version
-// directory: the ZIP-relative path when it is usable, the bare filename
-// otherwise. Traversal segments are dropped, so no upload can write outside its
-// own version.
+// directory: the ZIP-relative path when usable, the bare filename otherwise.
+// Traversal segments are dropped.
 func sanitizeUploadPath(relativePath, filename string) string {
 	candidate := relativePath
 	if candidate == "" {

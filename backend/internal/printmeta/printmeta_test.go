@@ -13,7 +13,7 @@ import (
 	"meshdepot/internal/gcode"
 )
 
-// ── fixture builders ─────────────────────────────────────────────────────────
+// - fixture builders -----------------------------
 
 type buffer struct{ data []byte }
 
@@ -37,9 +37,8 @@ func (b *buffer) text(offset int, value string) {
 	copy(b.data[offset:], value)
 }
 
-// anycubicFile builds a Photon Workshop file: 48-byte file mark, then a HEADER
-// section (tag[8] | reserved | length | body) with the layout all .pw* variants
-// share.
+// anycubicFile: 48-byte file mark, then a HEADER section with the layout all
+// .pw* variants share.
 func anycubicFile() []byte {
 	const headerAddress = 0x30
 	file := &buffer{}
@@ -71,8 +70,8 @@ func anycubicFile() []byte {
 	return file.data
 }
 
-// chituboxFile builds a Chitubox-family file for the given magic: fixed header,
-// parameter block and (for CTB) a slicer block pointing at a machine name.
+// chituboxFile: fixed header, parameter block and, for CTB, a slicer block
+// pointing at a machine name.
 func chituboxFile(magic uint32, version uint32) []byte {
 	const (
 		parameterOffset = 0x100
@@ -118,7 +117,6 @@ func chituboxFile(magic uint32, version uint32) []byte {
 	return file.data
 }
 
-// sl1File builds an SL1 archive with the two ini files PrusaSlicer writes.
 func sl1File(t *testing.T) []byte {
 	t.Helper()
 	var out bytes.Buffer
@@ -161,7 +159,7 @@ func sl1File(t *testing.T) []byte {
 	return out.Bytes()
 }
 
-// ── assertions ───────────────────────────────────────────────────────────────
+// - assertions --------------------------------
 
 func extract(t *testing.T, filename string, data []byte) map[string]any {
 	t.Helper()
@@ -212,7 +210,7 @@ func keysOf(result map[string]any) []string {
 	return keys
 }
 
-// ── tests ────────────────────────────────────────────────────────────────────
+// - tests ----------------------------------
 
 func TestExtractAnycubic(t *testing.T) {
 	// The whole .pw* family shares the HEADER layout, so one fixture covers all

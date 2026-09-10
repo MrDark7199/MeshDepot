@@ -1,6 +1,5 @@
-// Package scheduler replaces docker/cronjob/entrypoint.sh: it watches the
-// library_sync_force flag, triggers periodic library syncs and enqueues due
-// designs into the sync_queue (auto-sync).
+// Package scheduler watches the library_sync_force flag, triggers periodic
+// library syncs and enqueues due designs into the sync_queue.
 package scheduler
 
 import (
@@ -14,31 +13,23 @@ import (
 	"meshdepot/internal/safego"
 )
 
-// forceFlagInterval is how often the library_sync_force flag is polled.
 const forceFlagInterval = 30 * time.Second
 
-// Scheduler bundles the periodic background loops.
 type Scheduler struct {
-	DB *sql.DB
-	// RunLibrarySync triggers the library sync of all accounts (injected).
+	DB               *sql.DB
 	RunLibrarySync   func()
 	AutoSyncInterval time.Duration
-	// SendMailDigest collects pending notification e-mails into one message per
-	// member (injected, so the scheduler does not depend on the mail stack).
-	SendMailDigest func()
-	// MailDigestInterval is how often that runs.
+	// SendMailDigest is injected, so the scheduler does not depend on the mail stack.
+	SendMailDigest     func()
 	MailDigestInterval time.Duration
-	// Heartbeat records the liveness of both loops for the health endpoint.
-	// Wired by main.go; nil elsewhere, which the registry tolerates.
+	// Heartbeat is wired by main.go; nil elsewhere, which the registry tolerates.
 	Heartbeat *health.Registry
 }
 
-// New creates a scheduler with the default interval (10 min).
 func New(db *sql.DB, runLibrarySync func()) *Scheduler {
 	return &Scheduler{DB: db, RunLibrarySync: runLibrarySync, AutoSyncInterval: 10 * time.Minute}
 }
 
-// Start starts the loops until stop is closed.
 func (scheduler *Scheduler) Start(stop <-chan struct{}) {
 	scheduler.Heartbeat.Register(health.SchedulerForce, forceFlagInterval)
 	scheduler.Heartbeat.Register(health.SchedulerAuto, scheduler.AutoSyncInterval)
@@ -48,8 +39,8 @@ func (scheduler *Scheduler) Start(stop <-chan struct{}) {
 	safego.Go("scheduler.force-flag", func() {
 		scheduler.loop(stop, health.SchedulerForce, forceFlagInterval, func() {
 			if scheduler.consumeForceFlag() && scheduler.RunLibrarySync != nil {
-				// A library sync runs for minutes and blocks this loop for that
-				// long, so it is reported as busy rather than as a dead loop.
+				// A library sync runs for minutes and blocks this loop, so it is reported busy
+				// rather than dead.
 				endBusy := scheduler.Heartbeat.Working(health.SchedulerForce)
 				defer endBusy()
 				scheduler.RunLibrarySync()
@@ -68,8 +59,7 @@ func (scheduler *Scheduler) Start(stop <-chan struct{}) {
 	}
 }
 
-// loop calls task at the given interval until stop is closed and reports every
-// tick to the heartbeat registry under the given loop name.
+// loop calls task at the given interval and reports every tick to the registry.
 func (scheduler *Scheduler) loop(stop <-chan struct{}, name string, interval time.Duration, task func()) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -86,7 +76,7 @@ func (scheduler *Scheduler) loop(stop <-chan struct{}, name string, interval tim
 }
 
 // consumeForceFlag returns true and resets the flag when a forced library sync
-// was requested (via /admin/library-sync/run).
+// was requested.
 func (scheduler *Scheduler) consumeForceFlag() bool {
 	var value string
 	if failure := scheduler.DB.QueryRow("SELECT value FROM app_settings WHERE key='library_sync_force'").Scan(&value); failure != nil {
@@ -99,19 +89,17 @@ func (scheduler *Scheduler) consumeForceFlag() bool {
 	return true
 }
 
-// DesignUpdateMinDays is the shortest interval between two update checks of the
-// same design. Every check is a full re-download from the source platform, so a
-// shorter interval multiplies the requests a platform sees per library - which
-// is what gets an account blocked.
+// DesignUpdateMinDays is the shortest interval between two update checks of one
+// design. Every check is a full re-download, so a shorter interval multiplies the
+// requests a platform sees - which is what gets an account blocked.
 const DesignUpdateMinDays = 7
 
-// autoSyncBatch bounds how many designs one tick enqueues, so a library that has
-// been idle for weeks does not fill the queue in a single pass.
+// autoSyncBatch keeps a library idle for weeks from filling the queue in one
+// pass.
 const autoSyncBatch = 20
 
-// designUpdateSettings reads the server-wide switch and interval floor. Missing
-// rows count as enabled with the built-in minimum, which is what the schema
-// seeds.
+// designUpdateSettings: missing rows count as enabled with the built-in minimum,
+// which is what the schema seeds.
 func (scheduler *Scheduler) designUpdateSettings() (enabled bool, minDays int) {
 	enabled, minDays = true, DesignUpdateMinDays
 	var value string
@@ -126,13 +114,10 @@ func (scheduler *Scheduler) designUpdateSettings() (enabled bool, minDays int) {
 	return enabled, minDays
 }
 
-// autoSyncEnqueue enqueues designs whose last update check is older than the
-// interval their owner configured, and that are not already queued.
-//
-// The interval is per design, not per run: a design synced on the 1st comes up
-// on the 8th, one synced on the 2nd on the 9th. Members who switched the update
-// off (sync_min_age_days IS NULL) are skipped entirely, and nobody can check
-// more often than the server-wide floor.
+// autoSyncEnqueue takes designs whose last check is older than their owner's
+// interval and that are not already queued. The interval is per design, not per
+// run. Members who switched updates off are skipped, and nobody checks more often
+// than the server-wide floor.
 func (scheduler *Scheduler) autoSyncEnqueue() int {
 	enabled, minDays := scheduler.designUpdateSettings()
 	if !enabled {

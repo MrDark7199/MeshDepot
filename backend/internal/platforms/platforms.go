@@ -1,7 +1,6 @@
-// Package platforms defines the common interface of the 6 platform downloaders
-// and the saving of a download result into the library. The concrete downloaders
-// reach their platform over plain HTTP, through Tor, or through a headless
-// browser, depending on what that platform's anti-bot measures allow.
+// Package platforms defines the common interface of the platform downloaders and
+// the saving of a result into the library. The downloaders reach their platform
+// over plain HTTP, through Tor, or through a headless browser.
 package platforms
 
 import (
@@ -15,10 +14,9 @@ import (
 	"meshdepot/internal/storage"
 )
 
-// applyPlaywrightAuth attaches the shared bearer token to a request bound for
-// the Firefox resolver. The container entrypoint generates one at startup and
-// exports it to both processes, so it is normally always set; an unset token
-// stays a no-op for callers pointing PLAYWRIGHT_URL at their own resolver.
+// applyPlaywrightAuth attaches the shared bearer token for the Firefox resolver.
+// The entrypoint generates one at startup, so an unset token is a no-op for
+// callers pointing PLAYWRIGHT_URL at their own resolver.
 func applyPlaywrightAuth(request *http.Request) {
 	if token := os.Getenv("PLAYWRIGHT_TOKEN"); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
@@ -27,12 +25,12 @@ func applyPlaywrightAuth(request *http.Request) {
 
 const resolverProbeInterval = 500 * time.Millisecond
 
-// WaitForResolver blocks until the Firefox resolver answers on /health, or until
-// timeout expires. The entrypoint starts it moments before the app, so a short
-// wait is normal - node has to load Playwright first.
+// WaitForResolver blocks until the Firefox resolver answers on /health. The
+// entrypoint starts it moments before the app, and node has to load Playwright
+// first, so a short wait is normal.
 func WaitForResolver(baseURL string, timeout time.Duration) error {
-	// Empty means someone overrode the image's PLAYWRIGHT_URL with nothing.
-	// Say so straight away instead of spending the whole timeout on it.
+	// Empty means someone overrode PLAYWRIGHT_URL with nothing; say so rather than
+	// spending the whole timeout on it.
 	if strings.TrimSpace(baseURL) == "" {
 		return fmt.Errorf("no resolver URL configured (PLAYWRIGHT_URL is empty)")
 	}
@@ -71,7 +69,6 @@ func WaitForResolver(baseURL string, timeout time.Duration) error {
 	}
 }
 
-// Credentials bundles the access data to be checked (validator).
 type Credentials struct {
 	Email    string
 	Password string
@@ -79,15 +76,14 @@ type Credentials struct {
 	TOTP     string
 }
 
-// Validator is implemented by downloaders that can check entered credentials
-// without saving. Downloaders without a validator are considered "save-only".
+// Validator is implemented by downloaders that can check credentials without
+// saving. The rest are save-only.
 type Validator interface {
 	Validate(credentials Credentials) bool
 }
 
-// ReasonValidator additionally returns an i18n error key instead of only a bool,
-// so the frontend can distinguish which input was wrong (token vs. username). A
-// return of "" means valid.
+// ReasonValidator returns an i18n key instead of a bool, so the frontend can say
+// which input was wrong. "" means valid.
 type ReasonValidator interface {
 	ValidateReason(credentials Credentials) string
 }
@@ -97,32 +93,28 @@ type Platform struct {
 	Label  string // display name
 	Domain string // canonical hostname, used for URL detection
 
-	// NeedsCredentials marks platforms whose downloads fail without a stored
-	// token or login, so the API can reject a queue request early.
+	// NeedsCredentials marks platforms whose downloads fail without a stored token,
+	// so the API can reject a queue request early.
 	NeedsCredentials bool
 
-	// TokenExpiry is the SQLite date modifier applied to a token obtained by
-	// auto-login. Empty means the platform has no auto-login.
+	// TokenExpiry is the SQLite date modifier applied to an auto-login token. Empty
+	// means the platform has no auto-login.
 	TokenExpiry string
 
-	// autoLogin obtains a fresh token from stored credentials; nil for the
-	// platforms whose token can only be entered by hand. Set exactly when
-	// TokenExpiry is - resolveToken persists what this returns.
+	// autoLogin is nil for platforms whose token can only be entered by hand, and
+	// set exactly when TokenExpiry is.
 	autoLogin func(Deps, Credentials) string
 
-	// newDownloader builds the downloader; nil means "not (yet) implemented".
+	// newDownloader is nil for a platform that is not implemented.
 	newDownloader func(Deps) Downloader
 }
 
-// All is the single source of truth for the supported platforms. Domains,
-// labels, credential requirements, token lifetimes and the registry all derive
-// from this table - previously each of those lived in its own hardcoded list,
-// and adding a platform meant finding all of them.
+// All is the single source of truth: domains, labels, credential requirements,
+// token lifetimes and the registry all derive from this table.
 //
-// Two lists outside this package must be kept in sync manually; the schema's
-// CHECK constraints (db/schema.sql) and the frontend constants
-// (frontend/src/constants/platforms.ts). TestPlatformTableMatchesExternalLists
-// fails when they drift apart.
+// Two lists outside this package are kept in sync by hand - the schema's CHECK
+// constraints and frontend/src/constants/platforms.ts.
+// TestPlatformTableMatchesExternalLists fails when they drift apart.
 var All = []Platform{
 	{Name: "thingiverse", Label: "Thingiverse", Domain: "thingiverse.com", NeedsCredentials: true,
 		newDownloader: func(deps Deps) Downloader { return Thingiverse{deps} }},
@@ -147,7 +139,6 @@ var All = []Platform{
 		newDownloader: func(deps Deps) Downloader { return MyMiniFactory{deps} }},
 }
 
-// ByName looks a platform up by its internal key.
 func ByName(name string) (Platform, bool) {
 	for _, platform := range All {
 		if platform.Name == name {
@@ -157,8 +148,8 @@ func ByName(name string) (Platform, bool) {
 	return Platform{}, false
 }
 
-// Label returns the display name of a platform, or the raw key for unknown ones
-// (e.g. "manual", or a platform removed from the table while rows still exist).
+// Label returns the display name, or the raw key for unknown platforms such as
+// "manual".
 func Label(name string) string {
 	if platform, ok := ByName(name); ok {
 		return platform.Label
@@ -166,21 +157,16 @@ func Label(name string) string {
 	return name
 }
 
-// NeedsCredentials reports whether downloads from this platform require stored
-// credentials.
+// NeedsCredentials reports whether downloads from this platform need credentials.
 func NeedsCredentials(name string) bool {
 	platform, ok := ByName(name)
 	return ok && platform.NeedsCredentials
 }
 
-// DetectPlatform recognizes the platform from the URL's actual hostname (or "").
-//
-// The hostname is matched exactly (domain or subdomain) - NOT via a substring
-// search. A substring check treats a URL like `http://attacker.example/?x=cults3d.com`
-// as cults3d and hands the raw URL to the downloader, which then dereferences it
-// server-side (SSRF) - for Thangs even with the user's auth token attached. By
-// anchoring on the parsed host, only URLs genuinely served by the platform reach
-// a downloader.
+// DetectPlatform matches the parsed hostname exactly, never as a substring: a
+// substring check treats http://attacker.example/?x=cults3d.com as cults3d and
+// hands the raw URL to the downloader, which dereferences it server-side - for
+// Thangs with the user's auth token attached.
 func DetectPlatform(rawURL string) string {
 	host := hostOf(rawURL)
 	if host == "" {
@@ -194,9 +180,8 @@ func DetectPlatform(rawURL string) string {
 	return ""
 }
 
-// hostOf extracts the lower-cased hostname from a URL. A missing scheme is
-// tolerated (users paste "www.printables.com/model/1"): the string is retried
-// with an "https://" prefix. Returns "" when no host can be determined.
+// hostOf tolerates a missing scheme, since users paste "www.printables.com/…",
+// and returns "" when no host can be determined.
 func hostOf(rawURL string) string {
 	rawURL = strings.TrimSpace(rawURL)
 	parsed, failure := url.Parse(rawURL)
@@ -208,13 +193,11 @@ func hostOf(rawURL string) string {
 	return strings.ToLower(parsed.Hostname())
 }
 
-// DownloadedFile references a downloaded temp file + target name.
 type DownloadedFile struct {
 	TempPath string // path of the downloaded file (removed after saving).
 	Name     string // original/target name (may contain subfolders).
 }
 
-// Result is the outcome of a platform download.
 type Result struct {
 	Name        string
 	Description string
@@ -226,27 +209,24 @@ type Result struct {
 	AllImages   []string // image paths staged in the user's temp directory; SaveDownload/AddImages move them into the design
 }
 
-// Owner is the account a download runs for. It carries both identities on
-// purpose: the numeric id is what crypto.Encrypt derives the credential key
-// from (internal/crypto), so it has to stay numeric, while every storage path is
-// addressed by the public id. It is resolved once where a job is claimed - the
-// database runs on a single connection (SetMaxOpenConns(1)), which makes a
-// lookup inside one of the open transactions in save.go a deadlock.
+// Owner is the account a download runs for. It carries both identities: the
+// numeric id is what crypto.Encrypt derives the credential key from, while every
+// storage path is addressed by the public id. Resolved once where a job is
+// claimed, because with SetMaxOpenConns(1) a lookup inside one of the open
+// transactions in save.go is a deadlock.
 type Owner struct {
 	ID     int
 	Layout storage.UserLayout
 }
 
-// Downloader downloads a design from a platform. progress can be used for SSE
-// progress (step label, current/total).
+// Downloader downloads a design. progress feeds the SSE display (step label,
+// current/total).
 type Downloader interface {
 	Download(sourceURL string, owner Owner, progress func(step, label string, current, total int)) (Result, error)
 }
 
-// Registry holds the downloaders per platform.
 type Registry map[string]Downloader
 
-// Get returns the downloader of a platform (or nil).
 func (registry Registry) Get(platform string) Downloader {
 	if registry == nil {
 		return nil
@@ -254,7 +234,7 @@ func (registry Registry) Get(platform string) Downloader {
 	return registry[platform]
 }
 
-// New builds the registry from the platform table - a platform is available
+// New builds the registry from the platform table: a platform is available
 // exactly when its entry has a constructor.
 func New(deps Deps) Registry {
 	registry := Registry{}

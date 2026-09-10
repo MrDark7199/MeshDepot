@@ -2,13 +2,14 @@ package platforms
 
 import (
 	"database/sql"
-	"log"
 
 	"meshdepot/internal/dbutil"
+
+	"meshdepot/internal/logx"
 )
 
 // platformAccount holds the decrypted contents of one platform_accounts row.
-// Fields that are absent, empty or undecryptable come back as "".
+// Absent, empty or undecryptable fields come back as "".
 type platformAccount struct {
 	Token    string
 	Username string // login e-mail for most platforms
@@ -17,12 +18,10 @@ type platformAccount struct {
 	Expires  string // token_expires_at as stored (SQLite datetime text)
 }
 
-// loadAccount reads a user's account row for a platform and decrypts it.
-//
-// The username falls back to the raw column value when decryption fails: rows
-// written before the field was encrypted still hold plaintext. Token, password
-// and TOTP secret get no such fallback - a ciphertext used as a password would
-// only produce a confusing login failure.
+// loadAccount reads and decrypts a user's account row. The username falls back
+// to the raw column when decryption fails, since rows written before the field
+// was encrypted still hold plaintext; the secrets get no such fallback, where a
+// ciphertext used as a password would only produce a confusing login failure.
 func (deps Deps) loadAccount(userID int, platform string) platformAccount {
 	var token, username, password, totp, expires sql.NullString
 	_ = deps.DB.QueryRow(
@@ -37,15 +36,13 @@ func (deps Deps) loadAccount(userID int, platform string) platformAccount {
 		TOTP:     deps.decryptSecret(totp, userID, platform, "TOTP secret"),
 		Expires:  expires.String,
 	}
-	// The username is the one field with a plaintext fallback (older rows stored
-	// it unencrypted), so a failed decrypt here is expected and stays quiet.
+	// The one field with a plaintext fallback, so a failed decrypt stays quiet.
 	if account.Username = deps.decryptField(username, userID); account.Username == "" {
 		account.Username = username.String
 	}
 	return account
 }
 
-// decryptField decrypts one nullable column, "" when empty or undecryptable.
 func (deps Deps) decryptField(column sql.NullString, userID int) string {
 	if !column.Valid || column.String == "" {
 		return ""
@@ -56,16 +53,11 @@ func (deps Deps) decryptField(column sql.NullString, userID int) string {
 	return ""
 }
 
-// decryptSecret is decryptField for the fields an auto-login depends on, and it
-// says so when one cannot be read.
-//
-// Without this the failure is invisible: an undecryptable password comes back
-// as "", hasLogin then reports no credentials, and the download fails with
-// "add your credentials" for an account that has them. The usual cause is an
-// APP_KEY that differs from the one the row was written with - a value the
-// operator changed, or lost. Nothing here can recover the row, but the log line
-// points at the key instead of sending someone to re-check credentials that
-// were entered correctly.
+// decryptSecret is decryptField for the fields an auto-login depends on, and says
+// so when one cannot be read. Otherwise the failure is invisible: the value comes
+// back as "", hasLogin reports no credentials, and the download fails with "add
+// your credentials" for an account that has them. The usual cause is a changed
+// APP_KEY, and nothing here can recover the row - but the log points at the key.
 func (deps Deps) decryptSecret(column sql.NullString, userID int, platform, field string) string {
 	if !column.Valid || column.String == "" {
 		return ""
@@ -73,40 +65,29 @@ func (deps Deps) decryptSecret(column sql.NullString, userID int, platform, fiel
 	if decrypted, ok := deps.Crypto.Decrypt(column.String, userID); ok {
 		return decrypted
 	}
-	log.Printf("[platforms] %s: the stored %s of user %d cannot be decrypted - APP_KEY most likely differs from "+
+	logx.Errorf("[platforms] %s: the stored %s of user %d cannot be decrypted - APP_KEY most likely differs from "+
 		"the one it was saved with. The account now reads as if nothing had been entered; re-enter the credentials to fix it.",
 		platform, field, userID)
 	return ""
 }
 
-// hasLogin reports whether the stored credentials are usable for an auto-login.
-// "***" is the placeholder the frontend sends back for an unchanged password;
-// it must never be tried as one.
+// hasLogin reports whether the credentials are usable for an auto-login. "***"
+// is the placeholder the frontend sends for an unchanged password.
 func (account platformAccount) hasLogin() bool {
 	return account.Username != "" && account.Password != "" && account.Password != "***"
 }
 
-// resolveToken returns a usable access token for a platform: the stored one
-// while it is still valid, otherwise a fresh one from the platform's auto-login
-// (when credentials are on file), persisted encrypted with the lifetime from
-// the platform table.
-//
-// This used to exist four times over - once per downloader plus one in the
-// library sync - differing only in the platform constant, the expiry and
-// whether the TOTP secret was read. progress may be nil (the library sync has
-// no SSE channel).
+// resolveToken returns the stored token while it is valid, otherwise a fresh one
+// from the platform's auto-login, persisted with the lifetime from the platform
+// table. progress may be nil, as the library sync has no SSE channel.
 func (deps Deps) resolveToken(userID int, platform string, progress func(step, label string, current, total int)) (token string, loginFailed bool) {
 	return deps.refreshToken(deps.loadAccount(userID, platform), userID, platform, progress)
 }
 
-// refreshToken is resolveToken for callers that already hold the account row
-// (the library sync also needs the username from it) - it must not be read
-// twice.
-//
-// loginFailed distinguishes "no credentials stored" from "the login was tried
-// and rejected", so callers can tell the user which one to fix. The previous
-// token is returned unchanged in that case - an expired token is still the best
-// available guess, and platforms that read anonymously stay readable.
+// refreshToken is resolveToken for callers that already hold the account row.
+// loginFailed separates "no credentials stored" from "the login was rejected", so
+// callers can say which to fix; the previous token is returned unchanged then,
+// since it is still the best guess and anonymous platforms stay readable.
 func (deps Deps) refreshToken(
 	account platformAccount,
 	userID int,
@@ -134,8 +115,8 @@ func (deps Deps) refreshToken(
 	return newToken, false
 }
 
-// persistToken stores a refreshed token encrypted, with an expiry relative to
-// now (expiresExpr is a SQLite date modifier such as "+28 days").
+// persistToken stores a refreshed token encrypted, with an expiry relative to now
+// (a SQLite date modifier such as "+28 days").
 func (deps Deps) persistToken(userID int, platform, token, expiresExpr string) {
 	if encrypted, failure := deps.Crypto.Encrypt(token, userID); failure == nil {
 		dbutil.ExecLogged(deps.DB,
@@ -144,9 +125,8 @@ func (deps Deps) persistToken(userID int, platform, token, expiresExpr string) {
 	}
 }
 
-// forceLogin obtains a fresh token from the stored credentials regardless of
-// whether the stored one still looks valid, and persists it. Used on the 401
-// retry path: the platform has rejected a token that had not expired yet.
+// forceLogin fetches and persists a fresh token whatever the stored one looks
+// like, for the 401 retry path where the platform rejected an unexpired token.
 func (deps Deps) forceLogin(userID int, platform string) string {
 	account := deps.loadAccount(userID, platform)
 	account.Token, account.Expires = "", ""

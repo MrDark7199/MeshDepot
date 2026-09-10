@@ -9,9 +9,8 @@ import (
 	"meshdepot/internal/platforms"
 )
 
-// stubDownloader stands in for a real platform downloader. Only the validator
-// methods are ever called in these tests; Download exists to satisfy the
-// interface the registry stores.
+// stubDownloader stands in for a real downloader; only the validator methods are
+// called, and Download exists to satisfy the interface.
 type stubDownloader struct {
 	valid  bool
 	reason string
@@ -44,7 +43,6 @@ func platformAccountsPath(publicID string) string {
 // background library sync the test would have to wait for.
 var quietFlags = map[string]any{"sync_likes": 0, "sync_collections": 0, "auto_library_sync": 0}
 
-// saveAccount stores credentials for the logged-in member.
 func (testHarness *harness) saveAccount(fields map[string]any) response {
 	testHarness.t.Helper()
 	body := map[string]any{}
@@ -70,7 +68,6 @@ func TestPlatformAccountsIndexIsEmptyWithoutAccounts(t *testing.T) {
 	}
 }
 
-// Credentials are encrypted at rest and only decrypted for their owner.
 func TestPlatformAccountsSaveEncryptsTheCredentials(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -116,8 +113,6 @@ func TestPlatformAccountsIndexReturnsTheFlagsAsBooleans(t *testing.T) {
 	}
 }
 
-// A second save updates the existing account instead of adding a second active
-// row for the same platform.
 func TestPlatformAccountsSaveUpdatesInsteadOfDuplicating(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.saveAccount(map[string]any{"platform": "thingiverse", "token": "erstes-token", "username": "sammler"})
@@ -138,8 +133,7 @@ func TestPlatformAccountsSaveUpdatesInsteadOfDuplicating(t *testing.T) {
 	}
 }
 
-// The form sends "***" for a password it never showed. That must not overwrite
-// the stored one with three asterisks.
+// "***" is what the form sends for a password it never showed.
 func TestPlatformAccountsSaveKeepsAMaskedPassword(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.saveAccount(map[string]any{"platform": "cults3d", "username": "sammler", "password": "geheim"})
@@ -169,8 +163,8 @@ func TestPlatformAccountsSaveNeedsAPlatform(t *testing.T) {
 	}
 }
 
-// Switching a sync on starts the library sync in the background; saving the
-// same flags again does not.
+// Switching a sync on starts one in the background; saving the same flags again
+// does not.
 func TestPlatformAccountsSaveReportsTheTriggeredSync(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -191,8 +185,7 @@ func TestPlatformAccountsSaveReportsTheTriggeredSync(t *testing.T) {
 	}
 }
 
-// disableLibrarySync flips the server-wide switch through the admin route, the
-// same way the settings form does.
+// disableLibrarySync flips the server-wide switch the way the settings form does.
 func (testHarness *harness) disableLibrarySync() {
 	testHarness.t.Helper()
 	answer := testHarness.asAdmin(http.MethodPut, "/api/v1/admin/settings", map[string]any{"library_sync_enabled": 0})
@@ -201,8 +194,6 @@ func (testHarness *harness) disableLibrarySync() {
 	}
 }
 
-// The server switch outranks the account flags: with the sync off, saving
-// credentials must not start one either.
 func TestPlatformAccountsSaveStartsNoSyncWhileDisabledServerSide(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.disableLibrarySync()
@@ -220,8 +211,7 @@ func TestPlatformAccountsSaveStartsNoSyncWhileDisabledServerSide(t *testing.T) {
 	}
 }
 
-// The manual sync routes answer with a reason instead of a silent success, so
-// the client can tell the member why nothing happened.
+// The manual routes answer with a reason instead of a silent success.
 func TestPlatformAccountsSyncIsRefusedWhileDisabledServerSide(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.saveAccount(map[string]any{"platform": "thingiverse", "token": "geheimes-token"})
@@ -257,8 +247,6 @@ func TestPlatformAccountsDeleteRemovesTheOwnAccount(t *testing.T) {
 	}
 }
 
-// The delete is scoped to the owner, so an id belonging to somebody else does
-// nothing at all.
 func TestPlatformAccountsDeleteLeavesAForeignAccountAlone(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.insertPlatformAccount(testHarness.adminID, "thingiverse", "fremdes-token", "fremd")
@@ -282,8 +270,6 @@ func TestPlatformAccountsDeleteWithANonNumericIDIsNotFound(t *testing.T) {
 	}
 }
 
-// The platform accounts belong to their user; no route may be called with
-// somebody else's id.
 func TestPlatformAccountRoutesAreSelfScoped(t *testing.T) {
 	testHarness := newHarness(t)
 	foreignPath := platformAccountsPath(testHarness.publicID(testHarness.adminID))
@@ -312,9 +298,8 @@ func TestPlatformAccountRoutesAreSelfScoped(t *testing.T) {
 }
 
 func TestPlatformAccountsSyncRoutesAnswerWithoutAccounts(t *testing.T) {
-	// One harness per route: a manual run starts the account-wide cooldown, so
-	// the second call in a shared harness would be refused for that reason
-	// rather than answering the question this test asks.
+	// One harness per route: a manual run starts the account-wide cooldown, so the
+	// second call would be refused for that reason rather than the one being tested.
 	for _, suffix := range []string{"/sync-all", "/thingiverse/sync"} {
 		testHarness := newHarness(t)
 		path := platformAccountsPath(testHarness.publicID(testHarness.userID)) + suffix
@@ -325,8 +310,6 @@ func TestPlatformAccountsSyncRoutesAnswerWithoutAccounts(t *testing.T) {
 	}
 }
 
-// A platform whose downloader cannot check credentials says so instead of
-// claiming they are wrong.
 func TestPlatformAccountsValidateReportsAnUnsupportedPlatform(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -365,8 +348,6 @@ func TestPlatformAccountsValidateUsesTheDownloader(t *testing.T) {
 	}
 }
 
-// A downloader that names the reason passes its i18n key through, so the
-// frontend can point at the wrong field.
 func TestPlatformAccountsValidatePassesTheReasonThrough(t *testing.T) {
 	testHarness := newHarness(t)
 	validator := &stubReasonValidator{}
@@ -388,8 +369,8 @@ func TestPlatformAccountsValidatePassesTheReasonThrough(t *testing.T) {
 	}
 }
 
-// The form sends "***" for fields it never showed; the check has to fill them
-// in from the stored credentials rather than validate with a mask.
+// The check has to fill the masked fields in from the stored credentials rather
+// than validate with a mask.
 func TestPlatformAccountsValidateResolvesMaskedFields(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.saveAccount(map[string]any{
@@ -412,7 +393,6 @@ func TestPlatformAccountsValidateResolvesMaskedFields(t *testing.T) {
 	}
 }
 
-// Credentials of another user are never handed to a validator.
 func TestPlatformAccountsValidateIgnoresForeignCredentials(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.insertPlatformAccount(testHarness.adminID, "thingiverse", "fremdes-token", "fremd")
@@ -428,7 +408,6 @@ func TestPlatformAccountsValidateIgnoresForeignCredentials(t *testing.T) {
 	}
 }
 
-// An account that was switched off stays out of the list.
 func TestPlatformAccountsIndexSkipsInactiveAccounts(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.saveAccount(map[string]any{"platform": "thingiverse", "token": "geheimes-token"})
@@ -455,8 +434,8 @@ func TestTrimOrNilDropsEmptyValues(t *testing.T) {
 	}
 }
 
-// syncCooldownRemaining is what closes the "sync now" buttons; it has to read
-// the naive UTC stamps SQLite writes and survive anything else.
+// syncCooldownRemaining has to read the naive UTC stamps SQLite writes and
+// survive anything else.
 func TestSyncCooldownRemainingReadsTheStoredTimestamp(t *testing.T) {
 	now := time.Now().UTC()
 	cases := []struct {
@@ -482,8 +461,6 @@ func TestSyncCooldownRemainingReadsTheStoredTimestamp(t *testing.T) {
 	}
 }
 
-// A second trigger within the cooldown is refused: a burst of manual syncs is
-// what gets a platform account blocked.
 func TestPlatformAccountsSyncIsRefusedDuringTheCooldown(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.saveAccount(map[string]any{"platform": "thingiverse", "token": "geheimes-token"})
@@ -504,8 +481,6 @@ func TestPlatformAccountsSyncIsRefusedDuringTheCooldown(t *testing.T) {
 	}
 }
 
-// The cooldown is per account: a sync of one platform must not close the button
-// of another one.
 func TestPlatformAccountsSyncCooldownIsPerPlatform(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.saveAccount(map[string]any{"platform": "thingiverse", "token": "geheimes-token"})
@@ -521,10 +496,8 @@ func TestPlatformAccountsSyncCooldownIsPerPlatform(t *testing.T) {
 	}
 }
 
-// Issue #4: triggering one platform's sync must not put another platform's
-// "sync now" on cooldown. Unlike the test above (which stamps a timestamp
-// directly), this goes through the real trigger, which used to also stamp the
-// account-wide users.last_manual_sync_at and thereby block every other platform.
+// Issue #4: unlike the test above, this goes through the real trigger, which used
+// to stamp the account-wide users.last_manual_sync_at and block every platform.
 func TestPlatformAccountsSyncOneDoesNotBlockAnotherPlatform(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.saveAccount(map[string]any{"platform": "thingiverse", "token": "geheimes-token"})
@@ -540,8 +513,6 @@ func TestPlatformAccountsSyncOneDoesNotBlockAnotherPlatform(t *testing.T) {
 	}
 }
 
-// The list carries the remaining cooldown so the client can disable the button
-// instead of offering a call the server only rejects.
 func TestPlatformAccountsIndexReportsTheRemainingCooldown(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.saveAccount(map[string]any{"platform": "thingiverse", "token": "geheimes-token"})

@@ -210,3 +210,28 @@ func TestIsUniqueViolation(t *testing.T) {
 		t.Fatal("an unrelated error was reported as a unique violation")
 	}
 }
+
+func TestExistsSeparatesAbsenceFromFailure(t *testing.T) {
+	database := newTestDatabase(t)
+	if _, failure := database.Exec("INSERT INTO designs (id, name) VALUES (1, 'here')"); failure != nil {
+		t.Fatalf("seed: %v", failure)
+	}
+
+	if found, known := Exists(database, "SELECT id FROM designs WHERE name = ?", "here"); !found || !known {
+		t.Errorf("a row that is there: got found=%v known=%v", found, known)
+	}
+	if found, known := Exists(database, "SELECT id FROM designs WHERE name = ?", "nowhere"); found || !known {
+		t.Errorf("a row that is not there: got found=%v known=%v", found, known)
+	}
+
+	// The point of the helper: a query that cannot be answered must not read as
+	// "no such row", which is what turns a busy database into a duplicate.
+	if found, known := Exists(database, "SELECT id FROM a_table_that_does_not_exist"); found || known {
+		t.Errorf("a failed query: got found=%v known=%v, want false, false", found, known)
+	}
+
+	database.Close()
+	if found, known := Exists(database, "SELECT id FROM designs WHERE name = ?", "here"); found || known {
+		t.Errorf("a closed database: got found=%v known=%v, want false, false", found, known)
+	}
+}

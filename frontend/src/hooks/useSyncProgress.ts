@@ -34,6 +34,7 @@ export function createSyncProgressStore(deps: SyncProgressDeps) {
   const [statusMap, setStatusMap] = createSignal<Record<DesignID, SyncStatus>>({})
   const [progressMap, setProgressMap] = createSignal<Record<DesignID, number>>({})
   const [stepMap, setStepMap] = createSignal<Record<DesignID, SyncStep>>({})
+  const [errorMap, setErrorMap] = createSignal<Record<DesignID, string>>({})
   /** Bumped whenever a job finishes; the design detail view re-reads its data on change. */
   const [tick, setTick] = createSignal(0)
 
@@ -56,8 +57,15 @@ export function createSyncProgressStore(deps: SyncProgressDeps) {
 
         if (jobs.length === 0) {
           stop()
-          // Clear overlays first, then reload once without touching the map again
-          setStatusMap({})
+          // Failures are kept: the server drops a finished job from this list
+          // after a while, and the reason would go with it.
+          setStatusMap(prev => {
+            const kept: Record<DesignID, SyncStatus> = {}
+            for (const [designId, status] of Object.entries(prev)) {
+              if (status === 'error') kept[designId] = status
+            }
+            return kept
+          })
           setStepMap({})
           if (needsReload) deps.onAllFinished()
           return
@@ -104,6 +112,9 @@ export function createSyncProgressStore(deps: SyncProgressDeps) {
           handledJobIds.add(job.id)
           needsReload = true
           setTick(value => value + 1)
+          if (job.status === 'failed') {
+            setErrorMap(prev => ({ ...prev, [job.design_id]: job.error_msg || '' }))
+          }
           deps.onJobFinished(job)
           // Remove the overlay after a brief flash - and never re-add it
           // (handledJobIds guards the setters above).
@@ -114,14 +125,17 @@ export function createSyncProgressStore(deps: SyncProgressDeps) {
             delete next[designId]
             return next
           })
-          setTimeout(() => {
-            setStatusMap(prev => {
-              if (!(designId in prev)) return prev
-              const next = { ...prev }
-              delete next[designId]
-              return next
-            })
-          }, SYNC_OVERLAY_LINGER_MS)
+          // Only the green tick is transient; a failure waits for the next attempt.
+          if (job.status !== 'failed') {
+            setTimeout(() => {
+              setStatusMap(prev => {
+                if (!(designId in prev)) return prev
+                const next = { ...prev }
+                delete next[designId]
+                return next
+              })
+            }, SYNC_OVERLAY_LINGER_MS)
+          }
         }
       } catch { /* network error - keep polling */ }
     }, SYNC_POLL_MS)
@@ -129,6 +143,11 @@ export function createSyncProgressStore(deps: SyncProgressDeps) {
 
   /** Shows the "queued" overlay for the given designs before the first poll lands. */
   const markQueued = (designIds: DesignID[], replace = false) => {
+    setErrorMap(prev => {
+      const next = { ...prev }
+      designIds.forEach(id => { delete next[id] })
+      return next
+    })
     setStatusMap(prev => {
       const next: Record<DesignID, SyncStatus> = replace ? {} : { ...prev }
       designIds.forEach(id => { next[id] = 'queued' })
@@ -151,5 +170,5 @@ export function createSyncProgressStore(deps: SyncProgressDeps) {
 
   onCleanup(stop)
 
-  return { statusMap, progressMap, stepMap, tick, start, stop, markQueued, resumeFromServer }
+  return { statusMap, progressMap, stepMap, errorMap, tick, start, stop, markQueued, resumeFromServer }
 }

@@ -12,7 +12,6 @@ import (
 	"meshdepot/internal/platforms"
 )
 
-// withKey issues an API key for the ordinary test user and returns it.
 func (testHarness *harness) withKey() string {
 	testHarness.t.Helper()
 	answer := testHarness.asUser(http.MethodPost, "/api/v1/api-keys", map[string]any{"name": "test"})
@@ -26,7 +25,6 @@ func (testHarness *harness) withKey() string {
 	return key
 }
 
-// withApiKey performs a request authenticated by API key instead of a session.
 func (testHarness *harness) withApiKey(method, path, key string, body any) response {
 	testHarness.t.Helper()
 	return testHarness.do(request{
@@ -35,8 +33,6 @@ func (testHarness *harness) withApiKey(method, path, key string, body any) respo
 	})
 }
 
-// The key is the whole access control of this route, so an absent, malformed or
-// revoked one must not get past it.
 func TestBrowserImportRefusesWithoutAValidKey(t *testing.T) {
 	testHarness := newHarness(t)
 	payload := map[string]any{
@@ -51,9 +47,8 @@ func TestBrowserImportRefusesWithoutAValidKey(t *testing.T) {
 		t.Fatalf("with an invented key: %d", answer.status)
 	}
 
-	// A session cookie must not work either. The route downloads from URLs in the
-	// body; reachable with an ambient cookie, any page a signed-in member opens
-	// could set it off.
+	// A session cookie must not work either: the route downloads from URLs in the
+	// body, so any page a signed-in member opens could set it off.
 	if answer := testHarness.asUser(http.MethodPost, "/api/v1/imports/browser", payload); answer.status != http.StatusUnauthorized {
 		t.Fatalf("with a session cookie: %d - this route must not accept one", answer.status)
 	}
@@ -78,8 +73,6 @@ func TestBrowserImportRefusesARevokedKey(t *testing.T) {
 	}
 }
 
-// The platform comes from the URL, never from the body: it decides where the
-// design is filed and which sync later touches it.
 func TestBrowserImportRefusesAnUnsupportedURL(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
@@ -97,8 +90,6 @@ func TestBrowserImportRefusesAnUnsupportedURL(t *testing.T) {
 	}
 }
 
-// A design already in the library is a conflict, exactly as it is for a queued
-// download - re-importing would otherwise create a second copy of it.
 func TestBrowserImportReportsADuplicate(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
@@ -116,15 +107,13 @@ func TestBrowserImportReportsADuplicate(t *testing.T) {
 	}
 }
 
-// The end-to-end path: links are fetched during the request and the design is in
-// the library when the answer arrives. No queue, because the links expire in
-// about five minutes.
+// Links are fetched during the request and the design is in the library when the
+// answer arrives - no queue, because they expire in about five minutes.
 func TestBrowserImportStoresTheDesignImmediately(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
 
-	// A ZIP-shaped body, so it passes the size and magic-byte checks the library
-	// applies to a downloaded file.
+	// ZIP-shaped, so it passes the size and magic-byte checks.
 	payload := append([]byte("PK\x03\x04"), make([]byte, 200000)...)
 	origin := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
 		responseWriter.Header().Set("Content-Disposition", `attachment;filename=Plate 1.3mf`)
@@ -160,8 +149,7 @@ func TestBrowserImportStoresTheDesignImmediately(t *testing.T) {
 	}
 }
 
-// Dead links are common - they expire in minutes - and must not cost the files
-// that did arrive.
+// Dead links are common and must not cost the files that did arrive.
 func TestBrowserImportKeepsWhatItCouldFetch(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
@@ -194,16 +182,13 @@ func TestBrowserImportKeepsWhatItCouldFetch(t *testing.T) {
 	}
 }
 
-// Printables and Thingiverse hand out a ZIP, MakerWorld a .3mf that happens to be
-// one. The first has to be unpacked and the second must not be - both start with
-// "PK", so the extension decides the case, not the bytes.
+// Printables hands out a ZIP, MakerWorld a .3mf that happens to be one. Both
+// start with "PK", so the content has to decide, not the extension.
 func TestBrowserImportDecidesUnpackingByContentNotByName(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
 
-	// A real archive holding two models.
-	// With a brochure inside it, the way Printables packs one - the models are
-	// what belongs in a library, the PDF is not.
+	// A real archive holding two models and a brochure, the way Printables packs one.
 	var archive bytes.Buffer
 	writer := zip.NewWriter(&archive)
 	for _, name := range []string{"part-a.stl", "part-b.stl", "instructions.pdf"} {
@@ -215,11 +200,9 @@ func TestBrowserImportDecidesUnpackingByContentNotByName(t *testing.T) {
 	}
 	writer.Close()
 
-	// A real 3MF: a ZIP carrying its model under 3D/, which is what tells it apart
-	// from an archive of parts. Both are called ".3mf" here, so nothing in the
-	// names says which is which and the decision has to come from the content -
-	// which is the situation Chrome creates, where a download arrives with no
-	// filename at all.
+	// A real 3MF: a ZIP carrying its model under 3D/. Both are called ".3mf" here, so
+	// nothing in the names says which is which - the situation Chrome creates, where
+	// a download arrives with no filename at all.
 	var modelPackage bytes.Buffer
 	modelWriter := zip.NewWriter(&modelPackage)
 	contentTypes, _ := modelWriter.Create("[Content_Types].xml")
@@ -265,8 +248,7 @@ func TestBrowserImportDecidesUnpackingByContentNotByName(t *testing.T) {
 	designID := testHarness.scalarInt("SELECT id FROM designs WHERE user_id = ? AND source_url = ?",
 		testHarness.userID, "https://www.printables.com/model/1234-thing")
 
-	// The individual files live in design_file_entries; design_files is the
-	// version row and carries only the first filename.
+	// The files live in design_file_entries; design_files is the version row.
 	entries := testHarness.count(`
 		SELECT COUNT(*) FROM design_file_entries e
 		JOIN design_files f ON f.id = e.design_file_id WHERE f.design_id = ?`, designID)
@@ -291,8 +273,7 @@ func TestBrowserImportDecidesUnpackingByContentNotByName(t *testing.T) {
 	}
 }
 
-// The collection is created on the first import that asks for it and reused
-// afterwards - two imports must not leave two collections of the same name.
+// Created on the first import that asks and reused afterwards.
 func TestBrowserImportFilesIntoOneCollection(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
@@ -337,8 +318,7 @@ func TestBrowserImportFilesIntoOneCollection(t *testing.T) {
 	}
 }
 
-// Without the flag nothing is filed anywhere - the setting is off by default and
-// must stay a decision.
+// Off by default, and it must stay a decision.
 func TestBrowserImportFilesNothingWithoutTheFlag(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
@@ -365,9 +345,8 @@ func TestBrowserImportFilesNothingWithoutTheFlag(t *testing.T) {
 	}
 }
 
-// The upload route, end to end: a platform that builds its archive in the
-// browser hands out a blob: address the server cannot fetch, so the bytes come
-// with the request. The archive still has to be unpacked.
+// A platform that builds its archive in the browser hands out a blob: address the
+// server cannot fetch, so the bytes come with the request.
 func TestBrowserImportUploadStoresCarriedFiles(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
@@ -423,7 +402,6 @@ func TestBrowserImportUploadStoresCarriedFiles(t *testing.T) {
 	}
 }
 
-// The key guards this route as it guards the other one.
 func TestBrowserImportUploadRefusesWithoutAKey(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -444,10 +422,9 @@ func TestBrowserImportUploadRefusesWithoutAKey(t *testing.T) {
 	}
 }
 
-// A key travels in a header, so a plaintext connection from outside hands it to
-// everyone on the way. Refused there, and allowed from the same machine or the
-// same network, where a self-hosted instance on plain HTTP is the ordinary
-// arrangement.
+// A key travels in a header, so plaintext from outside hands it to everyone on
+// the way - and is allowed from the same network, where a self-hosted instance on
+// plain HTTP is the ordinary arrangement.
 func TestBrowserImportRefusesAPlaintextConnectionFromOutside(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
@@ -468,8 +445,8 @@ func TestBrowserImportRefusesAPlaintextConnectionFromOutside(t *testing.T) {
 		t.Fatalf("unexpected error key %q", key)
 	}
 
-	// The same request from the server's own network gets past the check and
-	// fails later, on the unreachable file - which is the point: it got that far.
+	// From the server's own network it gets past the check and fails later on the
+	// unreachable file, which is the point: it got that far.
 	inside := testHarness.do(request{
 		method: http.MethodPost, path: "/api/v1/imports/browser", body: payload, noCookie: true,
 		headers:    map[string]string{"Authorization": "Bearer " + key},
@@ -480,8 +457,6 @@ func TestBrowserImportRefusesAPlaintextConnectionFromOutside(t *testing.T) {
 	}
 }
 
-// An expired key is no key. Checked in the lookup itself, so there is no state
-// where one is known but refused.
 func TestAPIKeyStopsWorkingWhenItExpires(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
@@ -498,8 +473,6 @@ func TestAPIKeyStopsWorkingWhenItExpires(t *testing.T) {
 	}
 }
 
-// The queue refuses a download that cannot be kept, and this route has to do the
-// same - otherwise the quota is a limit on one way in and not on the library.
 func TestBrowserImportRefusesWhenTheQuotaIsFull(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()

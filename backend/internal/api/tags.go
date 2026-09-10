@@ -9,8 +9,7 @@ import (
 	"meshdepot/internal/httpx"
 )
 
-// TagsIndex returns all tags of the user incl. usage_count, sorted by usage then
-// name.
+// TagsIndex returns the user's tags with usage_count, sorted by usage then name.
 func (server *Server) TagsIndex(responseWriter http.ResponseWriter, request *http.Request) {
 	rows, failure := dbutil.QueryMaps(server.DB,
 		`SELECT t.*, COUNT(dt.design_id) AS usage_count
@@ -26,9 +25,8 @@ func (server *Server) TagsIndex(responseWriter http.ResponseWriter, request *htt
 	httpx.Success(responseWriter, rows)
 }
 
-// TagsSearch returns a limited hit list for the tag combobox (Select2 style),
-// sorted by origin (self-created first). This way the frontend no longer needs
-// to preload all tags.
+// TagsSearch returns a limited hit list for the tag combobox, self-created tags
+// first, so the frontend need not preload every tag.
 func (server *Server) TagsSearch(responseWriter http.ResponseWriter, request *http.Request) {
 	query := strings.TrimSpace(queryStr(request, "q", ""))
 	limit := queryInt(request, "limit", 20)
@@ -65,12 +63,17 @@ func (server *Server) TagsStore(responseWriter http.ResponseWriter, request *htt
 	if color == "" {
 		color = "#457b9d"
 	}
-	// The UNIQUE index is case-sensitive, so it would happily accept "Decor"
-	// next to "decor". Report that as the duplicate it is, rather than creating
-	// a second tag that filters and counts separately.
-	var existing int
-	if server.DB.QueryRow("SELECT id FROM tags WHERE user_id=? AND name=? COLLATE NOCASE LIMIT 1",
-		userID(request), name).Scan(&existing) == nil && existing > 0 {
+	// The UNIQUE index is case-sensitive and would accept "Decor" next to "decor",
+	// which would filter and count separately.
+	found, known := dbutil.Exists(server.DB, "SELECT id FROM tags WHERE user_id=? AND name=? COLLATE NOCASE LIMIT 1",
+		userID(request), name)
+	if !known {
+		// The UNIQUE index is case-sensitive, so it would not catch what this
+		// probe is for: a failed answer must not become a second spelling.
+		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
+		return
+	}
+	if found {
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.tag_exists")
 		return
 	}
@@ -91,7 +94,6 @@ func (server *Server) TagsStore(responseWriter http.ResponseWriter, request *htt
 	httpx.SuccessStatus(responseWriter, http.StatusCreated, row, "Tag created")
 }
 
-// TagsDestroy deletes a tag of the user.
 func (server *Server) TagsDestroy(responseWriter http.ResponseWriter, request *http.Request) {
 	tagID, ok := pathInt(request, "id")
 	if !ok {
@@ -108,8 +110,7 @@ func (server *Server) TagsDestroy(responseWriter http.ResponseWriter, request *h
 	httpx.SuccessMessage(responseWriter, nil, "Deleted")
 }
 
-// TagsSetForDesign replaces all tags of a design with the given set and cleans up
-// orphaned tags of the user.
+// TagsSetForDesign replaces a design's tags and cleans up orphans.
 func (server *Server) TagsSetForDesign(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -125,10 +126,8 @@ func (server *Server) TagsSetForDesign(responseWriter http.ResponseWriter, reque
 	}
 	_ = httpx.DecodeJSON(request, &body)
 
-	// Restrict the requested tag IDs to tags actually owned by the current user.
-	// Without this filter any authenticated user could attach a foreign user's
-	// tag to their own design (IDOR) - the design_tags foreign key only checks
-	// that the tag row exists, not who owns it.
+	// Restricted to tags the user owns: design_tags' foreign key only checks that the
+	// row exists, not who owns it, so any member could otherwise attach a foreign tag.
 	owned := make(map[int]bool)
 	if len(body.TagIDs) > 0 {
 		ownedRows, _ := dbutil.QueryMaps(server.DB, "SELECT id FROM tags WHERE user_id = ?", currentUserID)
@@ -178,7 +177,7 @@ func (server *Server) TagsSetForDesign(responseWriter http.ResponseWriter, reque
 		return
 	}
 
-	// Delete orphaned tags (removed + no longer used by any design + owned by the user).
+	// Orphans: removed, no longer used anywhere, and owned by the user.
 	for tagID := range removed {
 		var count int
 		_ = server.DB.QueryRow("SELECT COUNT(*) FROM design_tags WHERE tag_id = ?", tagID).Scan(&count)

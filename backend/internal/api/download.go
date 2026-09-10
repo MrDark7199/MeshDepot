@@ -1,7 +1,6 @@
 package api
 
 import (
-	"log"
 	"meshdepot/internal/coerce"
 	"net/http"
 	"strings"
@@ -9,30 +8,30 @@ import (
 	"meshdepot/internal/dbutil"
 	"meshdepot/internal/httpx"
 	"meshdepot/internal/platforms"
+
+	"meshdepot/internal/logx"
 )
 
-// How long a finished queue entry stays in the list the frontend polls (SQLite
-// date modifiers). A failed download has to survive long enough for the user to
-// come back and see it; a successful one only needs to outlive one poll
-// interval, otherwise the queue would never look empty.
+// How long a finished queue entry stays in the list the frontend polls. A failed
+// download has to survive long enough to be seen; a successful one only needs to
+// outlive one poll, or the queue would never look empty.
 const (
 	failedJobVisible = "-7 days"
 	doneJobVisible   = "-60 seconds"
 	doneSyncVisible  = "-30 seconds"
 )
 
-// platformCredsOK checks whether the credentials required for the platform are
-// present. Empty errorKey = ok.
+// platformCredsOK checks whether the platform's required credentials are there.
+// An empty errorKey means ok.
 func (server *Server) platformCredsOK(platform string, currentUserID int) (bool, string) {
 	if !platforms.NeedsCredentials(platform) {
 		return true, ""
 	}
-	// A failed read is reported as a server error rather than as "credentials
-	// missing" - otherwise the user is sent to re-enter credentials that are
-	// stored correctly.
+	// A failed read is a server error, not "credentials missing" - otherwise the user
+	// is sent to re-enter credentials that are stored correctly.
 	account, hasAccount, failure := dbutil.QueryMap(server.DB, "SELECT token, username FROM platform_accounts WHERE user_id = ? AND platform = ? LIMIT 1", currentUserID, platform)
 	if failure != nil {
-		log.Printf("[api] platform credentials lookup failed (user %d, %s): %v", currentUserID, platform, failure)
+		logx.Errorf("[api] platform credentials lookup failed (user %d, %s): %v", currentUserID, platform, failure)
 		return false, "error.server"
 	}
 	hasToken := hasAccount && coerce.StringOr(account["token"], "") != ""
@@ -47,26 +46,20 @@ func (server *Server) platformCredsOK(platform string, currentUserID int) (bool,
 			return false, "error.platform_credentials_required:myminifactory"
 		}
 	case "cults3d":
-		// The download needs email (+ password); the API key (token) is optional and
-		// only for the sync. So the email (username) is enough here.
+		// The download needs the email; the API key is optional and only for the sync.
 		if !hasUser {
 			return false, "error.platform_credentials_required:cults3d"
 		}
 	case "makerworld":
-		// The e-mail is what matters: MakerWorld's token is short-lived and is
-		// re-fetched with the login (see refreshToken), so a token on its own
-		// cannot keep downloads working.
-		//
-		// It must NOT also demand a token, though. That token only exists after
-		// the first successful login, so freshly entered - and perfectly valid -
-		// credentials were rejected as missing.
+		// The e-mail is what matters: MakerWorld's token is short-lived and re-fetched
+		// with the login. Demanding a token as well rejected freshly entered and
+		// perfectly valid credentials, since it only exists after the first login.
 		if !hasUser {
 			return false, "error.platform_credentials_required:makerworld"
 		}
 	case "printables", "thangs":
-		// Both log in with email + password and hand the token they get back to
-		// the download. Without an account the token stays empty, the file
-		// request comes back empty-handed, and the queue entry fails minutes
+		// Both log in with email and password and hand the token to the download.
+		// Without an account the token stays empty and the queue entry fails minutes
 		// later with an error nobody connects to the missing account.
 		if !hasUser && !hasToken {
 			return false, "error.platform_credentials_required:" + platform
@@ -75,7 +68,6 @@ func (server *Server) platformCredsOK(platform string, currentUserID int) (bool,
 	return true, ""
 }
 
-// DownloadQueue puts a platform download into the queue.
 func (server *Server) DownloadQueue(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	var body struct {
@@ -105,9 +97,8 @@ func (server *Server) DownloadQueue(responseWriter http.ResponseWriter, request 
 		httpx.Error(responseWriter, http.StatusConflict, "error.duplicate_design:"+coerce.StringOr(duplicate["name"], "Unknown"))
 		return
 	}
-	// Asking for this design by hand outranks an earlier "delete and keep it
-	// gone": without lifting the block the import would succeed and the design
-	// would silently disappear again on the next library sync.
+	// Asking for this design by hand outranks an earlier "delete and keep it gone":
+	// without lifting the block it would disappear again on the next library sync.
 	platforms.LiftSyncExclusion(server.DB, currentUserID, platform, "", sourceURL)
 	insertResult, failure := server.DB.Exec("INSERT INTO download_queue (user_id, source_url, platform, status) VALUES (?, ?, ?, 'pending')", currentUserID, sourceURL, platform)
 	if failure != nil {
@@ -118,7 +109,6 @@ func (server *Server) DownloadQueue(responseWriter http.ResponseWriter, request 
 	httpx.SuccessStatus(responseWriter, http.StatusCreated, map[string]any{"queue_id": id, "platform": platform, "status": "pending"}, "Download queued")
 }
 
-// DownloadList returns active/recently completed queue entries.
 func (server *Server) DownloadList(responseWriter http.ResponseWriter, request *http.Request) {
 	rows, _ := dbutil.QueryMaps(server.DB, `
 		SELECT dq.id, dq.source_url, dq.platform, dq.status, dq.error_msg, dq.retry_count,
@@ -151,7 +141,6 @@ func (server *Server) DownloadStatus(responseWriter http.ResponseWriter, request
 	httpx.Success(responseWriter, row)
 }
 
-// DownloadRetry resets an entry back to pending.
 func (server *Server) DownloadRetry(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	id, ok := pathInt(request, "id")
@@ -171,7 +160,6 @@ func (server *Server) DownloadRetry(responseWriter http.ResponseWriter, request 
 	httpx.SuccessMessage(responseWriter, map[string]any{"queue_id": id, "status": "pending"}, "Retrying download")
 }
 
-// DownloadCancel removes a pending/downloading entry.
 func (server *Server) DownloadCancel(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	id, ok := pathInt(request, "id")
@@ -179,7 +167,14 @@ func (server *Server) DownloadCancel(responseWriter http.ResponseWriter, request
 		httpx.Error(responseWriter, http.StatusNotFound, "error.not_found")
 		return
 	}
-	result, _ := server.DB.Exec("DELETE FROM download_queue WHERE id = ? AND user_id = ? AND status IN ('pending','downloading')", id, currentUserID)
+	// The error is not decoration here: a failed Exec returns a nil result, and
+	// asking that for RowsAffected panics the request.
+	result, failure := server.DB.Exec("DELETE FROM download_queue WHERE id = ? AND user_id = ? AND status IN ('pending','downloading')", id, currentUserID)
+	if failure != nil {
+		logx.Errorf("[api] cancelling queue entry %d failed: %v", id, failure)
+		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
+		return
+	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		httpx.Error(responseWriter, http.StatusNotFound, "error.not_found")
 		return
@@ -187,7 +182,6 @@ func (server *Server) DownloadCancel(responseWriter http.ResponseWriter, request
 	httpx.SuccessMessage(responseWriter, nil, "Cancelled")
 }
 
-// DownloadDismiss removes a failed entry.
 func (server *Server) DownloadDismiss(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	id, ok := pathInt(request, "id")
@@ -199,12 +193,9 @@ func (server *Server) DownloadDismiss(responseWriter http.ResponseWriter, reques
 	httpx.SuccessMessage(responseWriter, nil, "Dismissed")
 }
 
-// SyncAll enqueues all syncable designs into the sync_queue.
-//
-// Every queued design is a full re-download from its platform, so the run gets
-// the same cooldown as the manual library sync: triggering it repeatedly is the
-// burst that gets a platform account rate-limited, and the second run would
-// find nothing the first one has not already fetched.
+// SyncAll enqueues every syncable design. Each is a full re-download, so the run
+// gets the same cooldown as the manual library sync: triggering it repeatedly is
+// the burst that gets an account rate-limited.
 func (server *Server) SyncAll(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	if !server.guardUpdateAllCooldown(responseWriter, currentUserID) {
@@ -214,9 +205,8 @@ func (server *Server) SyncAll(responseWriter http.ResponseWriter, request *http.
 	queued := 0
 	for _, designRow := range rows {
 		designIDValue := coerce.Int(designRow["id"])
-		// A failed probe skips the design instead of enqueueing it: sync_queue has no
-		// unique constraint, so "unknown" must not turn into a second running job for
-		// the same design. The user can trigger the sync again.
+		// A failed probe skips the design rather than enqueueing it: sync_queue has no
+		// unique constraint, so "unknown" must not become a second running job.
 		_, alreadyQueued, failure := dbutil.QueryMap(server.DB, "SELECT id FROM sync_queue WHERE design_id = ? AND status IN ('pending','running') LIMIT 1", designIDValue)
 		if failure != nil || alreadyQueued {
 			continue
@@ -224,14 +214,13 @@ func (server *Server) SyncAll(responseWriter http.ResponseWriter, request *http.
 		dbutil.ExecLogged(server.DB, "INSERT INTO sync_queue (design_id, user_id, status) VALUES (?, ?, 'pending')", designIDValue, currentUserID)
 		queued++
 	}
-	// Stamped even when nothing was queued: a library that is already fully
-	// queued would otherwise let the button be pressed again immediately.
+	// Stamped even when nothing was queued, or a fully queued library would let the
+	// button be pressed again immediately.
 	dbutil.ExecLogged(server.DB, "UPDATE users SET last_update_all_at = CURRENT_TIMESTAMP WHERE id = ?", currentUserID)
 	httpx.Success(responseWriter, map[string]any{"queued": queued, "cooldown_seconds": int(manualSyncCooldown.Seconds())})
 }
 
-// guardUpdateAllCooldown rejects an "update all designs" run that follows the
-// previous one too closely.
+// guardUpdateAllCooldown rejects an "update all" run that follows too closely.
 func (server *Server) guardUpdateAllCooldown(responseWriter http.ResponseWriter, currentUserID int) bool {
 	var lastRun string
 	if server.DB.QueryRow("SELECT COALESCE(last_update_all_at, '') FROM users WHERE id = ?", currentUserID).Scan(&lastRun) != nil {
@@ -244,14 +233,10 @@ func (server *Server) guardUpdateAllCooldown(responseWriter http.ResponseWriter,
 	return false
 }
 
-// SyncState reports what the sync buttons of the account settings need to
-// decide whether they may be offered: the two cooldowns, whether any platform
-// account exists at all, and whether work is still in the queues.
-//
-// The client cannot work this out on its own. The cooldowns live on the server,
-// and a queue that is still being filled looks empty for a moment - a button
-// that only reads its own countdown would reopen in the middle of the run it
-// just started.
+// SyncState reports what the account settings' sync buttons need: the two
+// cooldowns, whether any platform account exists, and whether work is still
+// queued. A queue being filled looks empty for a moment, so a button reading only
+// its own countdown would reopen in the middle of the run it just started.
 func (server *Server) SyncState(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -284,7 +269,6 @@ func (server *Server) SyncState(responseWriter http.ResponseWriter, request *htt
 	})
 }
 
-// SyncStatus returns active/recently completed sync jobs.
 func (server *Server) SyncStatus(responseWriter http.ResponseWriter, request *http.Request) {
 	rows, _ := dbutil.QueryMaps(server.DB, `
 		SELECT sq.id, d.public_id AS design_id, sq.status, sq.progress, sq.current_step, sq.step_current, sq.step_total, sq.error_msg, sq.done_at, d.name AS design_name
@@ -296,7 +280,6 @@ func (server *Server) SyncStatus(responseWriter http.ResponseWriter, request *ht
 	httpx.Success(responseWriter, rows)
 }
 
-// The synchronous SSE endpoints (DownloadStream/SyncStream) were removed: the
-// frontend polls the queue and never opened an EventSource, while the streaming
-// path bypassed the worker's credential check, cooldowns, retries and rate
-// limits - dead code that would have reintroduced those bugs on reactivation.
+// The synchronous SSE endpoints were removed: the frontend polls and never
+// opened an EventSource, while the streaming path bypassed the worker's
+// credential check, cooldowns, retries and rate limits.

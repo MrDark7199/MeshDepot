@@ -13,8 +13,6 @@ import (
 	"meshdepot/internal/coerce"
 )
 
-// The share picker opens its list on click, before anything has been typed, so
-// an empty query lists accounts instead of nothing.
 func TestUsersSearchListsAccountsWithoutAQuery(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -43,7 +41,6 @@ func TestUsersSearchFindsByNameAndEmail(t *testing.T) {
 	}
 }
 
-// Sharing with yourself does nothing, so the picker must not offer it.
 func TestUsersSearchLeavesTheCallerOut(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -70,8 +67,8 @@ func TestUsersSearchSkipsInactiveAccounts(t *testing.T) {
 	}
 }
 
-// The search term reaches a LIKE, so its wildcards have to be escaped -
-// otherwise "50%" would match every account.
+// The term reaches a LIKE, so its wildcards have to be escaped or "50%" matches
+// every account.
 func TestUsersSearchEscapesTheWildcards(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.createUser("rabatt@example.org", "50% Rabatt", false)
@@ -118,9 +115,8 @@ func TestUsersUpdateProfileWritesNameAndEmail(t *testing.T) {
 	}
 }
 
-// The display language belongs to the account, not to the browser: kept only in
-// localStorage, the same account answered in a different language on the next
-// device, and a fresh one started in whatever the last visitor had picked.
+// The display language belongs to the account: in localStorage alone the same
+// account answered differently on the next device.
 func TestUsersUpdateProfileStoresTheLanguage(t *testing.T) {
 	testHarness := newHarness(t)
 	path := fmt.Sprintf("/api/v1/users/%s/profile", testHarness.publicID(testHarness.userID))
@@ -151,8 +147,8 @@ func TestUsersUpdateProfileStoresTheLanguage(t *testing.T) {
 	}
 }
 
-// The stylesheet belongs to the account: kept in the browser alone it was gone
-// after every reload and never reached a second device.
+// The stylesheet belongs to the account: in the browser alone it was gone after
+// every reload.
 func TestUsersUpdateProfileStoresTheCustomCSS(t *testing.T) {
 	testHarness := newHarness(t)
 	path := fmt.Sprintf("/api/v1/users/%s/profile", testHarness.publicID(testHarness.userID))
@@ -170,8 +166,8 @@ func TestUsersUpdateProfileStoresTheCustomCSS(t *testing.T) {
 		t.Fatalf("the stored stylesheet is %q", stored)
 	}
 
-	// And it comes back with the session, which is what lets the browser apply
-	// it before the first paint.
+	// And it comes back with the session, which is what lets the browser apply it
+	// before the first paint.
 	me := testHarness.asUser(http.MethodGet, "/api/v1/auth/me", nil).data(t)
 	if me["custom_css"] != css {
 		t.Fatalf("/auth/me carries %v", me["custom_css"])
@@ -184,7 +180,6 @@ func TestUsersUpdateProfileStoresTheCustomCSS(t *testing.T) {
 	}
 }
 
-// The column travels in every /auth/me response, so it cannot be unbounded.
 func TestUsersUpdateProfileRefusesAnOversizedCustomCSS(t *testing.T) {
 	testHarness := newHarness(t)
 	path := fmt.Sprintf("/api/v1/users/%s/profile", testHarness.publicID(testHarness.userID))
@@ -220,8 +215,8 @@ func TestUsersUpdateProfileRejectsAnInvalidEmail(t *testing.T) {
 	}
 }
 
-// A field that is not in the body stays untouched. The name column is NOT NULL,
-// so a cleared name becomes the empty string; a cleared email becomes NULL.
+// A field not in the body stays untouched. The name column is NOT NULL, so a
+// cleared name becomes ""; a cleared email becomes NULL.
 func TestUsersUpdateProfileWritesOnlyTheSubmittedFields(t *testing.T) {
 	testHarness := newHarness(t)
 	path := fmt.Sprintf("/api/v1/users/%s/profile", testHarness.publicID(testHarness.userID))
@@ -304,9 +299,8 @@ func TestUsersChangePasswordReplacesTheHash(t *testing.T) {
 	}
 }
 
-// Changing the password invalidates every session of the user, including the
-// one that made the request - but the answer carries a fresh cookie so the
-// current device stays logged in.
+// Changing the password invalidates every session including this one, but the
+// answer carries a fresh cookie so the current device stays logged in.
 func TestUsersChangePasswordRotatesTheSession(t *testing.T) {
 	testHarness := newHarness(t)
 	oldToken := testHarness.userToken
@@ -341,8 +335,8 @@ func TestUsersChangePasswordRejectsTheWrongCurrentPassword(t *testing.T) {
 	answer := testHarness.asUser(http.MethodPost, fmt.Sprintf("/api/v1/users/%s/change-password", testHarness.publicID(testHarness.userID)),
 		map[string]any{"current_password": "falsches passwort", "new_password": "ein neues passwort"})
 
-	// 422, not 401: the session is valid, only the supplied password is wrong.
-	// A 401 tears the session down in the browser.
+	// 422, not 401: the session is valid, only the password is wrong, and a 401 tears
+	// the session down in the browser.
 	if answer.status != http.StatusUnprocessableEntity {
 		t.Fatalf("the wrong password answered %d", answer.status)
 	}
@@ -378,8 +372,6 @@ func TestUsersChangePasswordChecksBothFields(t *testing.T) {
 	}
 }
 
-// The forced change is the way out of must_change_password, so it works without
-// the old password - but the length rule still applies.
 func TestUsersForcePasswordSetsThePasswordWithoutTheOldOne(t *testing.T) {
 	testHarness := newHarness(t)
 	if _, failure := testHarness.database.Exec("UPDATE users SET must_change_password = 1 WHERE id = ?", testHarness.userID); failure != nil {
@@ -440,8 +432,7 @@ func TestUsersUploadAvatarStoresTheImage(t *testing.T) {
 	}
 }
 
-// The extension follows the sniffed content type, not the submitted filename -
-// a .png name on HTML bytes must not produce a .png file.
+// The extension follows the sniffed content type, not the filename.
 func TestUsersUploadAvatarRejectsANonImage(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -526,8 +517,6 @@ func TestUsersDeleteAvatarWorksWithoutAnAvatar(t *testing.T) {
 	}
 }
 
-// The avatar is the one image route without a session: it is embedded in pages
-// that other users see.
 func TestUsersServeAvatarIsPublic(t *testing.T) {
 	testHarness := newHarness(t)
 	path := fmt.Sprintf("/api/v1/users/%s/avatar", testHarness.publicID(testHarness.userID))
@@ -567,8 +556,8 @@ func TestUsersServeAvatarIsNotFoundWithoutAnAvatar(t *testing.T) {
 	}
 }
 
-// A path that no longer holds an image - or never did - must not be handed
-// back with a guessed content type.
+// A path that no longer holds an image must not be handed back with a guessed
+// content type.
 func TestUsersServeAvatarRefusesAFileThatIsNotAnImage(t *testing.T) {
 	testHarness := newHarness(t)
 	if failure := os.MkdirAll(testHarness.userLayout(testHarness.userID).Avatar(), 0o775); failure != nil {
@@ -644,15 +633,13 @@ func TestUsersStatsAreZeroForAnEmptyLibrary(t *testing.T) {
 	}
 }
 
-// The notation belongs to the account for the same reason the language does: it
-// has to hold on the next device, and it has to travel with the session so the
+// The notation belongs to the account and travels with the session, so the
 // browser writes every date the same way from the first paint.
 func TestUsersUpdateProfileStoresTheDateFormat(t *testing.T) {
 	testHarness := newHarness(t)
 	path := fmt.Sprintf("/api/v1/users/%s/profile", testHarness.publicID(testHarness.userID))
 
-	// No notation to begin with: dates follow the display language, which is what
-	// every account did before the setting existed.
+	// No notation to begin with: dates follow the display language.
 	if stored := testHarness.scalar("SELECT date_format FROM users WHERE id = ?", testHarness.userID); stored != "" {
 		t.Fatalf("a fresh account starts with %q", stored)
 	}
@@ -681,8 +668,8 @@ func TestUsersUpdateProfileStoresTheDateFormat(t *testing.T) {
 	}
 }
 
-// An unknown pattern must not reach the column: the browser hands it straight to
-// the formatter, which would then write every date as the pattern itself.
+// The browser hands the pattern straight to the formatter, which would write
+// every date as the pattern itself.
 func TestUsersUpdateProfileRefusesAnUnknownDateFormat(t *testing.T) {
 	testHarness := newHarness(t)
 	path := fmt.Sprintf("/api/v1/users/%s/profile", testHarness.publicID(testHarness.userID))

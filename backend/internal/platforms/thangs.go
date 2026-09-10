@@ -1,9 +1,8 @@
 package platforms
 
-// Thangs downloader. The download flow is pure HTTP (API + files, no Tor). The
-// login runs via the rod browser (replacement for the Playwright /login/thangs
-// endpoint) and captures the Authorization header of the thangs.com/api
-// requests.
+// Thangs downloader. The download flow is pure HTTP, no Tor. The login runs
+// through the rod browser and captures the Authorization header of the
+// thangs.com/api requests.
 
 import (
 	"encoding/json"
@@ -22,7 +21,6 @@ import (
 	"meshdepot/internal/safego"
 )
 
-// chromeUserAgent is the browser user agent for login + API calls.
 const chromeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 var (
@@ -31,10 +29,8 @@ var (
 	titleSuffixPattern   = regexp.MustCompile(`\s*[|\-].*$`)
 )
 
-// Thangs implements Downloader for thangs.com.
 type Thangs struct{ Deps }
 
-// Download loads a Thangs model via the HTTP API.
 func (thangs Thangs) Download(sourceURL string, owner Owner, progress func(step, label string, current, total int)) (Result, error) {
 	// The numeric id is only for credentials; every path comes from owner.Layout.
 	userID := owner.ID
@@ -74,7 +70,7 @@ func (thangs Thangs) Download(sourceURL string, owner Owner, progress func(step,
 		fileEntries = apiData.Files
 	}
 
-	// Neither a real title nor a file list → no model info found at all.
+	// Neither a real title nor a file list - no model info found at all.
 	if name == "Thangs #"+modelID && len(fileEntries) == 0 {
 		return Result{}, MetadataError("Thangs model %s: no metadata or file list returned "+
 			"(model may be private, deleted, or login required).", modelID)
@@ -128,22 +124,18 @@ func (thangs Thangs) Download(sourceURL string, owner Owner, progress func(step,
 	}, nil
 }
 
-// Validate checks email/password via browser login.
 func (thangs Thangs) Validate(credentials Credentials) bool {
 	return credentials.Email != "" && credentials.Password != "" && thangs.autoLogin(credentials.Email, credentials.Password) != ""
 }
 
-// resolveToken returns a valid token: the stored one (decrypted) or, if
-// missing/expired and credentials are on file, a fresh one fetched via browser
-// login (then persisted encrypted + valid for 60 days).
+// resolveToken returns the stored token, or a fresh one from the browser login
+// when it is missing or expired, persisted for 60 days.
 func (thangs Thangs) resolveToken(userID int, progress func(string, string, int, int)) string {
 	token, _ := thangs.Deps.resolveToken(userID, "thangs", progress)
 	return token
 }
 
-// autoLogin logs in to Thangs via the rod browser and captures the
-// Authorization header of the thangs.com/api requests. Returns the token
-// (incl. "Bearer " prefix) or "".
+// autoLogin returns the captured token including the "Bearer " prefix, or "".
 func (thangs Thangs) autoLogin(email, password string) string {
 	if thangs.Browser == nil {
 		return ""
@@ -169,8 +161,7 @@ func (thangs Thangs) autoLogin(email, password string) string {
 		_ = proto.NetworkEnable{}.Call(page)
 		_ = proto.NetworkSetUserAgentOverride{UserAgent: chromeUserAgent}.Call(page)
 
-		// Read along the Authorization header of all thangs.com/api requests.
-		// Own goroutine: WithPage's recover does not reach it, so guard it here.
+		// Own goroutine: WithPage's recover does not reach it.
 		safego.Go("thangs.header-sniffer", page.EachEvent(func(event *proto.NetworkRequestWillBeSent) {
 			if !strings.Contains(event.Request.URL, "thangs.com/api") {
 				return
@@ -182,18 +173,15 @@ func (thangs Thangs) autoLogin(email, password string) string {
 			}
 		}))
 
-		// Thangs abolished its own /login page: calling thangs.com/login lands on a
-		// designer profile page ("login"), NOT on a login form. The login now runs
-		// via a "Log in" button in the header that opens a modal with email/password.
-		// So: load the home page and open the modal by clicking the button.
+		// Thangs abolished its /login page - it now lands on a designer profile. The
+		// login is a header button that opens a modal, so load the home page and click.
 		if failure := page.Navigate("https://thangs.com/"); failure != nil {
 			return nil
 		}
 		_ = page.WaitLoad()
 
-		// Find and click the visible "Log in"/"Sign in" button in the header (it has
-		// no href, only opens the modal). Social-login buttons ("Log in with …") are
-		// excluded so no OAuth popup opens.
+		// The visible "Log in" button has no href and only opens the modal.
+		// Social-login buttons are excluded so no OAuth popup opens.
 		_, _ = page.Eval(`() => {
 			const els = [...document.querySelectorAll('a,button')];
 			const el = els.find(e => {
@@ -204,7 +192,7 @@ func (thangs Thangs) autoLogin(email, password string) string {
 			return !!el;
 		}`)
 
-		// Wait for the modal (email field appears).
+		// Wait for the modal: the email field appears.
 		emailElement, failure := page.Timeout(15 * time.Second).Element(`input[type="email"], input[name="email"], input[placeholder*="email" i]`)
 		if failure != nil {
 			return nil
@@ -213,8 +201,7 @@ func (thangs Thangs) autoLogin(email, password string) string {
 		if passwordElement, failure := page.Element(`input[type="password"], input[name="password"]`); failure == nil {
 			_ = passwordElement.Input(password)
 		}
-		// Specifically click the submit button INSIDE the password form (not the
-		// social-login buttons), otherwise fall back to the "Log in" button.
+		// The submit button inside the password form, not the social-login ones.
 		_, _ = page.Eval(`() => {
 			const pw = document.querySelector('input[type="password"]');
 			const form = pw && pw.closest('form');
@@ -226,8 +213,7 @@ func (thangs Thangs) autoLogin(email, password string) string {
 			return !!btn;
 		}`)
 
-		// After submitting, let it settle briefly (modal closes, session cookies /
-		// API requests start - from which we capture the Authorization header).
+		// Let it settle: the modal closes and the API requests we read start.
 		page.Timeout(15 * time.Second).WaitNavigation(proto.PageLifecycleEventNameNetworkIdle)()
 		time.Sleep(3 * time.Second)
 

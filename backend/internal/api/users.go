@@ -19,17 +19,13 @@ import (
 	"meshdepot/internal/storage"
 )
 
-// maxCustomCSSBytes bounds the per-account stylesheet. Hand-written themes are
-// a few kilobytes; this leaves room for a pasted framework without letting the
-// login payload grow without limit.
+// maxCustomCSSBytes leaves room for a pasted framework without letting the login
+// payload grow without limit.
 const maxCustomCSSBytes = 64 * 1024
 
-// UsersSearch searches active users by name/email (max. 20).
-//
-// An empty query lists the first accounts instead of nothing: the share picker
-// opens its list on click, before anything has been typed, and a member who
-// does not know who else is on the server has no first letter to guess. The
-// caller is left out - sharing with yourself does nothing.
+// UsersSearch searches active users by name or email, at most 20. An empty query
+// lists the first accounts rather than nothing: the share picker opens its list
+// before anything is typed. The caller is left out.
 func (server *Server) UsersSearch(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	query := strings.TrimSpace(queryStr(request, "q", ""))
@@ -47,7 +43,6 @@ func (server *Server) UsersSearch(responseWriter http.ResponseWriter, request *h
 	httpx.Success(responseWriter, rows)
 }
 
-// UsersUpdateProfile changes name/email of the own profile.
 func (server *Server) UsersUpdateProfile(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -60,8 +55,7 @@ func (server *Server) UsersUpdateProfile(responseWriter http.ResponseWriter, req
 	if value, present := body["name"]; present {
 		name := strings.TrimSpace(coerce.StringOr(value, ""))
 		// The column is NOT NULL DEFAULT '', so a cleared name is the empty string.
-		// Writing NULL here made the whole update fail with a 500 - including the
-		// email submitted alongside it.
+		// Writing NULL failed the whole update with a 500, email included.
 		assignments = append(assignments, "name = ?")
 		args = append(args, name)
 	}
@@ -78,10 +72,8 @@ func (server *Server) UsersUpdateProfile(responseWriter http.ResponseWriter, req
 	}
 	if value, present := body["custom_css"]; present {
 		css := coerce.StringOr(value, "")
-		// A cap rather than a validator: the stylesheet only ever reaches the
-		// browser of the account that wrote it, so what is in it is their own
-		// business - but it travels in every /auth/me response, and an unbounded
-		// column would make that payload unbounded too.
+		// A cap rather than a validator: the stylesheet only reaches the browser of the
+		// account that wrote it, but it travels in every /auth/me response.
 		if len(css) > maxCustomCSSBytes {
 			httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.custom_css_too_long")
 			return
@@ -91,10 +83,8 @@ func (server *Server) UsersUpdateProfile(responseWriter http.ResponseWriter, req
 	}
 	if value, present := body["language"]; present {
 		language := strings.TrimSpace(coerce.StringOr(value, ""))
-		// The display language belongs to the account, not to the browser: it
-		// used to live in localStorage only, so the same account answered in a
-		// different language on the next device - and a fresh one started in
-		// whatever the last visitor of that browser had picked.
+		// The display language belongs to the account, not the browser: in localStorage
+		// the same account answered differently on the next device.
 		if language != "en" && language != "de" {
 			httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.invalid_language")
 			return
@@ -104,8 +94,8 @@ func (server *Server) UsersUpdateProfile(responseWriter http.ResponseWriter, req
 	}
 	if value, present := body["date_format"]; present {
 		format := strings.TrimSpace(coerce.StringOr(value, ""))
-		// Checked here because the value reaches the formatter as a pattern: an
-		// unknown one would render every date as the pattern itself.
+		// The value reaches the formatter as a pattern, and an unknown one would render
+		// every date as the pattern itself.
 		if !dateformat.Valid(format) {
 			httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.invalid_date_format")
 			return
@@ -127,7 +117,6 @@ func (server *Server) UsersUpdateProfile(responseWriter http.ResponseWriter, req
 	httpx.Success(responseWriter, row)
 }
 
-// UsersChangePassword changes the password after verifying the old one.
 func (server *Server) UsersChangePassword(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -152,18 +141,17 @@ func (server *Server) UsersChangePassword(responseWriter http.ResponseWriter, re
 		return
 	}
 	if !auth.VerifyPassword(hash, body.Current) {
-		// Not 401: the session is perfectly valid, only the supplied password is
-		// wrong. A 401 makes the frontend's global handler tear the session down,
-		// so a typo logged the user out and looked like the change had gone
-		// through.
+		// Not 401: the session is valid, only the password is wrong. A 401 makes the
+		// frontend tear the session down, so a typo logged the user out and looked like
+		// the change had gone through.
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.wrong_password")
 		return
 	}
 	server.setPassword(responseWriter, currentUserID, body.New, "Password changed")
 }
 
-// UsersForcePassword sets a new password without verifying the old one (for
-// must_change_password).
+// UsersForcePassword sets a new password without the old one, for
+// must_change_password.
 func (server *Server) UsersForcePassword(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -180,11 +168,10 @@ func (server *Server) UsersForcePassword(responseWriter http.ResponseWriter, req
 	server.setPassword(responseWriter, currentUserID, body.New, "Password set")
 }
 
-// setPassword writes a new bcrypt hash and clears must_change_password. All of
-// the user's existing sessions are invalidated (so a hijacked session is locked
-// out and the session ID rotates against fixation) and a fresh session is issued
-// on this response so the user who just changed their own password stays logged
-// in on the current device.
+// setPassword writes the new hash and clears must_change_password. Every
+// existing session is invalidated - a hijacked one is locked out and the id
+// rotates against fixation - and a fresh session is issued on this response, so
+// the user stays logged in on the current device.
 func (server *Server) setPassword(responseWriter http.ResponseWriter, currentUserID int, newPassword, message string) {
 	hash, failure := auth.HashPassword(newPassword)
 	if failure != nil {
@@ -200,12 +187,10 @@ func (server *Server) setPassword(responseWriter http.ResponseWriter, currentUse
 	httpx.SuccessMessage(responseWriter, nil, message)
 }
 
-// avatarMime maps detected MIME types to allowed extensions.
 var avatarMime = map[string]string{
 	"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
 }
 
-// UsersUploadAvatar stores a profile image (multipart, field "avatar").
 func (server *Server) UsersUploadAvatar(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -236,12 +221,11 @@ func (server *Server) UsersUploadAvatar(responseWriter http.ResponseWriter, requ
 	}
 	directory := server.userLayout(request).Avatar()
 	_ = storage.MkdirAll(directory)
-	// The numeric id has no business in a path any more; the directory already
-	// names the account.
+	// The numeric id has no business in a path; the directory already names the
+	// account.
 	filename := "avatar_" + randomHex6() + "." + extension
 	destination := filepath.Join(directory, filename)
 
-	// Remove the old avatar.
 	if oldPath := server.avatarFile("SELECT avatar_path FROM users WHERE id = ?", currentUserID); oldPath != "" {
 		_ = os.Remove(oldPath)
 	}
@@ -272,7 +256,6 @@ func (server *Server) UsersDeleteAvatar(responseWriter http.ResponseWriter, requ
 	httpx.Success(responseWriter, nil)
 }
 
-// UsersServeAvatar streams the profile image (public, no session required).
 func (server *Server) UsersServeAvatar(responseWriter http.ResponseWriter, request *http.Request) {
 	// Addressed by the public id, so the endpoint cannot be walked by counting.
 	path := server.avatarFile("SELECT avatar_path FROM users WHERE public_id = ?", request.PathValue("id"))
@@ -284,7 +267,6 @@ func (server *Server) UsersServeAvatar(responseWriter http.ResponseWriter, reque
 	serveImageFile(responseWriter, request, path)
 }
 
-// UsersStats returns storage/design statistics.
 func (server *Server) UsersStats(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -316,16 +298,14 @@ func (server *Server) UsersStats(responseWriter http.ResponseWriter, request *ht
 		"synced_count":     countScalar("SELECT COUNT(*) FROM designs WHERE user_id = ? AND source_url IS NOT NULL AND source_url != ''"),
 		"platforms":        platformCounts,
 		"newest_design_at": newest,
-		// The member's own limit, 0 when they have none. The page already had the
-		// arithmetic for a fill level but nothing ever supplied a maximum, so it
-		// could never show one.
+		// The member's own limit, 0 when they have none. The page had the arithmetic for
+		// a fill level but nothing ever supplied a maximum.
 		"max_bytes": quota.Of(server.DB, currentUserID).LimitBytes,
 	})
 }
 
-// avatarFile resolves a stored avatar path against the data root. The column
-// holds the root-relative form, so nothing may hand it to os.Open directly.
-// Returns "" when the query finds nothing or the user has no avatar.
+// avatarFile resolves a stored avatar path against the data root; the column
+// holds the root-relative form. "" when there is none.
 func (server *Server) avatarFile(query string, args ...any) string {
 	var stored string
 	if failure := server.DB.QueryRow(query, args...).Scan(&stored); failure != nil || stored == "" {
@@ -341,7 +321,6 @@ func nullIfEmpty(value string) any {
 	return value
 }
 
-// randomHex6 generates 6 random bytes as hex (12 characters).
 func randomHex6() string {
 	randomBytes := make([]byte, 6)
 	_, _ = rand.Read(randomBytes)

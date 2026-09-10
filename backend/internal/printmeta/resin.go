@@ -13,11 +13,10 @@ import (
 	"meshdepot/internal/pwmx"
 )
 
-// ── Anycubic Photon Workshop (.pwmx, .pwmo, .pws, …) ─────────────────────────
+// - Anycubic Photon Workshop (.pwmx, .pwmo, .pws, …) -------------
 
 // parseAnycubic reads the HEADER section shared by the whole Photon Workshop
-// family. Only the layer image encoding differs between the extensions, so one
-// reader covers all of them.
+// family; only the layer image encoding differs between the extensions.
 func parseAnycubic(prefix []byte) map[string]any {
 	header, failure := pwmx.ParseHeader(prefix)
 	if failure != nil {
@@ -30,15 +29,12 @@ func parseAnycubic(prefix []byte) map[string]any {
 	putFloat(result, "bottom_exposure_time", float64(header.BottomExposure))
 	putFloat(result, "bottom_layers", float64(header.BottomLayers))
 	putFloat(result, "lift_height", float64(header.LiftHeight))
-	// Photon Workshop stores speeds in mm/s, Chitubox in mm/min. Normalize to
-	// mm/min so one label fits both formats.
+	// Photon Workshop stores speeds in mm/s, Chitubox in mm/min.
 	putFloat(result, "lift_speed", float64(header.LiftSpeed)*60)
 	putFloat(result, "retract_speed", float64(header.RetractSpeed)*60)
-	// Weight and price are not measured, Photon Workshop derives them from the
-	// volume using the resin profile's density and price per ml. Without a profile
-	// both factors are 1, so all three fields carry the very same number - grams
-	// that are really millilitres and a price of one unit per ml. Keep the volume
-	// and drop the copies; an empty tile beats an invented weight.
+	// Weight and price are not measured: Photon Workshop derives them from the volume
+	// with the resin profile's density and price. Without a profile both factors are
+	// 1, so all three fields carry the same number - grams that are millilitres.
 	volume := float64(header.VolumeMl)
 	putFloat(result, "resin_volume", volume)
 	if float64(header.WeightG) != volume {
@@ -54,10 +50,9 @@ func parseAnycubic(prefix []byte) map[string]any {
 	return result
 }
 
-// ── Chitubox / Photon (.ctb, .cbddlp, .photon) ───────────────────────────────
+// - Chitubox / Photon (.ctb, .cbddlp, .photon) ----------------
 
-// Magic numbers of the Chitubox file family. The fixed header is identical for
-// every version of every one of them (only the blocks behind it differ), so one
+// The fixed header is identical for every version of every one of these, so one
 // reader serves .cbddlp, .photon and .ctb v2 through v5.
 const (
 	magicCBDDLP = 0x12FD0019 // .cbddlp and .photon
@@ -66,8 +61,7 @@ const (
 	magicGKtwo  = 0xFF220810 // .ctb variant for UniFormation GKtwo
 )
 
-// chituboxHeaderBytes is the length of the fixed header up to and including the
-// slicer-block pointer at 0x6c.
+// chituboxHeaderBytes reaches up to and including the slicer-block pointer.
 const chituboxHeaderBytes = 0x70
 
 func parseChitubox(source io.ReaderAt, size int64) map[string]any {
@@ -98,8 +92,8 @@ func parseChitubox(source io.ReaderAt, size int64) map[string]any {
 		result["print_time"] = gcode.FormatDuration(int(seconds))
 	}
 
-	// The parameter block holds resin volume, weight and cost. It only exists
-	// from version 2 on; version 1 .photon files stop after the fixed header.
+	// The parameter block holds volume, weight and cost, and exists only from version
+	// 2 on; version 1 .photon files stop after the fixed header.
 	parameterOffset := int64(le32(header, 0x54))
 	parameterSize := int64(le32(header, 0x58))
 	if parameterOffset > 0 && parameterSize >= 0x2C {
@@ -115,8 +109,8 @@ func parseChitubox(source io.ReaderAt, size int64) map[string]any {
 		}
 	}
 
-	// .cbddlp/.photon reuse 0x64 upwards as padding, so the machine name is only
-	// looked up for the CTB variants that actually carry a slicer block.
+	// .cbddlp and .photon reuse 0x64 upwards as padding, so the machine name is only
+	// read for the CTB variants that carry a slicer block.
 	if magic != magicCBDDLP && len(header) >= chituboxHeaderBytes {
 		if name := chituboxMachine(source, size, int64(le32(header, 0x68)), int64(le32(header, 0x6C))); name != "" {
 			result["printer"] = name
@@ -125,8 +119,8 @@ func parseChitubox(source io.ReaderAt, size int64) map[string]any {
 	return result
 }
 
-// chituboxMachine resolves the machine name, which the slicer block stores as an
-// offset/length pair pointing elsewhere in the file rather than inline.
+// chituboxMachine follows the offset/length pair the slicer block stores instead
+// of the name itself.
 func chituboxMachine(source io.ReaderAt, size, offset, length int64) string {
 	if offset <= 0 || length < 0x24 {
 		return ""
@@ -143,18 +137,17 @@ func chituboxMachine(source io.ReaderAt, size, offset, length int64) string {
 	return cleanString(read(source, size, nameOffset, nameLength))
 }
 
-// ── PrusaSlicer SL1 (.sl1, .sl1s) ────────────────────────────────────────────
+// - PrusaSlicer SL1 (.sl1, .sl1s) ----------------------
 
-// parseSL1 reads the two ini files inside the SL1 archive. A ZIP directory sits
-// at the end of the file, which is why this needs the io.ReaderAt rather than a
-// prefix - archive/zip then pulls only the entries asked for.
+// parseSL1 reads the two ini files inside the archive. The ZIP directory sits at
+// the end, which is why this needs the io.ReaderAt rather than a prefix.
 func parseSL1(source io.ReaderAt, size int64) map[string]any {
 	archive, failure := zip.NewReader(source, size)
 	if failure != nil {
 		return nil
 	}
-	// config.ini wins over prusaslicer.ini: the former holds the values the
-	// printer is actually driven with, the latter the full slicer profile.
+	// config.ini wins: it holds the values the printer is driven with, while
+	// prusaslicer.ini is the full slicer profile.
 	settings := map[string]string{}
 	for _, name := range []string{"prusaslicer.ini", "config.ini"} {
 		for key, value := range readZipINI(archive, name) {
@@ -169,16 +162,15 @@ func parseSL1(source io.ReaderAt, size int64) map[string]any {
 	putININumber(result, settings, "layer_height", "layerHeight")
 	putININumber(result, settings, "exposure_time", "expTime")
 	putININumber(result, settings, "bottom_exposure_time", "expTimeFirst")
-	// SL1 has no bottom layer count; numFade is how many layers fade from the
-	// first exposure down to the normal one, which is the same idea.
+	// SL1 has no bottom layer count; numFade is how many layers fade from the first
+	// exposure down to the normal one.
 	putININumber(result, settings, "bottom_layers", "numFade")
 	putININumber(result, settings, "resin_volume", "usedMaterial")
 	putININumber(result, settings, "display_width", "display_width")
 	putININumber(result, settings, "display_height", "display_height")
 	putININumber(result, settings, "resolution_x", "display_pixels_x")
 	putININumber(result, settings, "resolution_y", "display_pixels_y")
-	// SL1 reports no total layer count, but splits it into the layers printed
-	// with slow and with fast tilt.
+	// SL1 reports no total, only the layers printed with slow and with fast tilt.
 	slow, hasSlow := iniNumber(settings, "numSlow")
 	fast, hasFast := iniNumber(settings, "numFast")
 	if hasSlow || hasFast {
@@ -195,8 +187,7 @@ func parseSL1(source io.ReaderAt, size int64) map[string]any {
 	return result
 }
 
-// readZipINI returns the "key = value" pairs of one archive member (empty if it
-// is missing or unreadable).
+// readZipINI is empty when the member is missing or unreadable.
 func readZipINI(archive *zip.Reader, name string) map[string]string {
 	result := map[string]string{}
 	for _, entry := range archive.File {
@@ -207,8 +198,7 @@ func readZipINI(archive *zip.Reader, name string) map[string]string {
 		if failure != nil {
 			return result
 		}
-		// Config files are a few KB; the cap only guards against a crafted entry
-		// claiming to be one.
+		// Config files are a few KB; the cap guards against a crafted entry.
 		data, _ := io.ReadAll(io.LimitReader(handle, 1<<20))
 		handle.Close()
 		for _, line := range strings.Split(string(data), "\n") {
@@ -227,14 +217,13 @@ func readZipINI(archive *zip.Reader, name string) map[string]string {
 	return result
 }
 
-// ── shared helpers ───────────────────────────────────────────────────────────
+// - shared helpers ------------------------------
 
-// resinResult seeds the map with the discriminator the frontend switches its
-// field list on.
+// resinResult seeds the map with the discriminator the frontend switches on.
 func resinResult() map[string]any { return map[string]any{"kind": "resin"} }
 
-// putFloat stores a rounded value, dropping zero/NaN: resin slicers leave unused
-// fields at zero, and an empty tile beats a wrong "0 mm".
+// putFloat drops zero and NaN: resin slicers leave unused fields at zero, and an
+// empty tile beats a wrong "0 mm".
 func putFloat(result map[string]any, key string, value float64) {
 	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
 		return
@@ -274,8 +263,7 @@ func iniNumber(settings map[string]string, keys ...string) (float64, bool) {
 	return 0, false
 }
 
-// cleanString trims the trailing NULs of a fixed-width name field and drops
-// anything unprintable.
+// cleanString trims the trailing NULs of a fixed-width field.
 func cleanString(data []byte) string {
 	text := strings.TrimRight(string(data), "\x00")
 	return strings.TrimSpace(strings.Map(func(r rune) rune {

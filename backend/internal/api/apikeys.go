@@ -1,12 +1,11 @@
 package api
 
-// Management of a member's own API keys.
-//
-// A key is shown exactly once, when it is created. Everything afterwards works
-// with its head ("mdp_A1b2c3") and its dates, which is enough to tell two apart
-// and to notice one that is still being used.
+// Management of a member's own API keys. A key is shown exactly once, when it is
+// created; everything afterwards works with its head ("mdp_A1b2c3") and its
+// dates, which is enough to tell two apart and to spot one still in use.
 
 import (
+	"meshdepot/internal/logx"
 	"net/http"
 	"strings"
 	"time"
@@ -16,11 +15,10 @@ import (
 	"meshdepot/internal/httpx"
 )
 
-// maxAPIKeysPerUser is a sanity bound, not a policy. Nobody needs dozens, and a
-// runaway client that creates one per request should hit something.
+// maxAPIKeysPerUser is a sanity bound: a runaway client that creates one per
+// request should hit something.
 const maxAPIKeysPerUser = 20
 
-// APIKeysIndex lists the member's keys, without their secrets.
 func (server *Server) APIKeysIndex(responseWriter http.ResponseWriter, request *http.Request) {
 	rows, failure := dbutil.QueryMaps(server.DB, `
 		SELECT id, name, prefix, created_at, last_used_at, expires_at,
@@ -36,16 +34,14 @@ func (server *Server) APIKeysIndex(responseWriter http.ResponseWriter, request *
 	httpx.Success(responseWriter, rows)
 }
 
-// APIKeysStore creates a key and returns it in plaintext - the only time it is
-// ever readable.
+// APIKeysStore returns the key in plaintext - the only time it is readable.
 func (server *Server) APIKeysStore(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 
 	var body struct {
 		Name string `json:"name"`
-		// ExpiresInDays limits how long the key works. 0 means never, which stays
-		// possible on purpose - a key for a machine that nobody will be there to
-		// renew is a real case - but it is a choice, not the default.
+		// 0 means never, which stays possible on purpose - a key for a machine nobody
+		// will renew is a real case - but it is a choice, not the default.
 		ExpiresInDays int `json:"expires_in_days"`
 	}
 	_ = httpx.DecodeJSON(request, &body)
@@ -58,7 +54,14 @@ func (server *Server) APIKeysStore(responseWriter http.ResponseWriter, request *
 	}
 
 	var existing int
-	server.DB.QueryRow("SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND revoked_at IS NULL", currentUserID).Scan(&existing)
+	if failure := server.DB.QueryRow("SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND revoked_at IS NULL",
+		currentUserID).Scan(&existing); failure != nil {
+		// A failed count reads as zero, which is the one answer that lets the
+		// limit be passed.
+		logx.Errorf("[api] api key count failed (user %d): %v", currentUserID, failure)
+		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
+		return
+	}
 	if existing >= maxAPIKeysPerUser {
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.too_many_api_keys")
 		return
@@ -69,9 +72,8 @@ func (server *Server) APIKeysStore(responseWriter http.ResponseWriter, request *
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 		return
 	}
-	// A ceiling rather than a validated list: the interface offers a few
-	// durations, and a client asking for something else is not worth an error as
-	// long as it is bounded.
+	// A ceiling rather than a validated list: the interface offers a few durations,
+	// and anything else is fine as long as it is bounded.
 	days := body.ExpiresInDays
 	if days < 0 || days > 3650 {
 		days = 0
@@ -95,17 +97,13 @@ func (server *Server) APIKeysStore(responseWriter http.ResponseWriter, request *
 		"name":       name,
 		"prefix":     auth.APIKeyPreview(key),
 		"expires_at": expiresAt,
-		// Returned here and nowhere else. Only the hash is stored, so a member who
-		// loses it creates a new one rather than looking it up.
+		// Returned here and nowhere else: only the hash is stored.
 		"key": key,
 	}, "API key created")
 }
 
-// APIKeysDestroy revokes a key.
-//
-// Revoked rather than deleted: the row keeps its dates, so it stays visible that
-// a key existed and when it was last used. That is the sort of thing worth
-// having after the fact.
+// APIKeysDestroy revokes rather than deletes, so the row keeps its dates and it
+// stays visible that a key existed and when it was last used.
 func (server *Server) APIKeysDestroy(responseWriter http.ResponseWriter, request *http.Request) {
 	identifier, ok := pathInt(request, "id")
 	if !ok {

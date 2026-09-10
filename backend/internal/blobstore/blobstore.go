@@ -1,11 +1,10 @@
-// Package blobstore implements the content-addressed half of the storage
-// layout: file contents are written once per user under their SHA-256, and the
-// version directories reference them as hard links.
+// Package blobstore is the content-addressed half of the storage layout: file
+// contents are written once per user under their SHA-256, and the version
+// directories reference them as hard links.
 //
-// The store deliberately keeps no index of its own. The filesystem already
-// answers both questions that matter - "do we have this content?" is the
-// existence of the blob path, and "is this blob still needed?" is its link
-// count - and an index would be a second source of truth that can drift.
+// It keeps no index of its own. The filesystem already answers both questions
+// that matter - "do we have this content?" is the blob path's existence, "is it
+// still needed?" its link count - and an index could only drift.
 package blobstore
 
 import (
@@ -20,8 +19,7 @@ import (
 )
 
 // Info describes a stored blob. IsNew is false when the content was already
-// present, which is what makes a sync able to tell an unchanged file from a
-// changed one.
+// present, which is what lets a sync tell an unchanged file from a changed one.
 type Info struct {
 	Hash      string
 	Path      string
@@ -29,7 +27,6 @@ type Info struct {
 	IsNew     bool
 }
 
-// StoreBytes stores an in-memory file (a ZIP entry, an uploaded image).
 func StoreBytes(user storage.UserLayout, data []byte) (Info, error) {
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
@@ -43,10 +40,9 @@ func StoreBytes(user storage.UserLayout, data []byte) (Info, error) {
 	return Info{Hash: hash, Path: blobPath, SizeBytes: int64(len(data)), IsNew: true}, nil
 }
 
-// StoreReader streams a reader into the store, hashing as it goes, so a
-// multi-hundred-MB model never has to fit in memory. The temp file is created
-// inside the user's directory to keep the final move a rename rather than a
-// copy across filesystems.
+// StoreReader hashes as it streams, so a multi-hundred-MB model never has to fit
+// in memory. The temp file lives in the user's directory, which keeps the final
+// move a rename rather than a copy across filesystems.
 func StoreReader(user storage.UserLayout, reader io.Reader) (Info, error) {
 	tempDir := user.Temp()
 	if failure := storage.MkdirAll(tempDir); failure != nil {
@@ -79,10 +75,9 @@ func StoreReader(user storage.UserLayout, reader io.Reader) (Info, error) {
 	return Info{Hash: hash, Path: blobPath, SizeBytes: size, IsNew: true}, nil
 }
 
-// Link publishes a blob into a version directory. The link makes the version a
-// directory of real files while the content stays stored once; on a filesystem
-// without hard links (some bind mounts) it degrades to a copy, which costs disk
-// but never correctness.
+// Link publishes a blob into a version directory, so the version is a directory
+// of real files while the content stays stored once. Without hard links it
+// degrades to a copy, which costs disk but never correctness.
 func Link(blobPath, destination string) error {
 	if failure := storage.MkdirAll(filepath.Dir(destination)); failure != nil {
 		return failure
@@ -101,10 +96,9 @@ func Link(blobPath, destination string) error {
 	return copyFile(blobPath, destination)
 }
 
-// Unlink removes one published copy and, once no version references the content
-// any more, the blob itself. Checking the link count is what keeps the store
-// from growing forever without a separate garbage collector: the last link to
-// leave takes the blob with it.
+// Unlink removes one published copy and, once nothing references the content, the
+// blob itself. The link count is what keeps the store from growing forever
+// without a garbage collector.
 func Unlink(blobPath, published string) error {
 	if published != "" {
 		if failure := os.Remove(published); failure != nil && !os.IsNotExist(failure) {
@@ -124,10 +118,9 @@ func Unlink(blobPath, published string) error {
 	return nil
 }
 
-// pruneEmptyPrefixes removes the two hash directories above a blob once they
-// hold nothing. Without this a library that is filled and emptied again leaves
-// up to 65536 empty directories behind. os.Remove refuses a non-empty one, so
-// the check is the call itself.
+// pruneEmptyPrefixes removes the two hash directories above a blob once they hold
+// nothing, or a library filled and emptied leaves up to 65536 of them behind.
+// os.Remove refuses a non-empty directory, so the check is the call itself.
 func pruneEmptyPrefixes(blobPath string) {
 	directory := filepath.Dir(blobPath)
 	for level := 0; level < 2; level++ {
@@ -138,9 +131,8 @@ func pruneEmptyPrefixes(blobPath string) {
 	}
 }
 
-// links returns the hard-link count of a file. When the platform does not
-// report one it answers 2, the conservative result: an unknown link count keeps
-// the blob rather than deleting content that may still be published.
+// links answers 2 when the platform reports no count: an unknown one keeps the
+// blob rather than deleting content that may still be published.
 func links(path string) uint64 {
 	info, failure := os.Stat(path)
 	if failure != nil {
@@ -152,8 +144,8 @@ func links(path string) uint64 {
 	return 2
 }
 
-// sameContent reports whether two paths are already the same inode, which is
-// the normal case when a version is republished unchanged.
+// sameContent reports whether two paths are the same inode, the normal case when
+// a version is republished unchanged.
 func sameContent(first, second string) bool {
 	firstInfo, failure := os.Stat(first)
 	if failure != nil {
@@ -171,7 +163,6 @@ func exists(path string) bool {
 	return failure == nil
 }
 
-// moveFile moves a file, falling back to a copy across device boundaries.
 func moveFile(source, destination string) error {
 	if failure := os.Rename(source, destination); failure == nil {
 		return nil

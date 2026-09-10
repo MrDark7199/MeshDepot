@@ -2,18 +2,14 @@ package platforms
 
 // Metadata a platform will hand out without anybody signing in.
 //
-// The browser extension is why this exists. It reads a design from the page it
-// is standing on, and that works until a site loads its description later, on a
-// click or a scroll: Printables does exactly that, so the extension sees the one
-// summary line and nothing else, however carefully it looks.
+// The browser extension reads a design from the page it stands on, which works
+// until a site loads its description later: Printables does, so the extension
+// sees the one summary line and nothing else. The platform's own API has the full
+// text and answers a public model without credentials.
 //
-// The platform's own API has the full text and answers a public model without
-// credentials. So the division of labour is the honest one: the browser supplies
-// what only a browser can get - a download link issued for its own session - and
-// the server supplies what it has always been good at, the metadata.
-//
-// Nothing here logs in or reads a stored credential. A platform that refuses to
-// answer anonymously simply returns nothing, and the extension's reading stands.
+// So the division of labour is the honest one - the browser supplies what only a
+// browser can get, a download link issued for its own session, and the server
+// supplies the metadata. Nothing here logs in or reads a stored credential.
 
 import (
 	"encoding/json"
@@ -21,8 +17,7 @@ import (
 	"strings"
 )
 
-// PublicMeta is what could be learned. Every field is optional: a caller merges
-// what is there and keeps what it already had.
+// PublicMeta is what could be learned; every field is optional.
 type PublicMeta struct {
 	Name        string
 	Description string
@@ -31,11 +26,9 @@ type PublicMeta struct {
 	ImageURLs   []string
 }
 
-// PublicMetadata asks a platform about a design without any credentials.
-//
-// ok is false when the platform is not supported here, the URL carries no id, or
-// the answer was unusable - all of which are ordinary and leave the caller with
-// whatever it had.
+// PublicMetadata returns ok=false when the platform is not supported here, the
+// URL carries no id, or the answer was unusable - all ordinary, and the caller
+// keeps whatever it had.
 func PublicMetadata(platform, sourceURL string) (PublicMeta, bool) {
 	switch platform {
 	case "printables":
@@ -45,10 +38,8 @@ func PublicMetadata(platform, sourceURL string) (PublicMeta, bool) {
 	}
 }
 
-// printablesPublicMetadata reads a print through the public GraphQL API.
-//
-// The same query the downloader uses, minus the Authorization header: a public
-// model is answered without one, which is the whole point of this path.
+// printablesPublicMetadata is the downloader's query minus the Authorization
+// header: a public model is answered without one.
 func printablesPublicMetadata(sourceURL string) (PublicMeta, bool) {
 	match := printablesModelIDPattern.FindStringSubmatch(sourceURL)
 	if match == nil {

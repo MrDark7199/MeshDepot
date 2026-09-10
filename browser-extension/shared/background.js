@@ -1,30 +1,19 @@
 /**
- * Reads the MakerWorld session cookie and forwards a collected design to the
- * configured MeshDepot instance.
- *
- * Two things have to happen outside the page, which is why this file exists at
- * all. A cookie marked HttpOnly is invisible to the content script but readable
- * here through the cookies API. And the request to MeshDepot is cross-site: the
- * session cookie of the instance is SameSite=Strict and would not be sent, so
- * the extension authenticates with an API key of its own instead.
+ * Runs outside the page: reads the HttpOnly MakerWorld cookie, watches downloads,
+ * and talks to MeshDepot with an API key (the instance's own session cookie is
+ * SameSite=Strict and would not be sent from here).
  */
 
-/** Reads the instance settings the options page stores. */
 async function settings() {
   const stored = await browser.storage.local.get(['instanceUrl', 'apiKey', 'cancelDownload', 'addToCollection'])
   return {
     instanceUrl: (stored.instanceUrl || '').replace(/\/+$/, ''),
     apiKey: stored.apiKey || '',
-    // On by default: the server fetches the file from the link, so a second copy
-    // on this machine is not what the visitor asked for by pressing import.
     cancelDownload: stored.cancelDownload !== false,
-    // Off unless switched on: filing designs somewhere the member did not ask for
-    // is a change to their library, not a convenience.
     addToCollection: stored.addToCollection === true,
   }
 }
 
-/** The bearer token from the makerworld.com cookie jar, or null. */
 async function makerworldToken() {
   try {
     const cookie = await browser.cookies.get({ url: 'https://makerworld.com/', name: 'token' })
@@ -34,13 +23,6 @@ async function makerworldToken() {
   }
 }
 
-/**
- * Sends one collected design to MeshDepot.
- *
- * In dry-run mode nothing leaves the browser: the payload is written to the
- * extension console and reported as a success. That is what makes the whole
- * flow testable before the receiving endpoint exists.
- */
 async function sendToMeshDepot(payload) {
   const configuration = await settings()
 
@@ -68,9 +50,6 @@ async function sendToMeshDepot(payload) {
     }
 
     if (!response.ok) {
-      // MeshDepot answers with an i18n key, and for these routes a sentence
-      // after it. readError takes the sentence - the bare key was what someone
-      // saw as "error.browser_import_no_files", which tells nobody anything.
       if (response.status === 409) {
         return { ok: false, error: 'This design is already in your library.' }
       }
@@ -84,10 +63,6 @@ async function sendToMeshDepot(payload) {
       if (response.status === 404) {
         return { ok: false, error: 'This MeshDepot does not know the browser import. Update MeshDepot.' }
       }
-      // The server was not allowed to fetch the files. MyMiniFactory is the case
-      // that showed it: its download addresses answer 403 to anyone but the
-      // browser that asked for them. So the browser fetches them - it has the
-      // session - and sends the bytes instead of the links.
       return { ok: false, error: readError(parsed, response, text) }
     }
 
@@ -98,33 +73,17 @@ async function sendToMeshDepot(payload) {
       message += ' Filed under "' + data.collection + '".'
     }
     if (data.skipped_count) {
-      // Named rather than glossed over: a link that expired means a plate is
-      // missing from the design, and finding that out later is worse.
       message += ' ' + data.skipped_count + ' link(s) had already expired.'
     }
     return { ok: true, message: message }
   } catch (failure) {
-    // A self-hosted instance is the normal case here, so an unreachable host or
-    // a certificate the browser refuses is worth naming rather than hiding.
     return { ok: false, error: 'Could not reach MeshDepot: ' + failure.message }
   }
 }
 
-// ── Watching for the download the visitor starts ─────────────────────────────
+// - Watching for the download the visitor starts ---------------
 
-// Said once when this script loads. An event page is started and stopped as the
-// browser sees fit, and "no log line appeared" has two very different causes:
-// the download was never reported, or nothing was listening. This tells them
-// apart, and names the permission that decides it.
-/**
- * What the extension last saw of the download machinery.
- *
- * Kept in storage and shown on the extension's own page rather than only logged.
- * A console in about:debugging is the wrong place to send someone: it is two
- * clicks off the beaten path, has to be open *before* the thing happens, and is
- * a different console from the one F12 gives. The answer belongs where the
- * question is asked.
- */
+/** What the extension last saw of the download machinery, shown on its own page. */
 const DIAGNOSTICS_KEY = 'diagnostics'
 
 async function noteDiagnostics(fields) {
@@ -141,16 +100,8 @@ noteDiagnostics({
 
 
 /**
- * The tab whose import is waiting for a download.
- *
- * Kept in storage rather than in a variable, and that is not fussiness. This is
- * an event page: the browser unloads it whenever it has nothing to do, and a
- * module-level variable goes with it. The download then wakes the page up again,
- * finds nothing armed, and lets the file through - which is exactly the symptom
- * that led here.
- *
- * Only one tab at a time, and only while the panel is open. A listener armed
- * permanently would report every unrelated download the browser makes.
+ * The tab whose import is waiting for a download. In storage rather than a
+ * variable: this is an event page, and the browser unloads it between events.
  */
 const ARMED_TAB_KEY = 'armedTabIdentifier'
 
@@ -166,29 +117,10 @@ async function setArmedTab(identifier) {
 }
 
 /**
- * Reports a started download to the waiting tab.
- *
- * The URL is what matters: it is the presigned CDN link MakerWorld just issued
- * for this visitor's click, and MeshDepot can fetch it directly. blob: and data:
- * downloads are ignored - they exist only inside this browser and mean nothing
- * to the server. Those are covered by the other capture channel, which reads the
- * API response instead.
- */
-/**
- * The address a download ends at, and what it is called there.
- *
- * Both come from one lookup, because both have the same problem: when a download
- * is first reported, Chrome has neither followed its redirects nor settled its
- * name.
- *
- * The address matters because a site's own is often only a doorway.
- * MyMiniFactory's /download/<id> is tied to the session that asked and refuses
- * this server, while the presigned S3 address it redirects to may be fetched by
- * anyone for the next four hours.
- *
- * The name matters because that doorway is a number: "231269" is what the panel
- * listed, and what the design would have been filed under had the CDN not stated
- * something better.
+ * Where a download ends and what it is called there. A site's own address is
+ * often only a doorway tied to this session, while the address it redirects to
+ * is the one MeshDepot can fetch - and it states a better name than "231269".
+ * Chrome has followed neither when the download is first reported.
  */
 async function settleDownload(item) {
   let url = item.finalUrl && item.finalUrl !== item.url ? item.finalUrl : ''
@@ -212,24 +144,16 @@ async function settleDownload(item) {
   return { url: url, name: filename || nameFromAddress(url) }
 }
 
-/** The last segment of a path the browser reported, without its directories. */
 function baseName(value) {
   return (value || '').split(/[\\/]/).pop() || ''
 }
 
-/**
- * The filename an address states.
- *
- * A presigned link usually carries one in response-content-disposition, and that
- * is the name the platform means. The path segment is the fallback, and on some
- * sites it is a number and nothing else.
- */
+/** The filename a presigned link states in response-content-disposition. */
 function nameFromAddress(rawUrl) {
   try {
     const address = new URL(rawUrl)
     const disposition = address.searchParams.get('response-content-disposition') || ''
-    // filename*=utf-8''name.zip wins over filename=name.zip: it is the form that
-    // survives non-ASCII.
+    // filename*=utf-8''name.zip wins: it is the form that survives non-ASCII.
     const encoded = /filename\*=(?:utf-8'')?([^;]+)/i.exec(disposition)
     const plain = /filename="?([^";]+)/i.exec(disposition)
     const stated = (encoded && encoded[1]) || (plain && plain[1])
@@ -241,48 +165,55 @@ function nameFromAddress(rawUrl) {
 }
 
 
+/** Cancels the download, or deletes the file when it already finished. */
+async function stopDownload(identifier) {
+  try {
+    await browser.downloads.cancel(identifier)
+    return true
+  } catch (failure) {
+    try {
+      await browser.downloads.removeFile(identifier)
+      return true
+    } catch (removeFailure) {
+      return false
+    }
+  }
+}
+
 browser.downloads.onCreated.addListener(async item => {
   const tabIdentifier = await armedTab()
-  const settled = await settleDownload(item)
-  const url = settled.url
-  // Noted before any of the conditions below, and on purpose: when a download
-  // does not reach an import, the question is which of them turned it away. The
-  // extension's own page shows the answer under "Downloads".
   const seenAt = new Date().toLocaleTimeString()
 
   if (tabIdentifier === null) {
     await noteDiagnostics({ lastDownload: seenAt + ' - seen, but no import was waiting' })
     return
   }
-  // A blob: address exists only inside this browser, and there is no way to
-  // those bytes: the server cannot fetch such an address, a content script
-  // cannot read it, content.fetch does not exist in current Firefox, and the
-  // sites that produce them refuse injected scripts. Said plainly rather than
-  // treated as a failure - on Thingiverse, the one platform that does this, the
-  // files were taken from the page's own links before any download started.
-  if (/^blob:/i.test(url)) {
+
+  // Judged before anything is stopped: what the server cannot fetch afterwards
+  // has to stay in the browser. A blob: address exists only here.
+  const startingUrl = item.finalUrl || item.url || ''
+  if (/^blob:/i.test(startingUrl)) {
     await noteDiagnostics({ lastDownload: seenAt + ' - built in the browser, not usable' })
     return
   }
-  if (!/^https?:/i.test(url)) {
-    await noteDiagnostics({ lastDownload: seenAt + ' - seen, but its address is unusable (' + url.slice(0, 24) + '…)' })
+  if (!/^https?:/i.test(startingUrl)) {
+    await noteDiagnostics({ lastDownload: seenAt + ' - seen, but its address is unusable (' + startingUrl.slice(0, 24) + '…)' })
     return
   }
-  await noteDiagnostics({ lastDownload: seenAt + ' - captured' })
 
+  // Stopped before the address is resolved: a small file finishes in less time
+  // than that takes, and a late cancel leaves it on the disk.
   const configuration = await settings()
-  let cancelled = false
-  if (configuration.cancelDownload) {
-    // The point of the import is that the server fetches the file. Letting the
-    // browser pull the same bytes to disk as well is waste the visitor did not
-    // ask for - and the setting is there for whoever disagrees.
+  const cancelled = configuration.cancelDownload ? await stopDownload(item.id) : false
+
+  const settled = await settleDownload(item)
+  const url = settled.url
+  await noteDiagnostics({ lastDownload: seenAt + ' - captured' })
+  if (cancelled) {
     try {
-      await browser.downloads.cancel(item.id)
       await browser.downloads.erase({ id: item.id })
-      cancelled = true
     } catch (failure) {
-      // Already finished, or not cancellable. The panel says so on the file's
-      // own row, which is where somebody would look.
+      // The list entry stays; the file is gone either way.
     }
   }
 
@@ -292,29 +223,19 @@ browser.downloads.onCreated.addListener(async item => {
       kind: 'download-captured', url: url, name: downloadName, cancelled: cancelled,
     })
   } catch (failure) {
-    // The tab is gone, or its content script is not listening.
     await noteDiagnostics({ lastDownload: seenAt + ' - captured, but the waiting tab did not answer' })
     await setArmedTab(null)
   }
 })
 
-// A tab that goes away takes its import with it. Without this the stored id
-// would outlive the panel - and after a browser restart it would point at
-// whatever tab happens to get that number next.
 browser.tabs.onRemoved.addListener(async identifier => {
   if (await armedTab() === identifier) await setArmedTab(null)
 })
 
-// Opens the settings in a tab rather than a popup panel. A popup closes as soon
-// as focus leaves it, and Firefox's permission prompt does exactly that - the
-// request was cancelled before anyone could see it, and "Save" appeared to do
-// nothing at all.
 /**
- * Turns MeshDepot's answer into something worth reading.
- *
- * Errors arrive as an i18n key, optionally followed by a sentence:
- * "error.browser_import_no_files:None of the files could be downloaded…". The
- * sentence is what a person needs; the bare key is what they were shown before.
+ * MeshDepot sends an i18n key optionally followed by a sentence:
+ * "error.browser_import_no_files:None of the files could be downloaded…".
+ * The sentence is the part worth showing.
  */
 function readError(parsed, response, text) {
   const raw = parsed && parsed.error ? String(parsed.error) : ''
@@ -324,29 +245,12 @@ function readError(parsed, response, text) {
   return 'MeshDepot answered HTTP ' + response.status + ': ' + text.slice(0, 160)
 }
 
-/**
- * The import contract this extension speaks.
- *
- * The two halves are updated separately - this one lives in a browser and
- * updates itself, MeshDepot is self-hosted and gets updated when its operator
- * gets round to it. Without comparing versions, that gap turns up as an import
- * that fails with nothing useful to say.
- *
- * Raise this together with BrowserImportAPIVersion in the server's
- * internal/api/browserimport.go.
- */
+/** Raise together with BrowserImportAPIVersion in the server's internal/api/browserimport.go. */
 const IMPORT_API_VERSION = 1
 
-/**
- * Compares this extension's contract with what the server offers.
- *
- * Both directions matter, and they need different advice: a server too old is
- * the operator's job, an extension too old is the reader's own. Saying only
- * "incompatible" would leave them guessing which.
- */
+/** Both directions need different advice: an old server is the operator's job, an old extension the reader's. */
 function versionVerdict(serverVersion, serverMinVersion) {
   if (typeof serverVersion !== 'number') {
-    // No version at all: a MeshDepot from before this endpoint existed.
     return { ok: false, error: 'This MeshDepot is too old for the extension - it does not know '
       + 'the browser import yet. Update MeshDepot.' }
   }
@@ -361,30 +265,20 @@ function versionVerdict(serverVersion, serverMinVersion) {
   return { ok: true }
 }
 
-/**
- * Asks the instance whether it is reachable and the key still valid.
- *
- * Both in one call: a page that says "connected" because the host answered
- * would still fail the first import on a revoked key, and nobody would know why.
- * Reaching this route at all means the key passed MeshDepot's middleware.
- */
+/** Reachability and key validity in one go, so "connected" cannot mean a revoked key. */
 async function checkConnection() {
   const configuration = await settings()
   if (!configuration.instanceUrl) return { ok: false, error: 'No MeshDepot address configured.' }
 
   try {
-    // The version first, and without the key: a server too old to know the
-    // browser import at all would otherwise answer 404 to everything and be
-    // reported as a bad key, sending someone off to fix the one thing that is
-    // fine.
+    // The version first and without the key: a server too old to know the import
+    // answers 404 to everything, which would be reported as a bad key.
     const versionResponse = await fetch(configuration.instanceUrl + '/api/v1/version')
     if (versionResponse.status === 404) {
       return { ok: false, error: 'This MeshDepot is too old for the extension - it does not know '
         + 'the browser import yet. Update MeshDepot.' }
     }
     const versionBody = versionResponse.ok ? await versionResponse.json().catch(() => null) : null
-    // One route answers for the whole server, so the entry for this client is
-    // picked out of it rather than the route being specific to importing.
     const offered = (versionBody && versionBody.data && versionBody.data.browser_import) || {}
     const verdict = versionVerdict(offered.version, offered.min_version)
     if (!verdict.ok) return verdict
@@ -408,21 +302,12 @@ async function checkConnection() {
     const parsed = await response.json().catch(() => null)
     return { ok: true, user: (parsed && parsed.data && parsed.data.user) || '' }
   } catch (failure) {
-    // A self-hosted instance is the normal case, so an unreachable host, a
-    // refused certificate or a missing host permission all land here and are
-    // worth naming rather than hiding behind "offline".
     return { ok: false, error: 'Could not reach MeshDepot: ' + failure.message }
   }
 }
 
-/**
- * Registered in the form both browsers understand.
- *
- * Firefox lets a listener return a promise and answers with what it resolves to.
- * Chrome does not: there the answer goes through sendResponse, and the listener
- * has to return true to say one is coming. The second form works in Firefox as
- * well, so it is the one used.
- */
+// Chrome answers through sendResponse and needs the listener to return true;
+// Firefox accepts that form too.
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender).then(sendResponse)
   return true

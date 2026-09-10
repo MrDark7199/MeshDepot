@@ -1,29 +1,17 @@
 /**
- * One name for the extension APIs, in every browser.
- *
- * Firefox provides `browser` with promises; Chrome and Chromium provide
- * `chrome`, which in Manifest V3 also returns promises. The two are close enough
- * that the rest of this extension can be written once - it only needs the name
- * to exist.
- *
- * Assigned rather than declared: in Firefox `browser` is already there, and a
- * second declaration in the same scope would be an error.
+ * One name for the extension APIs in every browser: Firefox has `browser`,
+ * Chrome has `chrome`, and in Manifest V3 both return promises. Assigned rather
+ * than declared, because in Firefox the name already exists.
  */
 if (typeof globalThis.browser === 'undefined' && typeof globalThis.chrome !== 'undefined') {
   globalThis.browser = globalThis.chrome
 }
 
 /**
- * Whether this content script still belongs to a living extension.
- *
- * Reloading the extension - which happens constantly while developing, and once
- * per update afterwards - leaves the scripts already injected into open tabs
- * running with nothing behind them. Chrome then drops runtime.id, and every
- * later call throws "Extension context invalidated", repeatedly and in the
- * page's own console.
- *
- * The old script cannot repair itself; the tab has to be reloaded. What it can
- * do is fail quietly and get out of the way.
+ * Reloading the extension leaves the scripts already injected into open tabs
+ * running with nothing behind them; Chrome drops runtime.id and every later call
+ * throws into the page's console. Such a script cannot repair itself, so the
+ * helpers below fail quietly and get out of the way.
  */
 function extensionGone() {
   try {
@@ -33,7 +21,6 @@ function extensionGone() {
   }
 }
 
-/** sendMessage that answers null instead of throwing once the context is gone. */
 async function sendToExtension(message) {
   if (extensionGone()) return null
   try {
@@ -43,7 +30,6 @@ async function sendToExtension(message) {
   }
 }
 
-/** Adds and removes a runtime listener, both no-ops once the context is gone. */
 function listenToExtension(listener) {
   if (extensionGone()) return
   try {

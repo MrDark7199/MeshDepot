@@ -2,19 +2,9 @@
  * The extension's own page: connection state on the front, settings behind a
  * button.
  *
- * It opens in a tab rather than a popup panel, and not by preference. Firefox
- * asks about host permission in a prompt of its own; a popup closes the moment
- * that prompt takes focus, which cancelled the request before anyone could see
- * it and made Save appear to do nothing.
- */
-
-/**
- * Where this page is showing.
- *
- * As the toolbar panel it is a popup, and a popup cannot ask for a permission:
- * Firefox draws its prompt at the top of the window, behind the panel, and the
- * panel closes the moment focus moves - the request is cancelled before anyone
- * has seen it. So that one step, and only that one, happens in a tab.
+ * A popup cannot ask for a permission - Firefox draws its prompt at the top of
+ * the window and the panel closes the moment focus moves, cancelling the request
+ * before anyone has seen it. So that one step happens in a tab.
  */
 const runningInTab = new URLSearchParams(window.location.search).get('view') === 'tab'
 if (runningInTab) document.body.classList.add('in-tab')
@@ -42,9 +32,8 @@ function report(kind, text) {
   statusBox.className = kind
   statusBox.textContent = text
   statusBox.style.display = 'block'
-  // Brought into view. The panel is only as tall as the browser allows, and a
-  // message that appears below the fold reads as nothing having happened -
-  // which is the one thing a Save button must never do.
+  // Brought into view: the panel is only as tall as the browser allows, and a
+  // message below the fold reads as nothing having happened.
   statusBox.scrollIntoView({ block: 'nearest' })
 }
 
@@ -60,27 +49,16 @@ async function settings() {
     instanceUrl: (stored.instanceUrl || '').replace(/\/+$/, ''),
     apiKey: stored.apiKey || '',
     cancelDownload: stored.cancelDownload !== false,
-    // Off unless switched on: filing designs somewhere the member did not ask
-    // for is a change to their library, not a convenience.
+    // Off unless switched on: this changes their library, it is not a convenience.
     addToCollection: stored.addToCollection === true,
   }
 }
 
-// ── Connection ───────────────────────────────────────────────────────────────
+// - Connection --------------------------------
 
 /**
- * Asks MeshDepot whether it is there and whether the key is any good.
- *
- * Both questions in one call, deliberately: a page that reports "connected"
- * because the host answered would still fail the first import on a revoked key,
- * and the person would have no idea why.
- */
-/**
- * The state currently on screen, so a repeat check can leave it alone.
- *
- * Without this the twenty-second poll flipped the line to "Checking…" and back
- * to "Connected" every time - motion that says nothing, on a panel someone is
- * reading. The display now changes only when the answer does.
+ * The state currently on screen, so the poll can leave it alone: it used to flip
+ * the line to "Checking…" and back every twenty seconds.
  */
 let shownState = null
 
@@ -105,14 +83,12 @@ async function checkConnection(options) {
     return
   }
 
-  // Only the first look says "Checking…". A background poll waits and reports the
-  // outcome, which is the only part worth showing.
+  // Only the first look says "Checking…"; a poll reports the outcome alone.
   if (announce && shownState === null) applyState('busy', 'Checking…', configuration.instanceUrl)
   const answer = await browser.runtime.sendMessage({ kind: 'check-connection' })
 
   if (answer && answer.ok) {
-    // The version is checked but not shown: when it fits there is nothing to say,
-    // and a number on screen that never changes is one more thing to read past.
+    // The version is checked but not shown: when it fits there is nothing to say.
     applyState('good', 'Connected',
       configuration.instanceUrl + (answer.user ? ' · signed in as ' + answer.user : ''))
   } else {
@@ -121,16 +97,9 @@ async function checkConnection(options) {
 }
 
 /**
- * Asks Firefox for a set of origins, from wherever this page happens to be.
- *
- * Tried in the toolbar panel first, because one click is the right number. The
- * prompt is drawn at the top of the window rather than next to the panel, which
- * is awkward but workable - so it is announced first, and the caller is told
- * where to look.
- *
- * It can still fail: the panel closes when focus moves, and a request cancelled
- * that way comes back as an error or a plain false. Only then is the tab
- * offered, where the prompt is somewhere obvious.
+ * Tried in the toolbar panel first, because one click is the right number. When
+ * the panel closes under the prompt the request comes back as an error or a
+ * plain false, and only then is the tab offered.
  */
 async function requestOrigins(origins, what) {
   if (!runningInTab) {
@@ -153,12 +122,9 @@ async function openGrantTab(what) {
 }
 
 /**
- * Whether the extension may run on the model sites at all.
- *
- * Firefox treats host permissions in a Manifest V3 extension as optional. Until
- * they are granted no content script runs, so the Import button simply never
- * appears - with nothing on screen to explain why. Hence a state of its own,
- * next to the connection.
+ * Firefox treats host permissions in MV3 as optional, and until they are granted
+ * no content script runs - so the Import button never appears, with nothing on
+ * screen to explain why. Hence a state of its own.
  */
 async function checkSiteAccess() {
   const granted = await browser.permissions.contains({ origins: MESHDEPOT_SITE_ORIGINS })
@@ -198,13 +164,9 @@ grantSitesButton.addEventListener('click', async () => {
 })
 
 /**
- * What the extension last saw of the download machinery.
- *
- * Shown here because the alternative is sending someone into the console in
- * about:debugging - two clicks off the beaten path, a different console from the
- * one F12 opens, and it has to be watching before the thing happens. When an
- * import waits for a download that never arrives, this line says which of the
- * three possible reasons it was.
+ * What the extension last saw of the download machinery. When an import waits
+ * for a download that never arrives, this line says why - the alternative is
+ * sending someone into the console in about:debugging.
  */
 async function showDiagnostics() {
   const stored = await browser.storage.local.get('diagnostics')
@@ -223,7 +185,7 @@ async function showDiagnostics() {
   diagnosticsBox.textContent = parts.join(' ')
 }
 
-// ── Views ────────────────────────────────────────────────────────────────────
+// - Views ----------------------------------
 
 document.getElementById('openSettings').addEventListener('click', async () => {
   const configuration = await settings()
@@ -231,8 +193,8 @@ document.getElementById('openSettings').addEventListener('click', async () => {
   keyField.value = configuration.apiKey
   cancelDownloadField.checked = configuration.cancelDownload
   addToCollectionField.checked = configuration.addToCollection
-  // Cleared only when the panel is opened by hand; the permission tab puts its
-  // own message here straight afterwards and must not lose it.
+  // Cleared only when opened by hand: the permission tab puts its own message
+  // here straight afterwards.
   if (!runningInTab) statusBox.style.display = 'none'
   mainView.classList.add('hidden')
   settingsView.classList.remove('hidden')
@@ -244,19 +206,12 @@ document.getElementById('closeSettings').addEventListener('click', () => {
   checkConnection({ quiet: true })
 })
 
-// ── Saving ───────────────────────────────────────────────────────────────────
+// - Saving ----------------------------------
 
-/**
- * Makes sure the extension may reach the configured instance.
- *
- * Firefox's prompt is easy to miss - it appears at the top of the window, and
- * until it is answered nothing else happens - so it is announced beforehand and
- * both answers are reported afterwards.
- */
+/** Firefox's prompt is easy to miss, so it is announced beforehand. */
 async function ensurePermission(instanceUrl) {
-  // A match pattern may not carry a port, so "http://localhost:9000/*" would be
-  // rejected as invalid rather than merely not match. Permission therefore
-  // covers every port on that host.
+  // A match pattern may not carry a port - "http://localhost:9000/*" is invalid
+  // rather than merely not matching - so this covers every port on the host.
   const address = new URL(instanceUrl)
   const origin = address.protocol + '//' + address.hostname + '/*'
 
@@ -304,9 +259,8 @@ document.getElementById('save').addEventListener('click', async () => {
     return
   }
 
-  // Every message below leads with what the button did. The connection check
-  // that follows is useful, but it is not what was asked for by pressing Save -
-  // reporting only its result read as though the settings had not been stored.
+  // Every message leads with what the button did: reporting only the connection
+  // check read as though the settings had not been stored.
   if (!apiKey) {
     report('bad', 'Settings saved. There is no API key yet, so imports will fail - '
       + 'create one in MeshDepot under Account settings → API keys.')
@@ -323,15 +277,10 @@ document.getElementById('save').addEventListener('click', async () => {
   }
 })
 
-// ── Start ────────────────────────────────────────────────────────────────────
+// - Start ----------------------------------
 
-// Opened as the permission tab: show the settings, already filled in, and ask for
-// the one click that is still needed.
-//
-// Not clicked automatically, though it would be tempting: permissions.request()
-// only works from a real user gesture, and a scripted click is refused outright.
-// So the person presses Save, and this time the prompt is somewhere they can see
-// it.
+// Opened as the permission tab: the settings are filled in and Save is pressed
+// by hand, because permissions.request() only works from a real user gesture.
 if (new URLSearchParams(window.location.search).get('grantSites') === '1') {
   report('info', 'Press the button below. Firefox will ask whether this extension may run on '
     + 'the model sites; the prompt appears at the top of this window. It could not ask inside '
@@ -349,8 +298,8 @@ checkSiteAccess()
 checkConnection()
 showDiagnostics()
 window.setInterval(() => {
-  // Only while the main view is showing: re-checking behind the settings form
-  // would move the state under someone who is in the middle of editing it.
+  // Only while the main view shows: re-checking would move the state under
+  // someone editing the form.
   if (!mainView.classList.contains('hidden')) {
     checkConnection({ quiet: true })
     checkSiteAccess()

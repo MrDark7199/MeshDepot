@@ -11,15 +11,9 @@ import (
 	"meshdepot/internal/scheduler"
 )
 
-// requireSelf ensures the session user is the addressed {id} user, where {id}
-// is the account's public id.
-//
-// No database access: the session's own public id is already in the request
-// context, so this is a string comparison. A malformed id is a 404 and a
-// well-formed foreign one a 403 - the same split as before, except that an id
-// belonging to nobody never reaches a query. The numeric id comes from the
-// context rather than from the path, because that is the one the session hangs
-// on and the middleware has already checked it is active.
+// requireSelf ensures the session user is the addressed {id}, which is the
+// account's public id. No database access - the session's own public id is in the
+// context. A malformed id is a 404, a well-formed foreign one a 403.
 func (server *Server) requireSelf(responseWriter http.ResponseWriter, request *http.Request) (int, bool) {
 	target := request.PathValue("id")
 	if !publicid.Valid(target) {
@@ -33,7 +27,6 @@ func (server *Server) requireSelf(responseWriter http.ResponseWriter, request *h
 	return userID(request), true
 }
 
-// NotificationsIndex returns the latest 50 notifications + unread count.
 func (server *Server) NotificationsIndex(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -53,7 +46,6 @@ func (server *Server) NotificationsIndex(responseWriter http.ResponseWriter, req
 	httpx.Success(responseWriter, map[string]any{"items": rows, "unread": unread})
 }
 
-// NotificationsReadAll marks all unread as read.
 func (server *Server) NotificationsReadAll(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -63,7 +55,6 @@ func (server *Server) NotificationsReadAll(responseWriter http.ResponseWriter, r
 	httpx.SuccessMessage(responseWriter, nil, "Marked as read")
 }
 
-// NotificationsDeleteAll deletes all notifications of the user.
 func (server *Server) NotificationsDeleteAll(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -95,7 +86,6 @@ func (server *Server) NotificationsDelete(responseWriter http.ResponseWriter, re
 	httpx.Success(responseWriter, nil)
 }
 
-// NotificationsGetPrefs returns the preferences (default: all enabled).
 func (server *Server) NotificationsGetPrefs(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -109,9 +99,8 @@ func (server *Server) NotificationsGetPrefs(responseWriter http.ResponseWriter, 
 		return
 	}
 	if !found {
-		// The in-app switches default on, the e-mail ones off: an account that
-		// never touched this page should get the bell it always had and no mail
-		// it did not ask for.
+		// In-app switches default on, e-mail ones off: an account that never touched
+		// this page keeps the bell it had and gets no mail it did not ask for.
 		prefs = map[string]any{
 			"user_id": currentUserID, "sync_update": 1, "download_failed": 1,
 			"download_done": 1, "design_shared": 1, "storage_80": 1, "user_storage_80": 1,
@@ -124,7 +113,6 @@ func (server *Server) NotificationsGetPrefs(responseWriter http.ResponseWriter, 
 	httpx.Success(responseWriter, prefs)
 }
 
-// NotificationsSavePrefs saves the preferences (upsert).
 func (server *Server) NotificationsSavePrefs(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
@@ -139,9 +127,8 @@ func (server *Server) NotificationsSavePrefs(responseWriter http.ResponseWriter,
 		if value == nil || value == "null" {
 			syncDays = nil
 		} else {
-			// Rejected rather than clamped: the interval decides how often this
-			// member's whole library is re-downloaded, and a value the server
-			// silently replaced would be read as accepted.
+			// Rejected rather than clamped: the interval decides how often this member's
+			// whole library is re-downloaded.
 			days := coerce.Int(value)
 			if days < floor {
 				httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.design_update_interval_too_low")
@@ -152,15 +139,14 @@ func (server *Server) NotificationsSavePrefs(responseWriter http.ResponseWriter,
 	}
 	syncUpdate := intFlag(body, "sync_update", 1)
 	downloadFailed := intFlag(body, "download_failed", 1)
-	// download_done exists in the schema and is evaluated by notify.User, but was
-	// missing here - the class could never be switched off.
+	// Evaluated by notify.User but missing here, so the class could never be
+	// switched off.
 	downloadDone := intFlag(body, "download_done", 1)
 	designShared := intFlag(body, "design_shared", 1)
 	storage80 := intFlag(body, "storage_80", 1)
 	userStorage80 := intFlag(body, "user_storage_80", 1)
-	// The e-mail half of each type. Independent of the switches above: a type
-	// can go to the bell, to the inbox, to both, or nowhere. Default 0, so a
-	// client that does not send these does not silently enable mail.
+	// The e-mail half of each type, independent of the switches above. Default 0, so
+	// a client that omits them does not silently enable mail.
 	syncUpdateMail := intFlag(body, "sync_update_email", 0)
 	downloadFailedMail := intFlag(body, "download_failed_email", 0)
 	downloadDoneMail := intFlag(body, "download_done_email", 0)
@@ -204,7 +190,6 @@ func (server *Server) NotificationsSavePrefs(responseWriter http.ResponseWriter,
 	})
 }
 
-// intFlag reads a 0/1 value from the body (bool/number/string) with a default.
 func intFlag(body map[string]any, key string, defaultValue int) int {
 	value, present := body[key]
 	if !present {
@@ -228,8 +213,8 @@ func intFlag(body map[string]any, key string, defaultValue int) int {
 	}
 }
 
-// designUpdateFloor is the shortest update interval a member may choose. The
-// admin can raise it, never lower it below the built-in minimum.
+// designUpdateFloor: the admin can raise the shortest interval a member may
+// choose, never lower it below the built-in minimum.
 func (server *Server) designUpdateFloor() int {
 	floor := scheduler.DesignUpdateMinDays
 	var value string

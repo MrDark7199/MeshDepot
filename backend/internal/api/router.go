@@ -8,20 +8,18 @@ import (
 	"meshdepot/internal/webui"
 )
 
-// Router builds the complete HTTP handler (routes + CORS).
 func (server *Server) Router() http.Handler {
 	mux := http.NewServeMux()
 
 	// What this server speaks, for clients updated separately from it. Public for
-	// the same reason health is: a client has to be able to ask before it can
-	// authenticate.
+	// the same reason health is: a client has to ask before it can authenticate.
 	mux.HandleFunc("GET /api/v1/version", server.Version)
 
 	mux.HandleFunc("GET /api/v1/health", func(responseWriter http.ResponseWriter, _ *http.Request) {
 		httpx.Success(responseWriter, map[string]string{"status": "ok"})
 	})
 
-	// ── Auth (public; session protection happens in the handler) ──
+	// - Auth (public; session protection happens in the handler) -
 	mux.HandleFunc("POST /api/v1/auth/login", server.Auth.Login)
 	mux.HandleFunc("POST /api/v1/auth/totp/verify", server.Auth.TotpVerify)
 	mux.HandleFunc("POST /api/v1/auth/totp/setup", server.Auth.TotpSetup)
@@ -30,14 +28,14 @@ func (server *Server) Router() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/logout", server.Auth.Logout)
 	mux.HandleFunc("GET /api/v1/auth/me", server.Auth.Me)
 
-	// ── Tags (session-protected) ──
+	// - Tags (session-protected) -
 	mux.Handle("GET /api/v1/tags", server.Auth.Require(http.HandlerFunc(server.TagsIndex)))
 	mux.Handle("GET /api/v1/tags/search", server.Auth.Require(http.HandlerFunc(server.TagsSearch)))
 	mux.Handle("POST /api/v1/tags", server.Auth.Require(http.HandlerFunc(server.TagsStore)))
 	mux.Handle("DELETE /api/v1/tags/{id}", server.Auth.Require(http.HandlerFunc(server.TagsDestroy)))
 	mux.Handle("PUT /api/v1/designs/{designId}/tags", server.Auth.Require(http.HandlerFunc(server.TagsSetForDesign)))
 
-	// ── Designs (session-protected) ──
+	// - Designs (session-protected) -
 	mux.Handle("GET /api/v1/designs/check-url", server.Auth.Require(http.HandlerFunc(server.DesignsCheckUrl)))
 	mux.Handle("GET /api/v1/designs", server.Auth.Require(http.HandlerFunc(server.DesignsIndex)))
 	mux.Handle("POST /api/v1/designs", server.Auth.Require(http.HandlerFunc(server.DesignsStore)))
@@ -49,7 +47,7 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("GET /api/v1/designs/{id}/duplicates", server.Auth.Require(http.HandlerFunc(server.DesignsDuplicates)))
 	mux.Handle("GET /api/v1/designs/{id}/collections", server.Auth.Require(http.HandlerFunc(server.DesignCollections)))
 
-	// ── Collections (session-protected) ──
+	// - Collections (session-protected) -
 	mux.Handle("GET /api/v1/collections", server.Auth.Require(http.HandlerFunc(server.CollectionsIndex)))
 	mux.Handle("POST /api/v1/collections", server.Auth.Require(http.HandlerFunc(server.CollectionsStore)))
 	mux.Handle("PUT /api/v1/collections/{id}", server.Auth.Require(http.HandlerFunc(server.CollectionsUpdate)))
@@ -59,20 +57,17 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("POST /api/v1/collections/{id}/designs", server.Auth.Require(http.HandlerFunc(server.CollectionAddDesigns)))
 	mux.Handle("DELETE /api/v1/collections/{id}/designs/{designId}", server.Auth.Require(http.HandlerFunc(server.CollectionRemoveDesign)))
 
-	// ── Download queue + sync (session-protected) ──
+	// - Download queue + sync (session-protected) -
 	mux.Handle("POST /api/v1/download", server.Auth.Require(http.HandlerFunc(server.DownloadQueue)))
 
-	// Import from the browser extension. Authenticated by API key alone, never by
-	// session cookie: the route fetches files from URLs in the request body, and
-	// one reachable with an ambient cookie could be set off by any page a signed-in
-	// member happens to open. It also runs the import during the request instead of
-	// queueing it - the links expire in about five minutes.
+	// Import from the browser extension. API key alone, never a session cookie: the
+	// route fetches files from URLs in the request body. It also imports during the
+	// request rather than queueing - the links expire in about five minutes.
 	mux.Handle("POST /api/v1/imports/browser", server.Auth.RequireAPIKey(http.HandlerFunc(server.BrowserImport)))
-	// The same route as a GET: reachability and key validity in one answer, so a
-	// client can say "connected" without guessing at the second half.
+	// The same route as a GET: reachability and key validity in one answer.
 	mux.Handle("GET /api/v1/imports/browser", server.Auth.RequireAPIKey(http.HandlerFunc(server.BrowserImportStatus)))
-	// Files the extension carries itself, for a platform that builds its archive
-	// in the browser and hands out a blob: address the server cannot fetch.
+	// Files the extension carries itself, for a platform that hands out a blob:
+	// address the server cannot fetch.
 	mux.Handle("POST /api/v1/imports/browser/upload", server.Auth.RequireAPIKey(http.HandlerFunc(server.BrowserImportUpload)))
 
 	// The member's own API keys.
@@ -88,7 +83,7 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("POST /api/v1/designs/sync-all", server.Auth.Require(http.HandlerFunc(server.SyncAll)))
 	mux.Handle("GET /api/v1/designs/sync-status", server.Auth.Require(http.HandlerFunc(server.SyncStatus)))
 
-	// ── Design files (session-protected; token serve is public) ──
+	// - Design files (session-protected; token serve is public) -
 	mux.Handle("GET /api/v1/designs/{designId}/files", server.Auth.Require(http.HandlerFunc(server.FilesIndex)))
 	mux.Handle("POST /api/v1/designs/{designId}/files", server.Auth.Require(http.HandlerFunc(server.FilesStore)))
 	mux.Handle("POST /api/v1/designs/{designId}/files/{fileId}/entries", server.Auth.Require(http.HandlerFunc(server.FilesAddEntries)))
@@ -101,21 +96,20 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("GET /api/v1/designs/{designId}/files/{fileId}/entry/{entryId}/pwmx/mesh", server.Auth.Require(http.HandlerFunc(server.FilesServePwmxMesh)))
 	mux.HandleFunc("GET /api/v1/files/token/{token}", server.FilesServeByToken) // public (slicer)
 
-	// ── Design images (session-protected) ──
+	// - Design images (session-protected) -
 	mux.Handle("POST /api/v1/designs/{designId}/images", server.Auth.Require(http.HandlerFunc(server.ImagesUpload)))
 	mux.Handle("PUT /api/v1/designs/{designId}/images/{imageId}/cover", server.Auth.Require(http.HandlerFunc(server.ImagesSetCover)))
 	mux.Handle("DELETE /api/v1/designs/{designId}/images/{imageId}", server.Auth.Require(http.HandlerFunc(server.ImagesDelete)))
 
-	// Serve cover/gallery images (public like avatars; <img> sends no auth header).
-	// Relative path "{userId}/stl/{designId}/pictures/{file}" under BASE_PATH_DATA.
+	// Public like avatars, since <img> sends no auth header.
 	mux.HandleFunc("GET /api/v1/covers/{path...}", server.CoversServe)
 
-	// ── Public share links (no session; the token is the whole credential) ──
+	// - Public share links (no session; the token is the whole credential) -
 	mux.HandleFunc("GET /api/v1/public/share/{token}", server.PublicShareShow)
 	mux.HandleFunc("GET /api/v1/public/share/{token}/files/{entryId}", server.PublicShareDownload)
 	mux.HandleFunc("GET /api/v1/public/share/{token}/download", server.PublicShareDownloadAll)
 
-	// ── Shares (session-protected) ──
+	// - Shares (session-protected) -
 	mux.Handle("GET /api/v1/designs/{designId}/links", server.Auth.Require(http.HandlerFunc(server.ShareLinksIndex)))
 	mux.Handle("POST /api/v1/designs/{designId}/links", server.Auth.Require(http.HandlerFunc(server.ShareLinksStore)))
 	mux.Handle("DELETE /api/v1/designs/{designId}/links/{linkId}", server.Auth.Require(http.HandlerFunc(server.ShareLinksDestroy)))
@@ -123,7 +117,7 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("POST /api/v1/designs/{designId}/shares", server.Auth.Require(http.HandlerFunc(server.SharesStore)))
 	mux.Handle("DELETE /api/v1/designs/{designId}/shares/{shareId}", server.Auth.Require(http.HandlerFunc(server.SharesDestroy)))
 
-	// ── Notifications (session-protected, self-scoped) ──
+	// - Notifications (session-protected, self-scoped) -
 	mux.Handle("GET /api/v1/users/{id}/notifications", server.Auth.Require(http.HandlerFunc(server.NotificationsIndex)))
 	mux.Handle("POST /api/v1/users/{id}/notifications/read-all", server.Auth.Require(http.HandlerFunc(server.NotificationsReadAll)))
 	mux.Handle("DELETE /api/v1/users/{id}/notifications", server.Auth.Require(http.HandlerFunc(server.NotificationsDeleteAll)))
@@ -131,7 +125,7 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("GET /api/v1/users/{id}/notification-prefs", server.Auth.Require(http.HandlerFunc(server.NotificationsGetPrefs)))
 	mux.Handle("PUT /api/v1/users/{id}/notification-prefs", server.Auth.Require(http.HandlerFunc(server.NotificationsSavePrefs)))
 
-	// ── Users ──
+	// - Users -
 	mux.Handle("GET /api/v1/users/search", server.Auth.Require(http.HandlerFunc(server.UsersSearch)))
 	mux.Handle("PUT /api/v1/users/{id}/profile", server.Auth.Require(http.HandlerFunc(server.UsersUpdateProfile)))
 	mux.HandleFunc("GET /api/v1/users/{id}/avatar", server.UsersServeAvatar) // public
@@ -143,7 +137,7 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("GET /api/v1/users/{id}/sync-state", server.Auth.Require(http.HandlerFunc(server.SyncState)))
 	mux.Handle("GET /api/v1/users/{id}/share-links", server.Auth.Require(http.HandlerFunc(server.UserShareLinksIndex)))
 
-	// ── Platform accounts (session-protected, self-scoped) ──
+	// - Platform accounts (session-protected, self-scoped) -
 	mux.Handle("GET /api/v1/users/{id}/platform-accounts", server.Auth.Require(http.HandlerFunc(server.PlatformAccountsIndex)))
 	mux.Handle("POST /api/v1/users/{id}/platform-accounts", server.Auth.Require(http.HandlerFunc(server.PlatformAccountsSave)))
 	mux.Handle("POST /api/v1/users/{id}/platform-accounts/validate", server.Auth.Require(http.HandlerFunc(server.PlatformAccountsValidate)))
@@ -151,7 +145,7 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("POST /api/v1/users/{id}/platform-accounts/sync-all", server.Auth.Require(http.HandlerFunc(server.PlatformAccountsSyncAll)))
 	mux.Handle("POST /api/v1/users/{id}/platform-accounts/{platform}/sync", server.Auth.Require(http.HandlerFunc(server.PlatformAccountsSyncOne)))
 
-	// ── Admin (admin rights required) ──
+	// - Admin (admin rights required) -
 	mux.Handle("GET /api/v1/admin/users", server.Auth.RequireAdmin(http.HandlerFunc(server.AdminList)))
 	mux.Handle("POST /api/v1/admin/users", server.Auth.RequireAdmin(http.HandlerFunc(server.AdminCreate)))
 	mux.Handle("PUT /api/v1/admin/users/{id}", server.Auth.RequireAdmin(http.HandlerFunc(server.AdminUpdate)))
@@ -171,21 +165,17 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("POST /api/v1/admin/queue/{platform}/resume", server.Auth.RequireAdmin(http.HandlerFunc(server.QueueResume)))
 	mux.Handle("GET /api/v1/settings/public", server.Auth.Require(http.HandlerFunc(server.GetPublicSettings)))
 
-	// ── Embedded SPA (catch-all; /api/* stays unaffected) ──
+	// - Embedded SPA (catch-all; /api/* stays unaffected) -
 	mux.Handle("/", webui.Handler())
 
 	return server.cors(mux)
 }
 
 // cors allows exactly one configured origin (APP_URL) to make credentialed
-// cross-origin calls, and answers OPTIONS preflights with 204.
-//
-// Without APP_URL no CORS headers are sent at all. The SPA is served from this
-// same origin, so it needs none; the earlier behaviour - reflecting whatever
-// Origin the request carried, together with Allow-Credentials: true - let any
-// website read authenticated API responses, and it was the default. SameSite
-// cookies happen to block that in current browsers, but CORS and cookie policy
-// are two separate lines of defence and the default must not disarm one of them.
+// cross-origin calls, and answers preflights with 204. Without APP_URL no CORS
+// headers are sent: the SPA is served from this same origin. The earlier default
+// reflected whatever Origin the request carried alongside Allow-Credentials,
+// which let any website read authenticated API responses.
 func (server *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		allowedOrigin := strings.TrimRight(server.Cfg.AppURL, "/")

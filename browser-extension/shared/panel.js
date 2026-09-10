@@ -1,27 +1,14 @@
 /**
- * The import panel and the notice it leaves behind.
- *
- * Everything the visitor sees while an import is running: the instructions, the
- * list of captured files, and the result once it has been sent. The panel is
- * deliberately the only place that talks to the background about arming and
- * disarming, so a half-torn-down panel cannot leave a listener behind.
+ * The import panel and the notice it leaves behind. It is the only place that
+ * arms and disarms the background, so a half-torn-down panel cannot leave a
+ * listener behind.
  */
 
-// ── The result notice ────────────────────────────────────────────────────────
+// - The result notice ----------------------------
 
 const TOAST_IDENTIFIER = 'meshdepot-import-toast'
 
-/**
- * Reports the outcome above the button and gets out of the way by itself.
- *
- * The panel used to stay open with the answer in it, waiting to be closed - so
- * importing a second design meant dismissing the first one's receipt first, for
- * no reason. The panel now closes when the sending is done and says what
- * happened here instead.
- *
- * A failure stays twice as long: it has something to read, and something to act
- * on.
- */
+/** A failure stays twice as long: it has something to read and something to act on. */
 function showToast(message, kind) {
   const existing = document.getElementById(TOAST_IDENTIFIER)
   if (existing) existing.remove()
@@ -46,12 +33,7 @@ function showToast(message, kind) {
 
 const PANEL_IDENTIFIER = 'meshdepot-import-panel'
 
-/**
- * How long to wait after the last captured download before sending.
- *
- * Long enough for a visitor to click the next plate, short enough that a single
- * file does not feel like it was forgotten.
- */
+/** Long enough to click the next plate, short enough not to feel forgotten. */
 const SEND_DELAY_MILLISECONDS = 3000
 
 /** How long a scheduled send waits for the design details before giving up. */
@@ -62,14 +44,9 @@ function removePanel() {
 }
 
 /**
- * Shuts the open panel down properly: timer stopped, listeners removed, the
- * background disarmed.
- *
- * Taking the panel out of the page is not enough, and that was the bug. An
- * import already scheduled kept its timer, its two capture listeners stayed
- * registered and the background stayed armed - so the invisible panel sent its
- * import a few seconds later, the visible one sent its own, and MeshDepot
- * received the same design twice.
+ * Taking the panel out of the page is not enough: a scheduled import kept its
+ * timer and its listeners, so the invisible panel sent its import a few seconds
+ * after the visible one had sent the same design.
  */
 let activePanelShutdown = null
 function closePanel() {
@@ -83,27 +60,8 @@ function closePanel() {
 }
 
 /**
- * The guided import.
- *
- * The visitor presses the site's own download button and the extension watches
- * what comes of it. That is deliberate rather than merely convenient: the
- * request is then part of a real click, with whatever headers, parameters and
- * captcha the site wants, and MakerWorld's rate limiting has nothing to object
- * to. Reconstructing the same call from the outside is what ran into 403 and
- * then 418.
- *
- * Two channels report a file, and both are needed. page.js reads the API
- * response, which knows which instance it belongs to; the background script sees
- * the download itself, which also catches the cases that never pass through
- * fetch. Duplicates are folded by URL.
- */
-/**
- * What was read off the page, in one line.
- *
- * Shown because a gap here is otherwise silent: a design that arrives without a
- * creator or with a one-line description looks like MeshDepot lost something,
- * when in fact the page never offered it. Named before the import rather than
- * discovered afterwards.
+ * What was read off the page, in one line. A design that arrives without a
+ * creator looks like MeshDepot lost something, when the page never offered it.
  */
 function describeMetadata(base) {
   const meta = base.meta || {}
@@ -127,7 +85,7 @@ function describeNextStep(current, base, alreadyFound) {
       : current.platform.label + ' listed no files for this design.'
   }
   // The count is only known when MakerWorld's API answered; without it the
-  // sentence simply does not promise a number.
+  // sentence does not promise a number.
   if (current.platform.key === 'makerworld' && typeof base.instance_count === 'number') {
     const plates = base.instance_count === 1 ? '1 file' : base.instance_count + ' files'
     return 'Now press "Download 3MF" on the page for the files you want (' + plates
@@ -200,8 +158,7 @@ function openPanel(current) {
     for (const file of captured.values()) {
       const row = document.createElement('div')
       // Said out loud when the local download could not be stopped: the file is
-      // then in the Downloads folder after all, and finding that out by accident
-      // later is worse than a word here.
+      // then in the Downloads folder after all.
       row.textContent = (file.cancelled === false ? '✓ ' : '✓ ') + file.name
         + (file.cancelled === false ? '  (also saved locally)' : '')
       row.style.cssText = 'color:' + (file.cancelled === false ? '#e0c169' : '#8fd694')
@@ -211,13 +168,9 @@ function openPanel(current) {
   }
 
   /**
-   * Records one captured file.
-   *
-   * Both channels report the same download, so entries are folded by URL. Which
-   * name survives is not arbitrary: the API channel fires first but only knows
-   * the instance number, while the download itself carries the name MakerWorld
-   * actually gave the file. That one wins whenever it arrives, because it is the
-   * name the file will keep in the library.
+   * Both channels report the same download, folded by URL. The API channel fires
+   * first but only knows the instance number, so the download's own name wins
+   * whenever it arrives - that is the name the file keeps in the library.
    */
   const note = (url, name, authoritative, cancelled) => {
     if (!url) return
@@ -226,8 +179,8 @@ function openPanel(current) {
     captured.set(url, {
       name: name || 'file.3mf', url: url,
       authoritative: !!authoritative,
-      // Only meaningful from the download channel; the API channel never starts
-      // one, so undefined there means "nothing to cancel", not "failed".
+      // Only meaningful from the download channel; undefined means "nothing to
+      // cancel", not "failed".
       cancelled: cancelled,
     })
     redrawList()
@@ -235,11 +188,9 @@ function openPanel(current) {
   }
 
   /**
-   * Takes the download links the page is already showing.
-   *
-   * Where a platform offers them - Thingiverse does, one per file - there is
-   * nothing to press: the links go straight to the server, no download runs in
-   * the browser, and nothing can be built into a blob nobody can read.
+   * Where a platform lists its download links - Thingiverse does - there is
+   * nothing to press: the links go straight to the server and no download runs
+   * in the browser.
    */
   async function collectExtras(design) {
     if (typeof design.platform.fetchExtras !== 'function') return 0
@@ -247,10 +198,8 @@ function openPanel(current) {
 
     for (const file of extras.files || []) note(file.url, file.name || 'file', false)
 
-    // What the platform states beats what the page shows, field by field, and
-    // only where it actually says something. The page's author tag names the
-    // site itself and its Open Graph picture is the site's house image - both
-    // look like answers and are not.
+    // What the platform states beats what the page shows: the page's author tag
+    // names the site itself and its Open Graph picture is the site's house image.
     if (payloadBase && extras.meta) {
       for (const field of ['name', 'author', 'description', 'license']) {
         const value = extras.meta[field]
@@ -300,19 +249,12 @@ function openPanel(current) {
   })
 
   /**
-   * Sends everything captured so far, once the clicking has stopped.
-   *
-   * There is no send button: a download is the visitor saying they want this
-   * file, and asking them to confirm it again is a click for nothing. The short
-   * delay is what makes that safe - a model with five plates is five downloads
-   * in a row, and each one restarts the timer, so they arrive as one import
-   * rather than as one design and four duplicates.
+   * There is no send button: a download is the visitor saying they want the file.
+   * Each one restarts the timer, so five plates arrive as one import rather than
+   * as one design and four duplicates.
    */
   let sendTimer = null
   let sent = false
-  // Set when reading the design failed, so a scheduled send stops waiting for
-  // something that is never coming. The reason is kept with it: a generic
-  // "could not be read" replaced the actual message and hid what went wrong.
   let metadataFailed = false
   let metadataFailure = ''
   let waitingSince = Date.now()
@@ -320,9 +262,6 @@ function openPanel(current) {
   const scheduleSend = () => {
     if (sent) return
     if (sendTimer !== null) window.clearTimeout(sendTimer)
-    // No count in the wording. The list below names every file as it arrives,
-    // which is accurate; a number here was only ever a guess at how many more
-    // are still coming.
     instruction.style.color = '#c8cfd8'
     instruction.textContent = 'Sending shortly - download another file to include it.'
     sendTimer = window.setTimeout(send, SEND_DELAY_MILLISECONDS)
@@ -330,13 +269,9 @@ function openPanel(current) {
 
   async function send() {
     if (sent || captured.size === 0) return
-    // The metadata call may still be in flight on a slow connection; without it
-    // the design would arrive nameless. Bounded, though: when reading the design
-    // fails outright the wait would otherwise never end, and the panel sat on
-    // "Waiting for the design details…" for as long as it was left open.
+    // The metadata call may still be in flight, and without it the design would
+    // arrive nameless. Bounded, or a failed read leaves the panel waiting forever.
     if (payloadBase === null) {
-      // Reading falls back to the page and should always yield something, so
-      // this is a net rather than an expected path.
       if (metadataFailed) {
         instruction.style.color = '#f08a8a'
         instruction.textContent = 'Nothing was sent - the design could not be read: ' + metadataFailure
@@ -376,18 +311,14 @@ function openPanel(current) {
       message = 'Failed: ' + failure.message
     }
 
-    // Panel first, notice second: the button underneath is free again at once,
-    // so a second design can be imported without dismissing the first receipt.
+    // Panel first, notice second, so the button underneath is free again at once.
     closePanel()
     showToast(message, kind)
   }
 
   /**
-   * Everything the import does, once it has been asked for.
-   *
-   * Nothing above this line touches the page beyond drawing the panel: the
-   * button is easy to hit by accident on a page full of controls, and until this
-   * runs no request has gone out, nothing is armed and no design is read.
+   * Nothing above this line touches the page beyond drawing the panel: until
+   * this runs no request has gone out, nothing is armed and no design is read.
    */
   function beginImport() {
     startButton.remove()
@@ -407,9 +338,8 @@ function openPanel(current) {
           return
         }
         instruction.textContent = 'Asking ' + current.platform.label + ' for the file list…'
-        // Caught here rather than falling through to the metadata handler below:
-        // the design was read perfectly well, it is the file list that failed, and
-        // saying otherwise sends someone looking in the wrong place.
+        // Caught here rather than by the metadata handler below: the design was
+        // read perfectly well, it is the file list that failed.
         return collectExtras(current).then(count => {
           instruction.textContent = describeNextStep(current, base, count)
           metaLine.textContent = describeMetadata(payloadBase)
@@ -427,8 +357,8 @@ function openPanel(current) {
       })
   }
 
-  // The question, and nothing else has happened yet. The button sits on a page
-  // full of the site's own controls and is easy to hit by accident.
+  // The question first: the button sits on a page full of the site's own
+  // controls and is easy to hit by accident.
   const designName = currentDesignName()
   instruction.textContent = designName
     ? 'Import "' + designName + '" into MeshDepot?'

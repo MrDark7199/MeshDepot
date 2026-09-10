@@ -15,8 +15,7 @@ import (
 	"meshdepot/internal/coerce"
 )
 
-// uploadImages posts several files in the "image" field at once, which is what
-// the gallery form does.
+// uploadImages posts several files in the "image" field at once, as the form does.
 func (testHarness *harness) uploadImages(designID int, files ...[]byte) response {
 	testHarness.t.Helper()
 	buffer := &bytes.Buffer{}
@@ -42,8 +41,7 @@ func (testHarness *harness) uploadImages(designID int, files ...[]byte) response
 	})
 }
 
-// gifBytes carries the GIF signature, which http.DetectContentType recognises
-// just like the PNG one.
+// gifBytes carries the GIF signature, which http.DetectContentType recognises.
 var gifBytes = append([]byte("GIF89a"), bytes.Repeat([]byte{0}, 600)...)
 
 func TestImagesUploadStoresTheFiles(t *testing.T) {
@@ -72,8 +70,6 @@ func TestImagesUploadStoresTheFiles(t *testing.T) {
 	}
 }
 
-// The sort order continues where the existing images left off, so a later
-// upload does not push itself to the front of the gallery.
 func TestImagesUploadContinuesTheSortOrder(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit Galerie")
@@ -87,8 +83,6 @@ func TestImagesUploadContinuesTheSortOrder(t *testing.T) {
 	}
 }
 
-// A design without a cover gets one from the first uploaded image, otherwise
-// the card overview keeps showing a placeholder.
 func TestImagesUploadSetsTheFirstImageAsCover(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Ohne Titelbild")
@@ -123,8 +117,6 @@ func TestImagesUploadKeepsAnExistingCover(t *testing.T) {
 	}
 }
 
-// A file whose bytes are not an image is skipped; the rest of the upload still
-// goes through.
 func TestImagesUploadSkipsFilesThatAreNotImages(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit Galerie")
@@ -246,8 +238,7 @@ func TestImagesDeleteRemovesRowAndFile(t *testing.T) {
 	}
 }
 
-// Deleting the cover has to hand the role to the next image - otherwise the
-// design points at a file that no longer exists.
+// Deleting the cover hands the role on, or the design points at a missing file.
 func TestImagesDeletePassesTheCoverOn(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit Galerie")
@@ -265,8 +256,6 @@ func TestImagesDeletePassesTheCoverOn(t *testing.T) {
 	}
 }
 
-// The last image leaves the design without a cover rather than with a dangling
-// path.
 func TestImagesDeleteClearsTheCoverWithTheLastImage(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit Galerie")
@@ -280,7 +269,6 @@ func TestImagesDeleteClearsTheCoverWithTheLastImage(t *testing.T) {
 	}
 }
 
-// Deleting an image that is not the cover leaves the cover alone.
 func TestImagesDeleteKeepsAnUnrelatedCover(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit Galerie")

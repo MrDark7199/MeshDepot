@@ -1,9 +1,8 @@
 package platforms
 
-// Printables downloader. Fetches models via the GraphQL API; needs a Prusa
-// bearer token which, when required, is obtained via the OAuth2 authorization-
-// code flow with PKCE (autoLogin, pure HTTP flow without a browser). Model files
-// are loaded via Tor.
+// Printables downloader. Models come from the GraphQL API, which needs a Prusa
+// bearer token obtained through the OAuth2 authorization-code flow with PKCE
+// (autoLogin, pure HTTP). The files themselves are loaded via Tor.
 
 import (
 	"bytes"
@@ -23,13 +22,11 @@ import (
 	"time"
 )
 
-// printablesGraphQL is the GraphQL endpoint.
 const printablesGraphQL = "https://api.printables.com/graphql/"
 
-// graphQL runs a Printables GraphQL request: first directly; if the direct
-// connection yields no usable response (rate limit/block on the server IP,
-// HTTP≠200 or no "data" field), it retries via Tor with a route change. This way
-// a temporary block does not abort the download/sync.
+// graphQL tries directly first and retries via Tor with a route change when the
+// answer is unusable - a rate limit on the server IP, a non-200, or no "data"
+// field - so a temporary block does not abort the download.
 func (printables Printables) graphQL(body string, headers map[string]string) []byte {
 	response, status := directPost(printablesGraphQL, body, headers)
 	if status == 200 && bytes.Contains(response, []byte(`"data"`)) {
@@ -45,10 +42,8 @@ func (printables Printables) graphQL(body string, headers map[string]string) []b
 	return response
 }
 
-// printablesUserAgent is the browser user agent for the login/API flow.
 const printablesUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-// printablesClientID is the public OAuth client ID of the Printables web app.
 const printablesClientID = "EK15sodB6SmoUXmOshtCBS4PA3Bkvwgwnb8Ux5Mj"
 
 var (
@@ -57,10 +52,8 @@ var (
 	csrfPattern2             = regexp.MustCompile(`(?i)value="([^"]+)"\s+name="csrfmiddlewaretoken"`)
 )
 
-// Printables implements Downloader for printables.com.
 type Printables struct{ Deps }
 
-// Download loads a Printables model via the GraphQL API.
 func (printables Printables) Download(sourceURL string, owner Owner, progress func(step, label string, current, total int)) (Result, error) {
 	// The numeric id is only for credentials; every path comes from owner.Layout.
 	userID := owner.ID
@@ -86,7 +79,7 @@ func (printables Printables) Download(sourceURL string, owner Owner, progress fu
 		baseHeaders["Authorization"] = "Bearer " + bearer
 	}
 
-	// ── Step 1: metadata + STL file list ───────────────────────────────────────
+	// - Step 1: metadata + STL file list --------------------
 	progress("fetching_metadata", "", 0, 0)
 	metaQuery := fmt.Sprintf("{ print(id: %s) { name description user { publicUsername } images { filePath } tags { name } stls { id name fileSize folder } } }", modelID)
 	metaBody, _ := json.Marshal(map[string]string{"query": metaQuery})
@@ -115,9 +108,8 @@ func (printables Printables) Download(sourceURL string, owner Owner, progress fu
 		Errors json.RawMessage `json:"errors"`
 	}
 	_ = json.Unmarshal(rawResp, &meta)
-	// Printables often revokes access tokens earlier than their JWT `exp` claim
-	// states → the response is then a 401 "token_is_expired" without data. In that
-	// case obtain a fresh token forcibly and fetch the metadata once more.
+	// Printables often revokes access tokens earlier than their JWT exp claim says,
+	// answering 401 without data. Fetch a fresh token and try once more.
 	if meta.Data.Print == nil && bearer != "" {
 		if newToken := printables.Deps.forceLogin(userID, "printables"); newToken != "" {
 			bearer = newToken
@@ -154,7 +146,7 @@ func (printables Printables) Download(sourceURL string, owner Owner, progress fu
 		return Result{}, failure
 	}
 
-	// ── Step 2: per file a getDownloadLink mutation, then download via Tor ──────
+	// - Step 2: per file a getDownloadLink mutation, then download via Tor ---
 	downloadHeaders := map[string]string{
 		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 		"Referer":    "https://www.printables.com/model/" + modelID,
@@ -209,7 +201,7 @@ func (printables Printables) Download(sourceURL string, owner Owner, progress fu
 		}
 		tempPath := filepath.Join(subDirectory, safeName)
 
-		// CDN blocks direct IPs - up to 3× via Tor with a route change.
+		// The CDN blocks direct IPs - up to three times via Tor with a route change.
 		stored := false
 		for attempt := 1; attempt <= 3; attempt++ {
 			if printables.torDownloadFileTo(downloadURL, tempPath, downloadHeaders) {
@@ -232,7 +224,7 @@ func (printables Printables) Download(sourceURL string, owner Owner, progress fu
 			"The model may be private/paid (login required), have no downloadable STL files, or the API has changed. %s", modelID, message)
 	}
 
-	// ── Step 3: images ──────────────────────────────────────────────────────────
+	// - Step 3: images -----------------------------
 	var imageURLs []string
 	for _, image := range print.Images {
 		if image.FilePath != "" {
@@ -258,24 +250,19 @@ func (printables Printables) Download(sourceURL string, owner Owner, progress fu
 	}, nil
 }
 
-// Validate checks email/password via Prusa OAuth login.
 func (printables Printables) Validate(credentials Credentials) bool {
 	return credentials.Email != "" && credentials.Password != "" && autoLoginPrintables(credentials.Email, credentials.Password) != ""
 }
 
-// resolveToken returns a valid bearer token: stored (decrypted) or, if
-// missing/expired and credentials are stored, a freshly obtained one via
-// autoLogin (which is then persisted encrypted).
-//
-// Besides the stored expiry, resolveToken also honours the JWT `exp` claim -
-// Printables revokes access tokens noticeably earlier than the 28 days.
+// resolveToken returns the stored token while it is valid, otherwise one from
+// autoLogin, persisted encrypted. Besides the stored expiry it honours the JWT
+// exp claim, since Printables revokes tokens well before the 28 days.
 func (printables Printables) resolveToken(userID int, progress func(string, string, int, int)) string {
 	token, _ := printables.Deps.resolveToken(userID, "printables", progress)
 	return token
 }
 
-// autoLoginPrintables obtains a bearer token via the Prusa OAuth2
-// authorization-code flow with PKCE.
+// autoLoginPrintables runs the Prusa OAuth2 flow with PKCE.
 func autoLoginPrintables(email, password string) string {
 	state := randHex(6)
 	verifier := base64URL(randBytes(32))
@@ -290,7 +277,7 @@ func autoLoginPrintables(email, password string) string {
 
 	client := noRedirectClient()
 
-	// Step 1: fetch the login page → CSRF token + cookies.
+	// Step 1: the login page, for the CSRF token and cookies.
 	status1, header1, body1 := rawRequest(client, http.MethodGet, loginURL, "", map[string]string{
 		"User-Agent": printablesUserAgent, "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9",
 	})
@@ -308,7 +295,7 @@ func autoLoginPrintables(email, password string) string {
 		return ""
 	}
 
-	// Step 2: post credentials (do not follow the redirect, 302 expected).
+	// Step 2: post the credentials without following the redirect.
 	form := url.Values{
 		"csrfmiddlewaretoken": {csrfToken},
 		"next":                {next},
@@ -365,14 +352,12 @@ func autoLoginPrintables(email, password string) string {
 	return tokenResponse.AccessToken
 }
 
-// relativeNamePattern matches the characters that are stripped from file and
-// folder names.
+// relativeNamePattern matches what is stripped from file and folder names.
 var relativeNamePattern = regexp.MustCompile(`[^\w\-./() ]`)
 
-// sanitizeRelName cleans a file or folder name coming from the platform API.
-// Besides the character filter it drops empty, "." and ".." path segments, so a
-// crafted name/folder (e.g. "../../etc") cannot escape the download directory
-// via filepath.Join. Returns "" when nothing safe remains.
+// sanitizeRelName cleans a name from the platform API and drops empty, "." and
+// ".." segments, so a crafted name cannot escape the download directory through
+// filepath.Join. "" when nothing safe remains.
 func sanitizeRelName(value string) string {
 	value = strings.ReplaceAll(value, "\\", "/")
 	var parts []string
@@ -385,7 +370,6 @@ func sanitizeRelName(value string) string {
 	return strings.Join(parts, "/")
 }
 
-// noRedirectClient returns an HTTP client that does NOT follow redirects.
 func noRedirectClient() *http.Client {
 	return &http.Client{
 		Timeout:       25 * time.Second,
@@ -393,8 +377,7 @@ func noRedirectClient() *http.Client {
 	}
 }
 
-// rawRequest performs a single request without following redirects and returns
-// status, response headers and body.
+// rawRequest performs one request without following redirects.
 func rawRequest(client *http.Client, method, rawURL, body string, headers map[string]string) (int, http.Header, []byte) {
 	var reader *strings.Reader
 	if body != "" {
@@ -418,8 +401,8 @@ func rawRequest(client *http.Client, method, rawURL, body string, headers map[st
 	return response.StatusCode, response.Header, output
 }
 
-// collectCookies appends the name=value pairs of the Set-Cookie headers to the
-// list (order preserved, exact duplicates removed).
+// collectCookies appends the name=value pairs, preserving order and dropping
+// exact duplicates.
 func collectCookies(existing []string, header http.Header) []string {
 	seen := map[string]bool{}
 	output := make([]string, 0, len(existing))
@@ -443,7 +426,6 @@ func collectCookies(existing []string, header http.Header) []string {
 	return output
 }
 
-// absLocation makes a relative Location URL absolute (Prusa account host).
 func absLocation(location string) string {
 	location = strings.TrimSpace(location)
 	if location != "" && !strings.HasPrefix(location, "http") {
@@ -452,7 +434,6 @@ func absLocation(location string) string {
 	return location
 }
 
-// tokenExpired checks whether a stored expiry timestamp lies in the past.
 func tokenExpired(timestamp string) bool {
 	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339, "2006-01-02T15:04:05"} {
 		if parsed, failure := time.Parse(layout, timestamp); failure == nil {

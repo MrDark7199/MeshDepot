@@ -1,12 +1,11 @@
-// Package pwmx reads Anycubic Photon Workshop files (.pwmx and other resin
+// Package pwmx reads Anycubic Photon Workshop files (.pwmx and the related resin
 // formats).
 //
-// These formats contain NO 3D geometry, but a stack of 2D exposure images (a
-// black-and-white cross section per layer, RLE-compressed) plus an embedded
-// preview PNG. A 3D view is therefore reconstructed from the layer stack (see
-// internal/pwmx/mesh.go).
+// They contain no 3D geometry, but a stack of RLE-compressed 2D exposure images
+// plus an embedded preview PNG, so the 3D view is reconstructed from the layer
+// stack (see mesh.go).
 //
-// Format layout (empirically from a real Photon-Mono-X file, version 1):
+// Format layout, read off a real Photon-Mono-X file, version 1:
 //
 //	FileMark:  "ANYCUBIC\0\0\0\0" (12B) | version u32 | areaNum u32 |
 //	           then a u32 address per section, each padded to 8B
@@ -18,8 +17,8 @@
 //	LAYERDEF:  layerCount u32, then layerCount × 32B record
 //	           (dataAddress u32, dataLength u32, liftHeight f32, liftSpeed f32,
 //	            exposure f32, layerHeight f32, _ , _)
-//	Layer-RLE: sequence of big-endian u16; Bits[15:12] = grayscale (0..15, ×17 → 0..255),
-//	           Bits[11:0] = run length in pixels. Sum of runs = resX × resY.
+//	Layer-RLE: big-endian u16; Bits[15:12] = grayscale (0..15, ×17 → 0..255),
+//	           Bits[11:0] = run length. Sum of runs = resX × resY.
 package pwmx
 
 import (
@@ -28,7 +27,6 @@ import (
 	"math"
 )
 
-// Header holds the print parameters relevant for display/reconstruction.
 type Header struct {
 	PixelSizeUm    float32
 	LayerHeight    float32
@@ -47,7 +45,6 @@ type Header struct {
 	Price          float32
 }
 
-// LayerDef describes a layer (position of the RLE data + exposure).
 type LayerDef struct {
 	DataAddress  uint32
 	DataLength   uint32
@@ -57,14 +54,12 @@ type LayerDef struct {
 	LayerHeight  float32
 }
 
-// Preview is the embedded preview image (RGB565).
 type Preview struct {
 	Width  uint32
 	Height uint32
 	Data   []byte // RGB565, little-endian, Width*Height*2 bytes
 }
 
-// File is a parsed pwmx file. raw holds the full data for layer access.
 type File struct {
 	Version uint32
 	Header  Header
@@ -75,8 +70,8 @@ type File struct {
 
 const fileMark = "ANYCUBIC"
 
-// Parse reads FileMark, HEADER, PREVIEW and LAYERDEF. The layer RLE data stays in
-// the raw buffer and is only decoded on DecodeLayer (saves memory/time).
+// Parse reads FileMark, HEADER, PREVIEW and LAYERDEF. The layer RLE stays in the
+// raw buffer and is only decoded by DecodeLayer.
 func Parse(data []byte) (*File, error) {
 	if len(data) < 0x30 || string(data[:len(fileMark)]) != fileMark {
 		return nil, fmt.Errorf("pwmx: no ANYCUBIC file mark")
@@ -102,14 +97,10 @@ func Parse(data []byte) (*File, error) {
 	return file, nil
 }
 
-// ParseHeader reads the FileMark and the HEADER section only, so a prefix of the
-// file is enough. Reading the print settings must not force a multi-hundred-MB
-// layer stack into memory, which full Parse would (it keeps the whole buffer for
-// DecodeLayer).
-//
-// The layout is shared by the whole Photon Workshop family (.pwmx, .pwmo, .pws,
-// …) - only the layer RLE encoding differs between them, and that is not read
-// here.
+// ParseHeader reads the FileMark and HEADER only, so a prefix of the file is
+// enough: reading the print settings must not force a multi-hundred-MB layer stack
+// into memory, which full Parse would. The layout is shared by the whole Photon
+// Workshop family - only the layer encoding differs, and that is not read here.
 func ParseHeader(data []byte) (*Header, error) {
 	if len(data) < 0x30 || string(data[:len(fileMark)]) != fileMark {
 		return nil, fmt.Errorf("pwmx: no ANYCUBIC file mark")
@@ -121,8 +112,7 @@ func ParseHeader(data []byte) (*Header, error) {
 	return &file.Header, nil
 }
 
-// sectionBody checks the tag and returns the offset+length of the section body.
-// Section header: tag[8] | reserved u32 | tableLength u32.
+// sectionBody checks the tag and returns the body's offset and length.
 func (file *File) sectionBody(address int, tag string) (bodyOffset, bodyLength int, failure error) {
 	if address < 0 || address+16 > len(file.raw) {
 		return 0, 0, fmt.Errorf("pwmx: section %q outside the file", tag)
@@ -162,8 +152,7 @@ func (file *File) parseHeader(address int) error {
 	header.ResolutionX = le32(file.raw, body+0x2C)
 	header.ResolutionY = le32(file.raw, body+0x30)
 	header.WeightG = f32(file.raw, body+0x34)
-	// Price only exists in the longer HEADER tables of later Photon Workshop
-	// versions; older files end right after the weight.
+	// Price exists only in the longer HEADER tables of later versions.
 	if length >= 0x3C {
 		header.Price = f32(file.raw, body+0x38)
 	}
@@ -213,8 +202,8 @@ func (file *File) parseLayerDef(address int) error {
 	return nil
 }
 
-// DecodeLayer decodes the RLE of a layer into a grayscale image (resX*resY
-// bytes, 0=black/empty, 255=white/exposed, row-wise top-left).
+// DecodeLayer returns resX*resY bytes, 0=empty, 255=exposed, row-wise from the
+// top left.
 func (file *File) DecodeLayer(index int) ([]uint8, error) {
 	if index < 0 || index >= len(file.Layers) {
 		return nil, fmt.Errorf("pwmx: layer %d out of range [0,%d)", index, len(file.Layers))

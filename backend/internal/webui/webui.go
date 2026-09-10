@@ -1,5 +1,5 @@
-// Package webui serves the go:embed-embedded Solid.js SPA (frontend/dist)
-// including the history-mode fallback to index.html.
+// Package webui serves the embedded Solid.js SPA including the history-mode
+// fallback to index.html.
 package webui
 
 import (
@@ -12,9 +12,8 @@ import (
 //go:embed all:dist
 var distFS embed.FS
 
-// Handler serves the embedded SPA: existing files directly (with matching cache
-// headers), otherwise index.html (SPA routing). /api/* is not handled (returns
-// 404) so unknown API paths do not serve the SPA.
+// Handler serves existing files directly and index.html otherwise. /api/* is left
+// alone, so an unknown API path does not serve the SPA.
 func Handler() http.Handler {
 	sub, failure := fs.Sub(distFS, "dist")
 	if failure != nil {
@@ -49,22 +48,17 @@ func Handler() http.Handler {
 	})
 }
 
-// setSecurityHeaders sends the policy the SPA runs under.
+// setSecurityHeaders sends the policy the SPA runs under. The app serves images
+// fetched from third-party platforms on its own origin, so the CSP is the backstop
+// against a sloppy render running foreign script here.
 //
-// The app stores images fetched from third-party platforms and serves them from
-// its own origin, so a single sloppy render is enough to run foreign script here.
-// The CSP is the backstop for that. Deliberate choices:
-//
-//   - script-src 'self': the Vite bundle is the only script; no inline handlers,
-//     no CDN. 'wasm-unsafe-eval' is there for Babylon's WASM decoders (draco,
-//     basis) - it permits WebAssembly, not eval().
-//   - style-src allows 'unsafe-inline' because the UI uses style={{…}} attributes
-//     throughout and Babylon injects styles at runtime. Inline style is not a
-//     script-execution vector; tightening it would mean rewriting the frontend.
-//   - img-src data: for the G-code plate thumbnails decoded in the browser,
-//     blob: for canvas snapshots.
-//   - frame-ancestors 'none' replaces X-Frame-Options for modern browsers; the
-//     old header is still sent for the ones that ignore CSP.
+//   - script-src 'self': the Vite bundle is the only script. 'wasm-unsafe-eval'
+//     is for Babylon's WASM decoders - it permits WebAssembly, not eval().
+//   - style-src allows 'unsafe-inline': the UI uses style={{…}} throughout and
+//     Babylon injects styles at runtime. Inline style is not a script vector.
+//   - img-src data: for G-code plate thumbnails, blob: for canvas snapshots.
+//   - frame-ancestors 'none' replaces X-Frame-Options; the old header is still
+//     sent for browsers that ignore CSP.
 func setSecurityHeaders(responseWriter http.ResponseWriter) {
 	header := responseWriter.Header()
 	header.Set("Content-Security-Policy", strings.Join([]string{
@@ -85,7 +79,7 @@ func setSecurityHeaders(responseWriter http.ResponseWriter) {
 	header.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 }
 
-// setCache sets cache headers per asset type (HTML/JS/CSS never, fonts/images 7 days).
+// setCache: HTML, JS and CSS never, fonts and images seven days.
 func setCache(responseWriter http.ResponseWriter, path string) {
 	switch {
 	case strings.HasSuffix(path, ".html"), strings.HasSuffix(path, ".js"), strings.HasSuffix(path, ".css"):
@@ -96,7 +90,6 @@ func setCache(responseWriter http.ResponseWriter, path string) {
 	}
 }
 
-// mustRead reads a file from the embedded FS (for index.html).
 func mustRead(fsys fs.FS, name string) []byte {
 	data, failure := fs.ReadFile(fsys, name)
 	if failure != nil {

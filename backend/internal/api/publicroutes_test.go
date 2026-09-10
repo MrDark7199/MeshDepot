@@ -9,8 +9,7 @@ import (
 	"testing"
 )
 
-// selfScopedRoutes are the routes whose {id} is the addressed account. They all
-// go through requireSelf, so one table covers the lot.
+// selfScopedRoutes all go through requireSelf, so one table covers the lot.
 func selfScopedRoutes(id string) []struct{ method, path string } {
 	return []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/users/" + id + "/notifications"},
@@ -28,8 +27,8 @@ func selfScopedRoutes(id string) []struct{ method, path string } {
 	}
 }
 
-// The numeric id is what the routes used to take. It must not address an
-// account any more, or the change bought nothing.
+// The numeric id must not address an account any more, or the change bought
+// nothing.
 func TestSelfScopedRoutesRejectTheNumericID(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -53,8 +52,6 @@ func TestSelfScopedRoutesRejectAForeignPublicID(t *testing.T) {
 	}
 }
 
-// The own id has to keep working - a 404 everywhere would pass the two tests
-// above without the routes being usable at all.
 func TestSelfScopedRoutesAcceptTheOwnPublicID(t *testing.T) {
 	testHarness := newHarness(t)
 	own := testHarness.publicID(testHarness.userID)
@@ -97,8 +94,8 @@ func TestAdminRoutesAddressUsersByPublicID(t *testing.T) {
 	}
 }
 
-// The avatar endpoint is public, which is what made the numeric id walkable
-// from outside without any session at all.
+// The avatar endpoint is public, which is what made the numeric id walkable from
+// outside without any session.
 func TestAvatarIsServedByPublicIDOnly(t *testing.T) {
 	testHarness := newHarness(t)
 	own := testHarness.publicID(testHarness.userID)
@@ -113,12 +110,10 @@ func TestAvatarIsServedByPublicIDOnly(t *testing.T) {
 	}
 }
 
-// hexID matches the shape of a public id.
 var hexID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-// The routes only address accounts opaquely if the bodies stop handing the
-// numeric id out. SELECT * and SELECT d.* carry user_id along by construction,
-// so this walks whole responses rather than trusting the queries.
+// SELECT * carries user_id along by construction, so this walks whole responses
+// rather than trusting the queries.
 func TestResponsesNeverCarryANumericUserID(t *testing.T) {
 	testHarness := newHarness(t)
 	own := testHarness.publicID(testHarness.userID)
@@ -154,8 +149,8 @@ func TestResponsesNeverCarryANumericUserID(t *testing.T) {
 	}
 }
 
-// assertNoInternalIDs walks a decoded body and reports every internal key and
-// every user id that arrived as a number.
+// assertNoInternalIDs reports every internal key and every user id that arrived
+// as a number.
 func assertNoInternalIDs(t *testing.T, endpoint, body string) {
 	t.Helper()
 	var decoded any
@@ -175,9 +170,7 @@ func assertNoInternalIDs(t *testing.T, endpoint, body string) {
 						t.Errorf("%s carries %s at %s", endpoint, key, path)
 					}
 				}
-				// A user object is the one carrying an email key next to a name -
-				// designs and collections have a name but never an email. Its id has
-				// to be the public one.
+				// A user object carries an email next to a name; designs and collections do not.
 				_, hasEmail := typed["email"]
 				_, hasName := typed["name"]
 				if key == "id" && hasEmail && hasName {
@@ -199,9 +192,8 @@ func assertNoInternalIDs(t *testing.T, endpoint, body string) {
 	}
 }
 
-// The blocking modal only covers the screen; the session stays valid. Anyone
-// closing it - or skipping the UI - could keep using the API with the seeded
-// admin/admin credentials, so the middleware has to hold the door.
+// The blocking modal only covers the screen and the session stays valid, so
+// anyone closing it could keep using the API with admin/admin.
 func TestAForcedPasswordChangeBlocksEverythingElse(t *testing.T) {
 	testHarness := newHarness(t)
 	own := testHarness.publicID(testHarness.userID)
@@ -231,8 +223,8 @@ func TestAForcedPasswordChangeBlocksEverythingElse(t *testing.T) {
 	if answer.status != http.StatusOK {
 		t.Fatalf("setting the password answered %d: %s", answer.status, answer.rawBody)
 	}
-	// Setting a password rotates the session; follow the new cookie the way a
-	// browser does, or the next call looks like a logout.
+	// Setting a password rotates the session; follow the new cookie as a browser
+	// does, or the next call looks like a logout.
 	if rotated := answer.sessionCookie(); rotated != "" {
 		testHarness.userToken = rotated
 	}
@@ -241,9 +233,8 @@ func TestAForcedPasswordChangeBlocksEverythingElse(t *testing.T) {
 	}
 }
 
-// A wrong current password is a form error, not a dead session. As a 401 it
-// tripped the frontend's global logout, so a typo threw the user out and looked
-// like the change had gone through.
+// A wrong current password is a form error, not a dead session: as a 401 it
+// tripped the frontend's global logout.
 func TestAWrongCurrentPasswordIsNotAnAuthenticationFailure(t *testing.T) {
 	testHarness := newHarness(t)
 	own := testHarness.publicID(testHarness.userID)
@@ -266,10 +257,8 @@ func TestAWrongCurrentPasswordIsNotAnAuthenticationFailure(t *testing.T) {
 	}
 }
 
-// Changing a password must not throw the user off the device they are sitting
-// at. The session is replaced rather than merely kept: every other session of
-// the account dies with the old password, and the current one continues on a
-// fresh id that comes back with the response.
+// The session is replaced rather than kept: every other session dies with the old
+// password, and this one continues on a fresh id from the response.
 func TestChangingThePasswordKeepsTheCurrentSessionAlive(t *testing.T) {
 	testHarness := newHarness(t)
 	own := testHarness.publicID(testHarness.userID)
@@ -289,8 +278,7 @@ func TestChangingThePasswordKeepsTheCurrentSessionAlive(t *testing.T) {
 	if current.status != http.StatusOK {
 		t.Fatalf("the current device answered %d after the change", current.status)
 	}
-	// The other device held a session that was established with the old
-	// password; it has to be gone.
+	// The other device's session was established with the old password.
 	other := testHarness.do(request{method: http.MethodGet, path: "/api/v1/designs", token: otherDevice})
 	if other.status != http.StatusUnauthorized {
 		t.Fatalf("a session from before the change still answers %d", other.status)

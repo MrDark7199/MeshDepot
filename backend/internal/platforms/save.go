@@ -22,11 +22,10 @@ import (
 	"meshdepot/internal/storage"
 )
 
-// unsafeChars matches the characters that are stripped from a relative path.
 var unsafeChars = regexp.MustCompile(`[^\w\-./() ]`)
 
 // nullIfEmpty stores an empty string as SQL NULL, so a file without print
-// settings is distinguishable from one whose settings are an empty object.
+// settings is distinguishable from one whose settings are empty.
 func nullIfEmpty(value string) any {
 	if value == "" {
 		return nil
@@ -34,48 +33,51 @@ func nullIfEmpty(value string) any {
 	return value
 }
 
-// storedEntry is a finally stored file.
 type storedEntry struct {
 	filename, path, relativePath string
 	// blobHash addresses the stored bytes; contentHash identifies what the file
-	// holds and is what a later sync compares against. They differ for an
-	// archive that gets rebuilt on every download - see ContentHash.
+	// holds and is what a later sync compares against. They differ for an archive
+	// that gets rebuilt on every download - see ContentHash.
 	blobHash, contentHash string
 	size                  int64
 }
 
-// SaveDownload writes a download result into the library: design row, files
-// under {root}/{uid}/stl/{designId}/1.0, design_files/-entries, tags and images.
-// Returns the design_id.
+// SaveDownload writes a download result into the library and returns the
+// design_id: the design row, the files under {root}/{uid}/stl/{designId}/1.0,
+// the design_files entries, tags and images.
 func SaveDownload(db *sql.DB, owner Owner, platform, sourceURL string, result Result) (int, error) {
-	// The cover is only published once the design id exists (it decides the
-	// directory), so the INSERT below leaves the column NULL and publishCover
-	// fills it in afterwards.
+	// The cover is only published once the design id exists, since it decides the
+	// directory; publishCover fills the column in afterwards.
 	var coverPath any
 
-	// Everything below is one transaction. Without it a failure after the designs
-	// INSERT (no usable file, path filter, DB error) left the row behind, and since
-	// both DownloadQueue and queueIfNew deduplicate on designs.source_url, that URL
-	// was permanently unqueueable: "design already exists" for a design with no files.
+	// One transaction. Without it a failure after the designs INSERT left the row
+	// behind, and since deduplication runs on designs.source_url that URL was
+	// permanently unqueueable: "design already exists" for a design with no files.
 	//
-	// NOTE: db.Open sets SetMaxOpenConns(1). While tx is open, no call may go
-	// through db - only through tx - or the second call waits for the only
-	// connection and deadlocks. Hence the file loop below stays purely filesystem.
+	// db.Open sets SetMaxOpenConns(1), so while tx is open no call may go through
+	// db or it waits for the only connection and deadlocks.
 	transaction, failure := db.Begin()
 	if failure != nil {
 		return 0, failure
 	}
 
-	// Idempotent against source_url: a download that hit procTimeout is re-queued
-	// and downloaded again, but the timed-out goroutine keeps running and finishes
-	// later. Without this check the straggler would insert a second design for the
-	// same URL. First writer wins; the late one returns the existing id.
+	// Idempotent against source_url: a download that hit procTimeout is re-queued,
+	// but the timed-out goroutine keeps running and would insert a second design.
+	// First writer wins; the late one returns the existing id.
 	if sourceURL != "" {
 		var existingID int
-		if transaction.QueryRow("SELECT id FROM designs WHERE user_id = ? AND source_url = ? LIMIT 1",
-			owner.ID, sourceURL).Scan(&existingID) == nil && existingID > 0 {
+		failure := transaction.QueryRow("SELECT id FROM designs WHERE user_id = ? AND source_url = ? LIMIT 1",
+			owner.ID, sourceURL).Scan(&existingID)
+		if failure == nil && existingID > 0 {
 			_ = transaction.Rollback()
 			return existingID, nil
+		}
+		// A failed probe is not an answer. Treated as "no such design" it would
+		// insert a second one for the same URL - exactly what this guards
+		// against - so the download fails instead and the queue retries it.
+		if failure != nil && !errors.Is(failure, sql.ErrNoRows) {
+			_ = transaction.Rollback()
+			return 0, fmt.Errorf("checking for an existing design failed: %w", failure)
 		}
 	}
 
@@ -86,17 +88,15 @@ func SaveDownload(db *sql.DB, owner Owner, platform, sourceURL string, result Re
 			return
 		}
 		_ = transaction.Rollback()
-		// The files were written under a directory named after the rolled-back
-		// design id. Remove them: SQLite reuses rowids, so a later design could
-		// otherwise inherit this directory.
+		// The files were written under a directory named after the rolled-back design
+		// id. SQLite reuses rowids, so a later design could inherit it.
 		if versionDir != "" {
 			_ = os.RemoveAll(versionDir)
 		}
 	}()
 
-	// last_synced_at is set right away so the auto-sync does not immediately
-	// re-sync a freshly downloaded design (otherwise new versions keep being
-	// created).
+	// Set right away, or the auto-sync immediately re-syncs a freshly downloaded
+	// design and keeps creating versions.
 	insertResult, failure := transaction.Exec(
 		`INSERT INTO designs (user_id, public_id, name, description, source_url, source_platform, source_id, author, cover_path, last_synced_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
@@ -131,10 +131,9 @@ func SaveDownload(db *sql.DB, owner Owner, platform, sourceURL string, result Re
 		if failure != nil || blob.SizeBytes == 0 {
 			continue
 		}
-		// Read before the temp file goes. The first version has to record the same
-		// kind of hash the sync will later compare against, or the very next
-		// update check finds a mismatch and publishes a version holding nothing
-		// new - for every freshly imported design.
+		// Read before the temp file goes: the first version has to record the same kind
+		// of hash the sync later compares against, or the next update check publishes a
+		// version holding nothing new.
 		stableHash := ContentHash(file.TempPath, blob.Hash)
 		_ = os.Remove(file.TempPath)
 		totalBytes += blob.SizeBytes
@@ -172,11 +171,9 @@ func SaveDownload(db *sql.DB, owner Owner, platform, sourceURL string, result Re
 	cover, fromGallery := publishCover(owner.Layout, designID, result.CoverPath, gallery)
 	if cover != "" {
 		dbutil.ExecLogged(transaction, "UPDATE designs SET cover_path=? WHERE id=?", cover, designID)
-		// The gallery row gets the flag too. Which image is the cover is stored
-		// twice - as designs.cover_path for the overview card and as
-		// design_images.is_cover for the marker in the gallery - and setting only
-		// the first left a downloaded design showing a cover on its card while no
-		// image in its own gallery was marked as the one.
+		// The gallery row gets the flag too. Which image is the cover is stored twice,
+		// and setting only designs.cover_path left a design showing a cover on its card
+		// while no image in its own gallery was marked as the one.
 		if fromGallery != "" {
 			dbutil.ExecLogged(transaction, "UPDATE design_images SET is_cover = (path = ?) WHERE design_id = ?", fromGallery, designID)
 		}
@@ -188,31 +185,26 @@ func SaveDownload(db *sql.DB, owner Owner, platform, sourceURL string, result Re
 	return designID, nil
 }
 
-// AddTags creates the tags from the list (unique per user) and links them to the
-// design. Additive: existing links - including manually set ones - are kept, only
-// missing ones are added. So a sync removes no manual tags; a tag removed on the
-// platform side, however, remains.
+// AddTags creates the tags (unique per user) and links them to the design.
+// Additive: a sync removes no manual tags, but a tag removed on the platform
+// side stays as well.
 func AddTags(db dbutil.Querier, userID, designID int, tags []string) {
 	for _, rawTag := range tags {
-		// Some platforms hand their text over HTML-escaped. A tag written
-		// "'decor" arrived as "&#39;decor" and was stored, listed and searched
-		// under that name. Decoding happens here rather than in each scraper:
-		// every imported tag passes through this one function, and a new
-		// platform would otherwise have to remember to do it again.
+		// Some platforms hand their text over HTML-escaped: "'decor" arrived as
+		// "&#39;decor" and was stored and searched under that name. Decoded here rather
+		// than per scraper, so a new platform cannot forget it.
 		name := strings.TrimSpace(html.UnescapeString(rawTag))
-		// Cut on a character boundary, not a byte one. Decoding readily yields
-		// multi-byte characters, and slicing bytes would leave half of one
-		// behind - which is not valid UTF-8 and would land in the database.
+		// Cut on a character boundary: slicing bytes would leave half a multi-byte
+		// character behind, which is not valid UTF-8.
 		if runes := []rune(name); len(runes) > 80 {
 			name = strings.TrimSpace(string(runes[:80]))
 		}
 		if name == "" {
 			continue
 		}
-		// Matched without regard to case, so "Decor" from one platform and
-		// "decor" from another end up on the same tag. The UNIQUE index is
-		// case-sensitive, so without this lookup both would exist side by side
-		// and a filter on one would miss the designs carrying the other.
+		// Matched without regard to case, so "Decor" and "decor" from two platforms end
+		// up on one tag. The UNIQUE index is case-sensitive, so both would otherwise
+		// exist side by side and a filter on one would miss the other's designs.
 		var tagID int
 		found := db.QueryRow(
 			"SELECT id FROM tags WHERE user_id=? AND name=? COLLATE NOCASE LIMIT 1", userID, name).Scan(&tagID) == nil && tagID > 0
@@ -227,10 +219,9 @@ func AddTags(db dbutil.Querier, userID, designID int, tags []string) {
 	}
 }
 
-// AddImages adds platform images missing during sync (by path) additively,
-// without changing existing - including manually uploaded - images or the chosen
-// cover. Only if the design has no image at all is the first set as cover. On an
-// empty list it is a no-op.
+// AddImages adds missing platform images by path, without touching existing or
+// manually uploaded ones, or the chosen cover. Only a design with no image at
+// all gets a cover set. A no-op on an empty list.
 func AddImages(db *sql.DB, owner Owner, designID int, images []string) {
 	images = publishImages(owner.Layout, designID, images)
 	if len(images) == 0 {
@@ -247,10 +238,9 @@ func AddImages(db *sql.DB, owner Owner, designID int, images []string) {
 		maxSort++
 		dbutil.ExecLogged(db, "INSERT INTO design_images (design_id, path, sort_order) VALUES (?, ?, ?)", designID, image, maxSort)
 	}
-	// Keyed on the missing cover rather than on the missing images: a design
-	// that has images but no cover shows the placeholder on the overview, and
-	// the condition it used to ask about could never become true again for it.
-	// A cover already chosen is left alone - that is the point of the check.
+	// Keyed on the missing cover rather than the missing images: a design that has
+	// images but no cover shows the placeholder, and the old condition could never
+	// become true again for it. A cover already chosen is left alone.
 	var cover sql.NullString
 	db.QueryRow("SELECT cover_path FROM designs WHERE id=?", designID).Scan(&cover)
 	if cover.String == "" {
@@ -264,16 +254,14 @@ func AddImages(db *sql.DB, owner Owner, designID int, images []string) {
 	}
 }
 
-// SaveSyncVersion stores a re-download result as a new version of an existing
-// design. Files move into the content-addressed blob store; a new design_files
-// version is created only if at least one blob is new. Returns: changed, new
-// version number, file count. changed=false ⇒ "already up to date".
+// SaveSyncVersion stores a re-download as a new version. Files move into the
+// content-addressed blob store, and a new design_files version is created only
+// if at least one blob is new. changed=false means "already up to date".
 func SaveSyncVersion(db *sql.DB, owner Owner, designID int, result Result, progress func(step, label string, current, total int)) (bool, string, int, error) {
 	if progress == nil {
 		progress = func(string, string, int, int) {}
 	}
 
-	// Preload the known file hashes of the design (including pre-CAS versions).
 	knownHashes := map[string]bool{}
 	if rows, failure := db.Query(
 		`SELECT DISTINCT dfe.file_hash FROM design_file_entries dfe
@@ -290,9 +278,8 @@ func SaveSyncVersion(db *sql.DB, owner Owner, designID int, result Result, progr
 
 	type syncEntry struct {
 		filename, blobPath, relativePath string
-		// blobHash addresses the stored bytes; contentHash identifies what the
-		// file holds and is what decides whether this is new. They differ for a
-		// repacked archive - see ContentHash in archivehash.go.
+		// blobHash addresses the stored bytes, contentHash decides whether this is new.
+		// They differ for a repacked archive - see ContentHash in archivehash.go.
 		blobHash, contentHash string
 		size                  int64
 	}
@@ -316,9 +303,8 @@ func SaveSyncVersion(db *sql.DB, owner Owner, designID int, result Result, progr
 		if failure != nil {
 			continue
 		}
-		// Read before the temp file goes: a rebuilt archive has different bytes
-		// on every download, so comparing those would publish a version per sync
-		// that contains nothing new.
+		// Read before the temp file goes: a rebuilt archive has different bytes every
+		// time, so comparing those would publish an empty version per sync.
 		stableHash := ContentHash(file.TempPath, blob.Hash)
 		_ = os.Remove(file.TempPath)
 
@@ -341,24 +327,22 @@ func SaveSyncVersion(db *sql.DB, owner Owner, designID int, result Result, progr
 		return false, "", 0, nil // unchanged
 	}
 
-	// From here on it is one transaction. Written piecemeal, a failure between the
-	// statements left the design in states with no way back: is_current=0 on every
-	// version (the design has no current version at all - no download, no viewer),
-	// or a design_files row whose entries are missing (a version that looks
-	// present but lists no files). The blob store above stays outside: its files
-	// are content-addressed and shared across versions, so an orphan blob is
-	// harmless, while a rollback must not delete data another version references.
+	// One transaction. Written piecemeal, a failure between the statements left the
+	// design with no current version at all, or with a version listing no files.
+	// The blob store stays outside: its files are content-addressed and shared, so
+	// an orphan is harmless while a rollback must not delete what another version
+	// references.
 	//
-	// NOTE: db.Open sets SetMaxOpenConns(1) - while the transaction is open, no
-	// call may go through db, or it waits for the only connection and deadlocks.
+	// db.Open sets SetMaxOpenConns(1) - no call may go through db while the
+	// transaction is open, or it deadlocks.
 	transaction, failure := db.Begin()
 	if failure != nil {
 		return false, "", 0, failure
 	}
 	defer transaction.Rollback()
 
-	// Next version number (max + 1.0), read inside the transaction so a parallel
-	// sync of the same design cannot hand out the same number twice.
+	// Read inside the transaction, so a parallel sync of the same design cannot
+	// hand out the same number twice.
 	var maxVersion sql.NullFloat64
 	_ = transaction.QueryRow("SELECT MAX(CAST(version AS REAL)) FROM design_files WHERE design_id=?", designID).Scan(&maxVersion)
 	baseVersion := 1.0
@@ -368,9 +352,8 @@ func SaveSyncVersion(db *sql.DB, owner Owner, designID int, result Result, progr
 	newVersion := fmt.Sprintf("%.1f", baseVersion+1.0)
 	versionDir := owner.Layout.Version(designID, newVersion)
 
-	// Publish the blobs as a real directory. Every file is a hard link to the
-	// blob, so an unchanged file costs no disk in the new version while the
-	// version still lists as a normal directory.
+	// Every file is a hard link to the blob, so an unchanged file costs no disk in
+	// the new version while the version still lists as a normal directory.
 	var totalBytes int64
 	published := make([]string, len(entries))
 	for index, entry := range entries {
@@ -418,13 +401,10 @@ func SaveSyncVersion(db *sql.DB, owner Owner, designID int, result Result, progr
 	return true, newVersion, len(entries), nil
 }
 
-// sanitizeRel cleans a relative path (traversal protection + character filter).
-//
-// It splits on the path separator and drops every empty, "." and ".." segment,
-// so no combination can reconstruct a traversal. (The previous single-pass
-// strings.ReplaceAll(name, "../", "") was bypassable: an input like "....//x"
-// collapses back to "../x".) Each surviving segment is additionally run through
-// the character filter.
+// sanitizeRel cleans a relative path. It splits on the separator and drops every
+// empty, "." and ".." segment, so no combination can reconstruct a traversal -
+// the previous single-pass ReplaceAll was bypassable, since "....//x" collapses
+// back to "../x".
 func sanitizeRel(name string) string {
 	name = strings.ReplaceAll(name, "\\", "/")
 	var parts []string
@@ -437,8 +417,7 @@ func sanitizeRel(name string) string {
 	return strings.Join(parts, "/")
 }
 
-// withinBase reports whether target stays inside base (defense-in-depth against
-// path traversal on top of sanitizeRel).
+// withinBase reports whether target stays inside base, on top of sanitizeRel.
 func withinBase(base, target string) bool {
 	relative, failure := filepath.Rel(base, target)
 	if failure != nil {
@@ -447,7 +426,6 @@ func withinBase(base, target string) bool {
 	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-// copyHash copies source to destination and returns SHA256 + size.
 func copyHash(source, destination string) (string, int64, error) {
 	sourceFile, failure := os.Open(source)
 	if failure != nil {
@@ -467,7 +445,6 @@ func copyHash(source, destination string) (string, int64, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
 
-// nullStr returns nil for empty strings (otherwise the string) as a SQL argument.
 func nullStr(value string) any {
 	if value == "" {
 		return nil
@@ -475,9 +452,9 @@ func nullStr(value string) any {
 	return value
 }
 
-// storeAndLink puts a downloaded temp file into the user's blob store and
-// publishes it at destination as a hard link, so the version directory holds a
-// real file while the content is stored once.
+// storeAndLink puts a temp file into the user's blob store and publishes it at
+// destination as a hard link, so the version directory holds a real file while
+// the content is stored once.
 func storeAndLink(user storage.UserLayout, tempPath, destination string) (blobstore.Info, error) {
 	sourceFile, failure := os.Open(tempPath)
 	if failure != nil {
@@ -494,11 +471,9 @@ func storeAndLink(user storage.UserLayout, tempPath, destination string) (blobst
 	return blob, nil
 }
 
-// publishImages moves the images a downloader staged in the user's temp
-// directory into the design's pictures directory and returns their stored
-// (root-relative) paths. Paths that are already relative belong to a design
-// whose images were published earlier and are passed through, which is what
-// makes AddImages idempotent across syncs.
+// publishImages moves staged images into the design's pictures directory and
+// returns their root-relative paths. Already-relative paths belong to a design
+// published earlier and pass through, which makes AddImages idempotent.
 func publishImages(user storage.UserLayout, designID int, staged []string) []string {
 	var stored []string
 	for _, path := range staged {
@@ -521,7 +496,7 @@ func publishImages(user storage.UserLayout, designID int, staged []string) []str
 	return stored
 }
 
-// publishedAs finds the published gallery entry a staged file was moved to.
+// publishedAs finds the published gallery entry a staged file was moved to;
 // publishImages keeps the file name, so the base name identifies it.
 func publishedAs(gallery []string, staged string) string {
 	name := filepath.Base(staged)
@@ -533,14 +508,11 @@ func publishedAs(gallery []string, staged string) string {
 	return ""
 }
 
-// publishCover puts the title image at the design's own cover path. It is a
-// hard link to the gallery file rather than a copy, so the cover the sketch
-// puts next to the version directories costs no second copy of the image.
+// publishCover puts the title image at the design's own cover path, as a hard
+// link to the gallery file rather than a copy.
 //
-// The second return value is the gallery entry the cover was made from, or ""
-// when it came from outside the gallery. The caller needs it to mark that row
-// as is_cover - the cover is recorded in two places, and a design whose card
-// shows an image while its gallery marks none is the state that produces.
+// The second return value is the gallery entry it was made from, or "" when it
+// came from outside. The caller needs it to mark that row as is_cover.
 func publishCover(user storage.UserLayout, designID int, staged string, gallery []string) (string, string) {
 	source := staged
 	fromGallery := ""
@@ -551,11 +523,9 @@ func publishCover(user storage.UserLayout, designID int, staged string, gallery 
 		fromGallery = gallery[0]
 		source = user.Abs(fromGallery)
 	} else if filepath.IsAbs(source) {
-		// Every downloader hands the cover in as one of the gallery images, and
-		// the gallery has already been published - which moved that very file.
-		// Moving it a second time fails, and the design was then stored without
-		// a cover at all: the detail view still found its gallery, while the
-		// overview card, which reads cover_path alone, kept the placeholder.
+		// Every downloader hands the cover in as one of the gallery images, which have
+		// already been published - moving that file a second time fails, and the design
+		// was then stored with no cover at all.
 		if published := publishedAs(gallery, source); published != "" {
 			fromGallery = published
 			source = user.Abs(published)

@@ -3,25 +3,22 @@ package worker
 import (
 	"database/sql"
 	"errors"
-	"log"
 	"meshdepot/internal/dbutil"
 	"time"
 
 	"meshdepot/internal/health"
 	"meshdepot/internal/safego"
+
+	"meshdepot/internal/logx"
 )
 
-// syncTickInterval is how often the loop looks for a claimable sync job.
 const syncTickInterval = 5 * time.Second
 
-// errSyncPanicked is the job failure recorded when Process panicked. The panic
-// itself (with stack) is logged by safego.
+// errSyncPanicked is recorded when Process panicked; safego logs the stack.
 var errSyncPanicked = errors.New("error.sync_panic")
 
-// errSyncTimeout is recorded when Process exceeded procTimeout.
 var errSyncTimeout = errors.New("error.sync_timeout")
 
-// SyncJob describes a re-download task (new version of a design).
 type SyncJob struct {
 	ID       int
 	DesignID int
@@ -30,14 +27,12 @@ type SyncJob struct {
 	UserPublicID string
 }
 
-// SyncWorker processes the sync_queue.
 type SyncWorker struct {
 	DB *sql.DB
-	// Process runs the re-download + saving of the new version. Injected by
-	// main.go so the worker does not depend on the platforms package.
+	// Process runs the re-download and saving. Injected by main.go, so the worker
+	// does not depend on the platforms package.
 	Process func(SyncJob) error
-	// Heartbeat records the liveness of the loop for the health endpoint. Wired
-	// by main.go; nil elsewhere, which the registry tolerates.
+	// Heartbeat is wired by main.go; nil elsewhere, which the registry tolerates.
 	Heartbeat *health.Registry
 
 	// finished is closed when the loop has left after stop - see Wait.
@@ -48,7 +43,7 @@ func NewSyncWorker(db *sql.DB, process func(SyncJob) error) *SyncWorker {
 	return &SyncWorker{DB: db, Process: process, finished: make(chan struct{})}
 }
 
-// Start runs the processing until stop is closed (tick every 5 s).
+// Start runs the processing until stop is closed.
 func (syncWorker *SyncWorker) Start(stop <-chan struct{}) {
 	syncWorker.Heartbeat.Register(health.SyncWorker, syncTickInterval)
 	safego.Go("sync-worker", func() {
@@ -68,8 +63,7 @@ func (syncWorker *SyncWorker) Start(stop <-chan struct{}) {
 	})
 }
 
-// Wait blocks until the loop has left after stop, at most for the given
-// duration; see DownloadWorker.Wait.
+// Wait blocks until the loop has left after stop; see DownloadWorker.Wait.
 func (syncWorker *SyncWorker) Wait(limit time.Duration) bool {
 	select {
 	case <-syncWorker.finished:
@@ -79,23 +73,18 @@ func (syncWorker *SyncWorker) Wait(limit time.Duration) bool {
 	}
 }
 
-// RunOnce resets hanging jobs and processes one claimable job.
 func (syncWorker *SyncWorker) RunOnce() {
 	syncWorker.resetStuck()
 	job, ok := syncWorker.claimNext()
 	if !ok {
 		return
 	}
-	// The loop cannot tick while it waits for the job - see DownloadWorker.RunOnce.
+	// The loop cannot tick while it waits for the job.
 	endBusy := syncWorker.Heartbeat.Working(health.SyncWorker)
 	defer endBusy()
-	// Run Process in its own goroutine with a timeout - same pattern as the
-	// DownloadWorker. Called synchronously, one hanging sync (dead browser, stalled
-	// network) would block this single-ticker loop and freeze the entire sync queue
-	// until the process restarts. The channel is buffered so a late-returning
-	// goroutine does not leak; its result is discarded.
-	// safego.Run also catches a panic in Process (foreign platform JSON) and turns
-	// it into a normal job failure instead of killing the process.
+	// Process runs under a timeout in its own goroutine: called synchronously, one
+	// hanging sync would freeze the whole queue until the process restarts. The
+	// channel is buffered so a late-returning goroutine does not leak.
 	done := make(chan error, 1)
 	go func() {
 		failure := errSyncPanicked
@@ -108,7 +97,7 @@ func (syncWorker *SyncWorker) RunOnce() {
 	case failure = <-done:
 	case <-time.After(procTimeout):
 		failure = errSyncTimeout
-		log.Printf("[sync] Job #%d (design %d): TIMEOUT after %s - aborted so the sync queue keeps running.",
+		logx.Errorf("[sync] Job #%d (design %d): TIMEOUT after %s - aborted so the sync queue keeps running.",
 			job.ID, job.DesignID, procTimeout)
 	}
 	if failure != nil {
@@ -118,17 +107,14 @@ func (syncWorker *SyncWorker) RunOnce() {
 	dbutil.ExecLogged(syncWorker.DB, "UPDATE sync_queue SET status='done', progress=100, done_at=CURRENT_TIMESTAMP WHERE id=?", job.ID)
 }
 
-// resetStuck resets 'running' jobs that run too long. The cutoff is the claim
-// time (started_at), not created_at: the latter measures how long the job waited
-// in the queue, so a job that queued for longer than stuckTimeout used to be reset
-// the instant it started running. started_at is NULL for rows written before the
-// column existed - those fall back to created_at.
+// resetStuck measures from the claim time, not created_at: the latter measures
+// how long the job waited in the queue, so a long wait used to reset the job the
+// instant it started. started_at is NULL for rows written before the column.
 func (syncWorker *SyncWorker) resetStuck() {
 	cutoff := time.Now().Add(-stuckTimeout).UTC().Format("2006-01-02 15:04:05")
 	dbutil.ExecLogged(syncWorker.DB, "UPDATE sync_queue SET status='pending' WHERE status='running' AND COALESCE(started_at, created_at) < ?", cutoff)
 }
 
-// claimNext claims the next pending job atomically.
 func (syncWorker *SyncWorker) claimNext() (SyncJob, bool) {
 	rows, failure := syncWorker.DB.Query(`SELECT sq.id, sq.design_id, sq.user_id, COALESCE(u.public_id, '')
 		FROM sync_queue sq JOIN users u ON u.id = sq.user_id

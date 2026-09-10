@@ -1,10 +1,8 @@
 package api
 
-// Administration of the outgoing mail server.
-//
-// These live apart from SaveSettings because that handler takes only the
-// integers in settingsSchema, while this is text plus a password that must not
-// be stored or returned in the clear.
+// Administration of the outgoing mail server, apart from SaveSettings because
+// that handler takes only the integers in settingsSchema, while this is text plus
+// a password that must not be stored or returned in the clear.
 
 import (
 	"database/sql"
@@ -19,7 +17,6 @@ import (
 	"meshdepot/internal/maildigest"
 )
 
-// mailSettingKeys are the app_settings rows the mail configuration lives in.
 const (
 	mailEnabledKey    = "mail_enabled"
 	mailHostKey       = "mail_host"
@@ -32,8 +29,7 @@ const (
 )
 
 // passwordPlaceholder is what the form gets instead of the stored password, and
-// what it sends back when the administrator did not retype it. The real value
-// never leaves the server.
+// what it sends back untouched. The real value never leaves the server.
 const passwordPlaceholder = "***"
 
 func (server *Server) mailSetting(key string) string {
@@ -48,13 +44,12 @@ func (server *Server) writeMailSetting(key, value string) {
 		key, value)
 }
 
-// mailConfig assembles the stored settings. The loader lives in the mail
-// package so the notification path uses exactly the same one.
+// mailConfig: the loader lives in the mail package, so the notification path uses
+// exactly the same one.
 func (server *Server) mailConfig() (mail.Config, bool) {
 	return mail.Load(server.DB, server.Crypto)
 }
 
-// mailPassword decrypts the stored password for the masked-field resolution.
 func (server *Server) mailPassword(stored string) string {
 	if stored == "" {
 		return ""
@@ -69,8 +64,8 @@ func (server *Server) mailPassword(stored string) string {
 	return ""
 }
 
-// GetMailSettings returns the mail configuration. Admin only; the password is
-// replaced by a placeholder.
+// GetMailSettings returns the configuration with the password replaced by a
+// placeholder. Admin only.
 func (server *Server) GetMailSettings(responseWriter http.ResponseWriter, request *http.Request) {
 	password := ""
 	if server.mailSetting(mailPasswordKey) != "" {
@@ -84,8 +79,8 @@ func (server *Server) GetMailSettings(responseWriter http.ResponseWriter, reques
 	if encryption == "" {
 		encryption = "starttls"
 	}
-	// How the queue is doing. Sent rows are kept, so the figure is a running
-	// total since the feature was switched on rather than a snapshot.
+	// Sent rows are kept, so this is a running total since the feature was switched
+	// on rather than a snapshot.
 	var queued, sent int
 	var lastSent sql.NullString
 	server.DB.QueryRow("SELECT COUNT(*) FROM notification_mail_queue WHERE sent_at IS NULL").Scan(&queued)
@@ -101,9 +96,8 @@ func (server *Server) GetMailSettings(responseWriter http.ResponseWriter, reques
 		"from":       server.mailSetting(mailFromKey),
 		"from_name":  server.mailSetting(mailFromNameKey),
 		"encryption": encryption,
-		// Counted per notification, not per message: a digest bundles several
-		// into one e-mail, so these say how much was reported, not how many
-		// messages left the building.
+		// Counted per notification, not per message: a digest bundles several into one
+		// e-mail.
 		"queued_count":   queued,
 		"sent_count":     sent,
 		"last_sent_at":   lastSent.String,
@@ -111,7 +105,6 @@ func (server *Server) GetMailSettings(responseWriter http.ResponseWriter, reques
 	})
 }
 
-// mailBody is the shape both handlers accept.
 type mailBody struct {
 	Enabled    bool   `json:"enabled"`
 	Host       string `json:"host"`
@@ -123,13 +116,9 @@ type mailBody struct {
 	Encryption string `json:"encryption"`
 }
 
-// readMailBody turns an already-decoded body into a config, resolving a masked
-// password from what is stored. Returns the config and the password to persist
-// ("" = keep the stored one).
-//
-// It takes the decoded struct rather than the request: a request body can only
-// be read once, and decoding it twice in one handler leaves the second read
-// with nothing.
+// readMailBody resolves a masked password from what is stored and returns the
+// config plus the password to persist ("" keeps the stored one). It takes the
+// decoded struct rather than the request, since a body can only be read once.
 func (server *Server) readMailBody(body mailBody) (mail.Config, string) {
 	encryption := strings.ToLower(strings.TrimSpace(body.Encryption))
 	switch encryption {
@@ -146,7 +135,7 @@ func (server *Server) readMailBody(body mailBody) (mail.Config, string) {
 		FromName:   strings.TrimSpace(body.FromName),
 		Encryption: encryption,
 	}
-	// An untouched form sends the placeholder back; that must not overwrite the
+	// An untouched form sends the placeholder back, which must not overwrite the
 	// stored password with three asterisks.
 	if config.Password == passwordPlaceholder || config.Password == "" {
 		config.Password = server.mailPassword(server.mailSetting(mailPasswordKey))
@@ -155,7 +144,6 @@ func (server *Server) readMailBody(body mailBody) (mail.Config, string) {
 	return config, config.Password
 }
 
-// SaveMailSettings stores the configuration. Admin only.
 func (server *Server) SaveMailSettings(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	var body mailBody
@@ -164,9 +152,8 @@ func (server *Server) SaveMailSettings(responseWriter http.ResponseWriter, reque
 		return
 	}
 	config, newPassword := server.readMailBody(body)
-	// Switching the service on with an unusable configuration would leave every
-	// send failing quietly in the background, so it is refused here where the
-	// administrator can see it.
+	// Switching the service on with an unusable configuration would leave every send
+	// failing quietly in the background.
 	if body.Enabled && !config.Usable() {
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.mail_incomplete")
 		return
@@ -186,16 +173,16 @@ func (server *Server) SaveMailSettings(responseWriter http.ResponseWriter, reque
 			return
 		}
 		server.writeMailSetting(mailPasswordKey, encrypted)
-		// Recorded so the value can be decrypted later: the key is derived per
-		// user, so reading it back needs to know whose it was.
+		// The key is derived per user, so reading the value back needs to know whose it
+		// was.
 		server.writeMailSetting(mailPasswordKey+"_owner", strconv.Itoa(currentUserID))
 	}
 	server.GetMailSettings(responseWriter, request)
 }
 
-// TestMailSettings sends a test message to the administrator's own address,
-// using the settings in the request rather than the stored ones - so a
-// configuration can be tried before it is saved. Admin only.
+// TestMailSettings sends to the administrator's own address using the settings in
+// the request rather than the stored ones, so a configuration can be tried before
+// it is saved. Admin only.
 func (server *Server) TestMailSettings(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	var body mailBody
@@ -212,8 +199,7 @@ func (server *Server) TestMailSettings(responseWriter http.ResponseWriter, reque
 	var recipient string
 	server.DB.QueryRow("SELECT COALESCE(email, '') FROM users WHERE id = ?", currentUserID).Scan(&recipient)
 	if strings.TrimSpace(recipient) == "" {
-		// Testing against a mailbox nobody reads proves nothing, so the check
-		// stops here rather than reporting a success no one can confirm.
+		// Testing against a mailbox nobody reads proves nothing.
 		httpx.Success(responseWriter, map[string]any{"ok": false, "error": "error.mail_no_own_address"})
 		return
 	}
@@ -221,9 +207,8 @@ func (server *Server) TestMailSettings(responseWriter http.ResponseWriter, reque
 	if failure := mail.Send(config, recipient,
 		"MeshDepot test message",
 		"This is a test message from MeshDepot.\n\nIf it arrived, notification e-mails will work with these settings."); failure != nil {
-		// The server's own words are passed through: "login rejected" or
-		// "STARTTLS refused" tells an administrator what to change, which a
-		// generic failure does not.
+		// The server's own words: "login rejected" tells an administrator what to change,
+		// which a generic failure does not.
 		httpx.Success(responseWriter, map[string]any{"ok": false, "error": "error.mail_send_failed", "detail": failure.Error()})
 		return
 	}

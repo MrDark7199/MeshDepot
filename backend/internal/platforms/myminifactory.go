@@ -1,11 +1,10 @@
 package platforms
 
-// MyMiniFactory downloader. Metadata via the REST API v2 with an API key (the api
-// path is not CF-gated). The file download endpoint /download is Cloudflare-bot-gated
-// (blocks Go/Chromium → 403): the /download URLs are resolved to their presigned S3
-// URLs via the Playwright/Firefox sidecar and then loaded CF-free from S3 (fallback:
-// direct, if PLAYWRIGHT_URL is empty). ZIP files are extracted, HTML responses
-// discarded.
+// MyMiniFactory downloader. Metadata comes from the REST API v2 with an API key.
+// The /download endpoint is Cloudflare-gated and answers 403 to Go and Chromium,
+// so those URLs are resolved to their presigned S3 URLs by the Firefox sidecar
+// and then loaded CF-free (falling back to a direct attempt when PLAYWRIGHT_URL
+// is empty). ZIPs are extracted, HTML responses discarded.
 
 import (
 	"bytes"
@@ -24,17 +23,13 @@ import (
 var (
 	myMiniFactorySlugPattern = regexp.MustCompile(`(?i)myminifactory\.com/object/([^/?#]+)`)
 	myMiniFactoryIDPattern   = regexp.MustCompile(`-(\d+)$`)
-	// myMiniFactoryDescriptionBreakPattern matches runs of 2+ horizontal
-	// whitespaces (incl. nbsp).
+	// Runs of two or more horizontal whitespaces, nbsp included.
 	myMiniFactoryDescriptionBreakPattern = regexp.MustCompile(`[ \t\x{00a0}]{2,}`)
 )
 
-// normalizeMyMiniFactoryDescription reconstructs line breaks in MMF
-// descriptions. The API v2 returns the description as flat text without real
-// breaks/HTML: original block/line boundaries are encoded as runs of 2+ spaces
-// (or nbsp), single spaces separate words within a line. We turn each 2+
-// whitespace run into a '\n' and trim the lines so the structure survives
-// translation (which keeps '\n') and display.
+// normalizeMyMiniFactoryDescription reconstructs the line breaks. API v2 returns
+// flat text where the original block boundaries survive only as runs of 2+
+// spaces, so each run becomes a '\n' - which translation and display both keep.
 func normalizeMyMiniFactoryDescription(text string) string {
 	if text == "" {
 		return text
@@ -47,10 +42,8 @@ func normalizeMyMiniFactoryDescription(text string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-// MyMiniFactory implements Downloader for myminifactory.com.
 type MyMiniFactory struct{ Deps }
 
-// Download loads a MyMiniFactory object via the REST API v2.
 func (myMiniFactory MyMiniFactory) Download(sourceURL string, owner Owner, progress func(step, label string, current, total int)) (Result, error) {
 	// The numeric id is only for credentials; every path comes from owner.Layout.
 	userID := owner.ID
@@ -140,7 +133,7 @@ func (myMiniFactory MyMiniFactory) Download(sourceURL string, owner Owner, progr
 		return Result{}, FilesError("error.myminifactory_no_files:MyMiniFactory object %s has no files.", objectID)
 	}
 
-	// If all download_urls are null → web fallback endpoint.
+	// All download_urls null - use the web fallback endpoint.
 	nullCount := 0
 	for _, fileEntry := range fileList {
 		if coerce.Text(fileEntry["download_url"]) == "" {
@@ -164,7 +157,7 @@ func (myMiniFactory MyMiniFactory) Download(sourceURL string, owner Owner, progr
 		return Result{}, failure
 	}
 
-	// Pre-build the download URLs (with API key).
+	// Pre-build the download URLs, with API key.
 	downloadURLs := make([]string, len(fileList))
 	for index, fileEntry := range fileList {
 		downloadURL := coerce.Text(fileEntry["download_url"])
@@ -178,8 +171,8 @@ func (myMiniFactory MyMiniFactory) Download(sourceURL string, owner Owner, progr
 		downloadURLs[index] = downloadURL
 	}
 
-	// Cloudflare bypass: /download is CF-bot-gated. With the sidecar resolve the
-	// 302→presigned-S3 URLs via Firefox; without the sidecar a direct attempt (fallback).
+	// /download is CF-gated: with the sidecar resolve the 302 to presigned S3 URLs,
+	// without it try directly.
 	var resolved map[string]string
 	if myMiniFactory.Cfg.PlaywrightURL != "" {
 		resolved = resolveMyMiniFactoryURLs(myMiniFactory.Cfg.PlaywrightURL, downloadURLs)
@@ -202,8 +195,7 @@ func (myMiniFactory MyMiniFactory) Download(sourceURL string, owner Owner, progr
 			fileName = fmt.Sprintf("file_%d.stl", len(files))
 		}
 
-		// With the sidecar only load the CF-free resolved S3 URL; without the
-		// sidecar try the /download URL directly.
+		// With the sidecar only the CF-free S3 URL is loaded.
 		fetchURL := downloadURL
 		if myMiniFactory.Cfg.PlaywrightURL != "" {
 			resolvedS3URL := resolved[downloadURL]
@@ -265,9 +257,8 @@ func (myMiniFactory MyMiniFactory) Download(sourceURL string, owner Owner, progr
 	}, nil
 }
 
-// ValidateReason checks the API key against the MMF REST API. The key alone is
-// sufficient (no login/session needed): /search returns HTTP 200 with a valid
-// key, HTTP 401 with an invalid/expired key. A return of "" means valid.
+// ValidateReason checks the API key alone, no login needed: /search answers 200
+// with a valid key and 401 with an expired one. "" means valid.
 func (myMiniFactory MyMiniFactory) ValidateReason(credentials Credentials) string {
 	apiKey := strings.TrimSpace(credentials.Token)
 	if apiKey == "" {
@@ -283,12 +274,9 @@ func (myMiniFactory MyMiniFactory) ValidateReason(credentials Credentials) strin
 	return "error.myminifactory_invalid_api_key"
 }
 
-// resolveMyMiniFactoryURLs resolves the CF-bot-gated /download URLs to their
-// presigned S3 URLs via the Playwright/Firefox sidecar (POST
-// /resolve/myminifactory). Firefox passes Cloudflare and reads the 302 Location;
-// the actual file is then loaded directly from S3 by the Go worker. Returns: map
-// download-URL→S3-URL (partly/entirely empty on errors; the caller skips
-// unresolved files).
+// resolveMyMiniFactoryURLs maps each CF-gated /download URL to its presigned S3
+// URL through the sidecar, which passes Cloudflare and reads the 302 Location.
+// Partly or entirely empty on errors; the caller skips unresolved files.
 func resolveMyMiniFactoryURLs(playwrightURL string, urls []string) map[string]string {
 	resolvedURLs := map[string]string{}
 	var clean []string
@@ -331,7 +319,6 @@ func resolveMyMiniFactoryURLs(playwrightURL string, urls []string) map[string]st
 	return resolvedURLs
 }
 
-// parseMyMiniFactoryTags normalizes the tags (string or {name}) to strings.
 func parseMyMiniFactoryTags(rawTags []json.RawMessage) []string {
 	var tags []string
 	for _, rawTag := range rawTags {
@@ -350,7 +337,6 @@ func parseMyMiniFactoryTags(rawTags []json.RawMessage) []string {
 	return tags
 }
 
-// readMagic reads the first byteCount bytes of a file (for format detection).
 func readMagic(filePath string, byteCount int) []byte {
 	file, failure := os.Open(filePath)
 	if failure != nil {

@@ -25,13 +25,12 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// testKey is a 32-byte key so the AES-256 setup of crypto.New succeeds; it never
-// leaves the test process.
+// testKey is 32 bytes so the AES-256 setup succeeds; it never leaves the test.
 const testKey = "meshdepot-test-key-32-characters"
 
 // harness bundles a running API server with a real SQLite behind it and the
-// session cookie of a logged-in user. Handlers are exercised through
-// server.Router(), so routing, middleware and CORS are part of every test.
+// session cookie of a logged-in user. Everything goes through server.Router(), so
+// routing, middleware and CORS are part of every test.
 type harness struct {
 	t          *testing.T
 	server     *Server
@@ -44,15 +43,14 @@ type harness struct {
 	dataRoot   string
 }
 
-// newHarness creates the server, replaces the seeded admin password with a known
-// one and logs in both an admin and an ordinary user.
+// newHarness replaces the seeded admin password with a known one and logs in both
+// an admin and an ordinary user.
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	directory := t.TempDir()
 
-	// The suite serves its files from 127.0.0.1, which is exactly what the
-	// download guard refuses. Lifted for the duration of a test and put back
-	// afterwards; the guard has its own test in the platforms package.
+	// The suite serves its files from 127.0.0.1, which is what the download guard
+	// refuses. Lifted for the duration; the guard has its own test.
 	platforms.AllowPrivateDownloadsForTest = true
 	t.Cleanup(func() { platforms.AllowPrivateDownloadsForTest = false })
 
@@ -64,9 +62,8 @@ func newHarness(t *testing.T) *harness {
 	if failure := db.InitSchema(database); failure != nil {
 		t.Fatalf("init schema: %v", failure)
 	}
-	// The schema ships with translation switched on. DesignsUpdate builds its own
-	// translate.Service from the database, so a test that renames a design would
-	// otherwise call the live Google endpoint.
+	// The schema ships with translation on, and DesignsUpdate builds its own service
+	// from the database - a test that renames a design would call Google.
 	if _, failure := database.Exec("UPDATE app_settings SET value = '0' WHERE key = 'translation_enabled'"); failure != nil {
 		t.Fatalf("disable translation: %v", failure)
 	}
@@ -81,9 +78,8 @@ func newHarness(t *testing.T) *harness {
 		DB: database, Crypto: cryptoHelper, Cfg: configuration,
 	})
 
-	// The background loops themselves do not run in the test, but the health
-	// endpoint reads their heartbeats. Registering them reproduces the state of a
-	// normally started app; tests about dead loops overwrite this deliberately.
+	// The loops do not run here, but the health endpoint reads their heartbeats.
+	// Tests about dead loops overwrite this deliberately.
 	server.Health.Register(health.DownloadWorker, 2*time.Second)
 	server.Health.Register(health.SyncWorker, 5*time.Second)
 	server.Health.Register(health.SchedulerForce, 30*time.Second)
@@ -104,7 +100,6 @@ func newHarness(t *testing.T) *harness {
 	return testHarness
 }
 
-// testPassword is used for every account the harness creates.
 const testPassword = "correct horse battery staple"
 
 func (testHarness *harness) createUser(email, name string, admin bool) int {
@@ -144,7 +139,6 @@ func (testHarness *harness) login(email string) string {
 	return ""
 }
 
-// request describes one call through the router.
 type request struct {
 	method string
 	path   string
@@ -154,14 +148,11 @@ type request struct {
 	token    string
 	headers  map[string]string
 	noCookie bool
-	// remoteAddr overrides the peer address. httptest hands out 192.0.2.1, a
-	// public one, and routes that refuse a plaintext connection from outside the
-	// network judge by exactly that - so tests speak from loopback unless they
-	// are about the refusal itself.
+	// remoteAddr overrides the peer address: httptest hands out a public one, and
+	// routes that refuse plaintext from outside the network judge by exactly that.
 	remoteAddr string
 }
 
-// response holds what the router answered, already decoded where possible.
 type response struct {
 	status   int
 	rawBody  string
@@ -169,7 +160,6 @@ type response struct {
 	decoded  map[string]any
 }
 
-// data returns the "data" object of a success envelope.
 func (answer response) data(t *testing.T) map[string]any {
 	t.Helper()
 	value, ok := answer.decoded["data"].(map[string]any)
@@ -179,7 +169,6 @@ func (answer response) data(t *testing.T) map[string]any {
 	return value
 }
 
-// list returns the "data" array of a success envelope.
 func (answer response) list(t *testing.T) []any {
 	t.Helper()
 	value, ok := answer.decoded["data"].([]any)
@@ -189,7 +178,6 @@ func (answer response) list(t *testing.T) []any {
 	return value
 }
 
-// errorKey returns the i18n key of an error envelope.
 func (answer response) errorKey(t *testing.T) string {
 	t.Helper()
 	value, ok := answer.decoded["error"].(string)
@@ -236,10 +224,8 @@ func (testHarness *harness) do(call request) response {
 	return answer
 }
 
-// sessionCookie returns the session a response issued, or "" when it did not
-// set one. Changing a password rotates the session: the old id is invalidated
-// and a new cookie comes back on the same response, which a browser picks up by
-// itself and a test has to follow explicitly.
+// sessionCookie returns the session a response issued, or "". Changing a password
+// rotates it, which a browser follows by itself and a test has to do explicitly.
 func (answer response) sessionCookie() string {
 	for _, cookie := range answer.recorder.Result().Cookies() {
 		if cookie.Name == "PHPSESSID" && cookie.Value != "" {
@@ -249,7 +235,6 @@ func (answer response) sessionCookie() string {
 	return ""
 }
 
-// asAdmin and asUser are the two shorthands every handler test uses.
 func (testHarness *harness) asAdmin(method, path string, body any) response {
 	testHarness.t.Helper()
 	return testHarness.do(request{method: method, path: path, body: body, token: testHarness.adminToken})
@@ -265,9 +250,8 @@ func (testHarness *harness) anonymous(method, path string, body any) response {
 	return testHarness.do(request{method: method, path: path, body: body})
 }
 
-// insertRow runs an INSERT and returns the new row id. Used where a test has to
-// reproduce rows exactly as a non-HTTP writer (the download worker) creates
-// them, which no upload helper can do.
+// insertRow returns the new row id, for rows a test must create exactly as a
+// non-HTTP writer does.
 func (testHarness *harness) insertRow(query string, args ...any) int {
 	testHarness.t.Helper()
 	result, failure := testHarness.database.Exec(query, args...)
@@ -278,7 +262,6 @@ func (testHarness *harness) insertRow(query string, args ...any) int {
 	return int(id)
 }
 
-// insertDesign creates a design owned by the given user and returns its id.
 func (testHarness *harness) insertDesign(ownerID int, name string) int {
 	testHarness.t.Helper()
 	result, failure := testHarness.database.Exec(
@@ -291,9 +274,8 @@ func (testHarness *harness) insertDesign(ownerID int, name string) int {
 	return int(id)
 }
 
-// designPID is the outward id of a design - what every route addresses it by.
-// Tests keep working with the rowid, because that is what the fixtures and the
-// direct DB assertions use, and translate here at the URL.
+// designPID is the outward id every route addresses a design by. Tests keep
+// working with the rowid, which is what the fixtures and DB assertions use.
 func (testHarness *harness) designPID(designID int) string {
 	testHarness.t.Helper()
 	publicID, found, failure := publicid.OfIn(testHarness.database, "designs", designID)
@@ -301,14 +283,13 @@ func (testHarness *harness) designPID(designID int) string {
 		testHarness.t.Fatalf("read the design public id: %v", failure)
 	}
 	if !found {
-		// A design the test never created: its id is still supposed to reach the
-		// route and be answered with a 404 there.
+		// A design the test never created: the id should still reach the route and be
+		// answered there with a 404.
 		return publicid.New()
 	}
 	return publicID
 }
 
-// insertCollection creates a collection owned by the given user.
 func (testHarness *harness) insertCollection(ownerID int, name string) int {
 	testHarness.t.Helper()
 	result, failure := testHarness.database.Exec(
@@ -321,7 +302,6 @@ func (testHarness *harness) insertCollection(ownerID int, name string) int {
 	return int(id)
 }
 
-// count runs a COUNT(*) query and returns the result.
 func (testHarness *harness) count(query string, args ...any) int {
 	testHarness.t.Helper()
 	var result int
@@ -331,7 +311,6 @@ func (testHarness *harness) count(query string, args ...any) int {
 	return result
 }
 
-// scalarInt reads a single integer column.
 func (testHarness *harness) scalarInt(query string, args ...any) int {
 	testHarness.t.Helper()
 	var value int
@@ -341,7 +320,6 @@ func (testHarness *harness) scalarInt(query string, args ...any) int {
 	return value
 }
 
-// setDesignFields writes columns a fixture needs but insertDesign does not set.
 func (testHarness *harness) setDesignFields(designID int, fields map[string]any) {
 	testHarness.t.Helper()
 	for column, value := range fields {
@@ -351,28 +329,24 @@ func (testHarness *harness) setDesignFields(designID int, fields map[string]any)
 	}
 }
 
-// publicID is the outward identifier of a user - the name of their storage
-// directory and, from step 4 on, the id in every /users/{id} route.
+// publicID is the name of a user's storage directory and their id in the routes.
 func (testHarness *harness) publicID(userID int) string {
 	testHarness.t.Helper()
 	return testHarness.scalar("SELECT public_id FROM users WHERE id = ?", userID)
 }
 
-// userLayout resolves the storage paths of a user the way the handlers do.
 func (testHarness *harness) userLayout(userID int) storage.UserLayout {
 	testHarness.t.Helper()
 	return storage.New(testHarness.dataRoot).User(testHarness.publicID(userID))
 }
 
-// storedFile reads a path column and resolves it against the data root. Path
-// columns hold the root-relative form, so a test that opens the raw value would
-// be testing the process's working directory rather than the handler.
+// storedFile resolves a path column against the data root: the columns hold the
+// relative form, so opening the raw value would test the working directory.
 func (testHarness *harness) storedFile(query string, args ...any) string {
 	testHarness.t.Helper()
 	return storage.New(testHarness.dataRoot).Abs(testHarness.scalar(query, args...))
 }
 
-// scalar reads a single string column, returning "" when the row is missing.
 func (testHarness *harness) scalar(query string, args ...any) string {
 	testHarness.t.Helper()
 	var value sql.NullString
@@ -386,7 +360,6 @@ func (testHarness *harness) scalar(query string, args ...any) string {
 	return value.String
 }
 
-// hashForTest produces a bcrypt hash the auth service accepts.
 func hashForTest(t *testing.T, password string) string {
 	t.Helper()
 	hash, failure := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
@@ -396,7 +369,6 @@ func hashForTest(t *testing.T, password string) string {
 	return string(hash)
 }
 
-// attachTag assigns an existing tag to an existing design.
 func (testHarness *harness) attachTag(designID, tagID int) {
 	testHarness.t.Helper()
 	_, failure := testHarness.database.Exec(
@@ -407,7 +379,6 @@ func (testHarness *harness) attachTag(designID, tagID int) {
 	}
 }
 
-// insertDesignImage creates a gallery image row for a design.
 func (testHarness *harness) insertDesignImage(designID int, path string, sortOrder int) int {
 	testHarness.t.Helper()
 	result, failure := testHarness.database.Exec(
@@ -420,7 +391,6 @@ func (testHarness *harness) insertDesignImage(designID int, path string, sortOrd
 	return int(id)
 }
 
-// shareDesign shares a design of the owner with another user.
 func (testHarness *harness) shareDesign(designID, ownerID, recipientID int) {
 	testHarness.t.Helper()
 	_, failure := testHarness.database.Exec(
@@ -432,7 +402,6 @@ func (testHarness *harness) shareDesign(designID, ownerID, recipientID int) {
 	}
 }
 
-// addToCollection puts a design into a collection.
 func (testHarness *harness) addToCollection(designID, collectionID int) {
 	testHarness.t.Helper()
 	_, failure := testHarness.database.Exec(
@@ -443,7 +412,6 @@ func (testHarness *harness) addToCollection(designID, collectionID int) {
 	}
 }
 
-// insertTag creates a tag with the given origin ('manual' or 'import').
 func (testHarness *harness) insertTag(ownerID int, name, source string) int {
 	testHarness.t.Helper()
 	result, failure := testHarness.database.Exec(
@@ -456,13 +424,10 @@ func (testHarness *harness) insertTag(ownerID int, name, source string) int {
 	return int(id)
 }
 
-// pngBytes is the PNG signature followed by padding. http.DetectContentType
-// looks at the signature only, so this is enough for every upload and serving
-// path without carrying a real image around.
+// pngBytes is the PNG signature plus padding. http.DetectContentType looks at the
+// signature only, so this covers every upload path without a real image.
 var pngBytes = append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0}, 600)...)
 
-// uploadAsUser sends a multipart request with a single file field as the
-// ordinary member.
 func (testHarness *harness) uploadAsUser(method, path, field, filename string, content []byte) response {
 	testHarness.t.Helper()
 	body, contentType := multipartBody(testHarness.t, field, filename, content)
@@ -475,8 +440,6 @@ func (testHarness *harness) uploadAsUser(method, path, field, filename string, c
 	})
 }
 
-// multipartBody builds a multipart body with one file field and returns it
-// together with the matching Content-Type header.
 func multipartBody(t *testing.T, field, filename string, content []byte) (io.Reader, string) {
 	t.Helper()
 	buffer := &bytes.Buffer{}
@@ -494,8 +457,8 @@ func multipartBody(t *testing.T, field, filename string, content []byte) (io.Rea
 	return buffer, writer.FormDataContentType()
 }
 
-// insertFileVersion creates a current file version with a single entry, which
-// is what the statistics and the file endpoints read.
+// insertFileVersion creates a current version with one entry, which is what the
+// statistics and file endpoints read.
 func (testHarness *harness) insertFileVersion(designID, sizeBytes int, filename string) int {
 	testHarness.t.Helper()
 	result, failure := testHarness.database.Exec(
@@ -516,9 +479,8 @@ func (testHarness *harness) insertFileVersion(designID, sizeBytes int, filename 
 	return int(versionID)
 }
 
-// insertPlatformAccount stores credentials for a platform. An empty token or
-// username is written as NULL, which is what the account form leaves behind
-// when the user fills in only one of the two fields.
+// insertPlatformAccount writes an empty token or username as NULL, which is what
+// the account form leaves behind when only one field is filled in.
 func (testHarness *harness) insertPlatformAccount(ownerID int, platform, token, username string) {
 	testHarness.t.Helper()
 	_, failure := testHarness.database.Exec(
@@ -530,7 +492,6 @@ func (testHarness *harness) insertPlatformAccount(ownerID int, platform, token, 
 	}
 }
 
-// insertShareLink hands a design out over a link, without going through the API.
 func (testHarness *harness) insertShareLink(designID, ownerID int) string {
 	testHarness.t.Helper()
 	token := publicid.New()
@@ -541,8 +502,8 @@ func (testHarness *harness) insertShareLink(designID, ownerID int) string {
 	return token
 }
 
-// clearUpdateAllCooldown drops the stamp "update all designs" leaves behind, so
-// a test can trigger a second run without waiting out the ten minutes.
+// clearUpdateAllCooldown lets a test trigger a second run without waiting out the
+// ten minutes.
 func (testHarness *harness) clearUpdateAllCooldown(ownerID int) {
 	testHarness.t.Helper()
 	if _, failure := testHarness.database.Exec("UPDATE users SET last_update_all_at = NULL WHERE id = ?", ownerID); failure != nil {
@@ -550,17 +511,16 @@ func (testHarness *harness) clearUpdateAllCooldown(ownerID int) {
 	}
 }
 
-// insertDownloadJob creates a printables queue entry. doneAtExpression is a SQL
-// expression such as datetime('now', '-2 days'); an empty string leaves the
-// column NULL. It cannot be a bound parameter because SQLite would then compare
-// the literal string instead of evaluating it.
+// insertDownloadJob takes doneAtExpression as SQL such as datetime('now','-2
+// days'); empty leaves NULL. Not a bound parameter, or SQLite would compare the
+// literal string instead of evaluating it.
 func (testHarness *harness) insertDownloadJob(ownerID int, sourceURL, status, doneAtExpression string) int {
 	testHarness.t.Helper()
 	return testHarness.insertDownloadJobRow(ownerID, sourceURL, "printables", status, doneAtExpression)
 }
 
-// insertDownloadJobForPlatform creates a queue entry for a platform whose
-// credentials the handler under test is expected to check.
+// insertDownloadJobForPlatform creates an entry for a platform whose credentials
+// the handler under test checks.
 func (testHarness *harness) insertDownloadJobForPlatform(ownerID int, sourceURL, platform, status string) int {
 	testHarness.t.Helper()
 	return testHarness.insertDownloadJobRow(ownerID, sourceURL, platform, status, "datetime('now')")
@@ -582,8 +542,7 @@ func (testHarness *harness) insertDownloadJobRow(ownerID int, sourceURL, platfor
 	return int(id)
 }
 
-// insertSyncJob creates a sync queue entry for a design. doneAtExpression
-// follows the same rule as in insertDownloadJob.
+// insertSyncJob: doneAtExpression follows insertDownloadJob's rule.
 func (testHarness *harness) insertSyncJob(ownerID, designID int, status, doneAtExpression string) int {
 	testHarness.t.Helper()
 	if doneAtExpression == "" {
@@ -600,8 +559,7 @@ func (testHarness *harness) insertSyncJob(ownerID, designID int, status, doneAtE
 	return int(id)
 }
 
-// insertNotification creates a notification for a user. readAtExpression
-// follows the same rule as doneAtExpression in insertDownloadJob.
+// insertNotification: readAtExpression follows the same rule.
 func (testHarness *harness) insertNotification(ownerID int, notificationType, title, readAtExpression string) int {
 	testHarness.t.Helper()
 	if readAtExpression == "" {

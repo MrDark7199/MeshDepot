@@ -1,19 +1,13 @@
 package api
 
-// Share links hand a design to someone who has no account: whoever holds the
-// URL may look at it and download its files, and nothing else.
+// Share links hand a design to someone who has no account: whoever holds the URL
+// may look at it and download its files, and nothing else.
 //
-// The token is the whole credential, so the rules that follow from that are
-// deliberate rather than incidental:
-//
-//   - 128 random bits, checked on every request, and the only copy lives in the
-//     row. There is no second factor to fall back on.
-//   - The public view is assembled by hand, field by field, rather than by
-//     handing out the design row. A `SELECT *` would carry the owner's notes
-//     and every column added later straight to a stranger.
-//   - An expired or deleted link is a 404, like a token that never existed. A
-//     separate "expired" answer would confirm that the design is there and
-//     invite waiting for the next link.
+// The token is the whole credential, so: 128 random bits checked on every
+// request; the public view assembled field by field rather than from the design
+// row, since a SELECT * would carry the owner's notes to a stranger; and an
+// expired link answered with 404 like one that never existed, because a separate
+// "expired" would confirm the design is there.
 
 import (
 	"archive/zip"
@@ -31,20 +25,18 @@ import (
 	"meshdepot/internal/publicid"
 )
 
-// maxShareLinkHours caps the lifetime at ten years. 0 is a link without an
-// expiry - it runs until the owner deletes it. Anything in between is the
-// owner's business; the cap only keeps an absurd number out of the column.
+// maxShareLinkHours caps the lifetime at ten years; 0 is a link without an
+// expiry. The cap only keeps an absurd number out of the column.
 const maxShareLinkHours = 24 * 365 * 10
 
-// shareLink is a resolved, still-valid link.
 type shareLink struct {
 	id       int
 	designID int
 	ownerID  int
 }
 
-// resolveShareLink looks a token up and checks that it may still be used.
-// found=false covers every reason equally: unknown, deleted, expired.
+// resolveShareLink checks that a token may still be used. found=false covers
+// every reason equally: unknown, deleted, expired.
 func (server *Server) resolveShareLink(token string) (shareLink, bool) {
 	if !publicid.Valid(token) {
 		return shareLink{}, false
@@ -66,7 +58,6 @@ func (server *Server) resolveShareLink(token string) (shareLink, bool) {
 	return link, true
 }
 
-// ShareLinksIndex lists the links of a design, for its owner.
 func (server *Server) ShareLinksIndex(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -84,19 +75,16 @@ func (server *Server) ShareLinksIndex(responseWriter http.ResponseWriter, reques
 	httpx.Success(responseWriter, rows)
 }
 
-// UserShareLinksIndex lists every link the member has handed out, across all of
-// their designs. The account settings show them in one place: a link that lives
-// on a design nobody opens is otherwise easy to forget.
-//
-// Each row names its design by the public id, so the existing per-design delete
-// can revoke it - the account view needs no endpoint of its own for that.
+// UserShareLinksIndex lists every link the member has handed out: a link on a
+// design nobody opens is easy to forget. Each row names its design by public id,
+// so the per-design delete can revoke it.
 func (server *Server) UserShareLinksIndex(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID, ok := server.requireSelf(responseWriter, request)
 	if !ok {
 		return
 	}
-	// d.public_id is aliased to design_id rather than selected as public_id: the
-	// response writer promotes a public_id over "id", which here is the link's.
+	// Aliased to design_id rather than public_id: the response writer promotes a
+	// public_id over "id", which here is the link's.
 	rows, _ := dbutil.QueryMaps(server.DB, `
 		SELECT l.id, l.token, l.expires_at, l.last_used_at, l.view_count, l.created_at,
 			d.public_id AS design_id, d.name AS design_name,
@@ -106,7 +94,6 @@ func (server *Server) UserShareLinksIndex(responseWriter http.ResponseWriter, re
 	httpx.Success(responseWriter, rows)
 }
 
-// ShareLinksStore creates a link for a design.
 func (server *Server) ShareLinksStore(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -143,7 +130,6 @@ func (server *Server) ShareLinksStore(responseWriter http.ResponseWriter, reques
 	httpx.SuccessStatus(responseWriter, http.StatusCreated, row, "Share link created")
 }
 
-// ShareLinksDestroy deletes a link, which takes effect immediately.
 func (server *Server) ShareLinksDestroy(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -178,8 +164,8 @@ func (server *Server) PublicShareShow(responseWriter http.ResponseWriter, reques
 		httpx.Error(responseWriter, http.StatusNotFound, "error.not_found")
 		return
 	}
-	// Counted rather than logged: the owner sees that the link is being used
-	// without the app keeping a record of who used it.
+	// Counted rather than logged: the owner sees the link is being used without the
+	// app keeping a record of who used it.
 	dbutil.ExecLogged(server.DB,
 		"UPDATE design_share_links SET view_count = view_count + 1, last_used_at = CURRENT_TIMESTAMP WHERE id = ?", link.id)
 
@@ -189,8 +175,7 @@ func (server *Server) PublicShareShow(responseWriter http.ResponseWriter, reques
 	images, _ := dbutil.QueryMaps(server.DB,
 		"SELECT path, is_cover FROM design_images WHERE design_id = ? ORDER BY sort_order ASC, created_at ASC", link.designID)
 
-	// Only the current version: a link is for handing someone the design as it
-	// stands, not its history.
+	// Only the current version: a link hands over the design as it stands.
 	files := []map[string]any{}
 	version, hasVersion, _ := dbutil.QueryMap(server.DB,
 		"SELECT id, version FROM design_files WHERE design_id = ? ORDER BY is_current DESC, id DESC LIMIT 1", link.designID)
@@ -233,8 +218,8 @@ func (server *Server) PublicShareDownload(responseWriter http.ResponseWriter, re
 		httpx.Error(responseWriter, http.StatusNotFound, "error.not_found")
 		return
 	}
-	// Restricted to the design the token names. Without the join to design_files
-	// a valid token would be a key to every file on the server.
+	// Restricted to the design the token names. Without the join a valid token would
+	// be a key to every file on the server.
 	entry, found, failure := scanFileEntry(server.DB.QueryRow("SELECT "+fileEntryColumns+`
 		FROM design_file_entries dfe
 		JOIN design_files df ON df.id = dfe.design_file_id
@@ -251,9 +236,8 @@ func (server *Server) PublicShareDownload(responseWriter http.ResponseWriter, re
 	serveAttachment(responseWriter, entryPath, entryFilename(entry))
 }
 
-// PublicShareDownloadAll streams the whole current version as one ZIP, which is
-// what someone handed a link usually wants - the alternative is clicking every
-// file. A version with a single file is served as that file.
+// PublicShareDownloadAll streams the current version as one ZIP, which is what
+// someone handed a link usually wants. A single file is served as that file.
 func (server *Server) PublicShareDownloadAll(responseWriter http.ResponseWriter, request *http.Request) {
 	link, ok := server.resolveShareLink(request.PathValue("token"))
 	if !ok {

@@ -8,32 +8,25 @@ import (
 	"strconv"
 )
 
-// MeshOptions controls the downsampling resolution of the 3D reconstruction.
-// Smaller steps = finer (more detail). Thanks to greedy meshing (coplanar faces
-// are merged into large rectangles) the STL stays small despite fine voxels.
+// MeshOptions controls the downsampling resolution. Smaller steps mean more
+// detail; greedy meshing keeps the STL small despite fine voxels.
 type MeshOptions struct {
 	XYStep    int     // pixel block size in X/Y (>=1)
 	ZStep     int     // only every ZStep-th layer (>=1)
 	Threshold uint8   // grayscale > Threshold counts as exposed/filled
 	MinFill   float32 // a voxel counts as filled only from this occupancy fraction (0..1).
-	// Filters thin support structures/antialiasing edges → fewer triangles, cleaner model.
+	// Filters thin supports and antialiasing edges.
 }
 
-// DefaultMeshOptions: for Marching Cubes (smooth, recognizable surface).
-//
-// Cubic 0.4mm voxels on a 50µm/50µm printer: 8 pixels in X/Y, 8 layers in Z.
-// Sampling finer in Z than in X/Y is wasted - with Marching Cubes every grid
-// plane costs triangles, while the staircase the eye notices is the one in X/Y.
-// Measured on a 1389-layer Photon Mono X file: 2.7M triangles, 131MB of STL,
-// about a second to build. Halving XYStep again quadruples that.
-//
-// MinFill 0.5 removes thin supports/honeycomb walls (which would otherwise
-// produce huge triangle counts) → manageable file size with a recognizable model.
+// DefaultMeshOptions targets Marching Cubes. Cubic 0.4mm voxels on a 50µm printer
+// are 8 pixels in X/Y and 8 layers in Z: sampling finer in Z is wasted, since the
+// staircase the eye notices is the one in X/Y. Measured on a 1389-layer file:
+// 2.7M triangles, 131MB, about a second - halving XYStep quadruples that. MinFill
+// 0.5 removes thin supports and honeycomb walls.
 func DefaultMeshOptions() MeshOptions {
 	return MeshOptions{XYStep: 6, ZStep: 4, Threshold: 0, MinFill: 0.3}
 }
 
-// MeshStats summarizes the result (for logging/debugging).
 type MeshStats struct {
 	NX, NY, NZ int
 	Occupied   int
@@ -41,7 +34,6 @@ type MeshStats struct {
 	SizeMM     [3]float32 // voxel-space extent in mm (X,Y,Z=print height)
 }
 
-// grid3d is a bit occupancy grid (1 bit/voxel, memory-efficient for fine grids).
 type grid3d struct {
 	nx, ny, nz int
 	bits       []uint64
@@ -63,9 +55,8 @@ func (grid *grid3d) set(x, y, z int) {
 }
 func (grid *grid3d) setIndex(index int) { grid.bits[index>>6] |= uint64(1) << (uint(index) & 63) }
 
-// buildGrid decodes the RLE of each (ZStep-)layer and marks occupied cells.
-// Instead of expanding each layer into a 9.2M-pixel array, it walks the runs
-// directly (O(#runs)) and marks covered downsample cells (block "any").
+// buildGrid walks the runs directly rather than expanding each layer into a
+// 9.2M-pixel array, marking the downsample cells they cover.
 func (file *File) buildGrid(options MeshOptions) (*grid3d, error) {
 	resolutionX, resolutionY := int(file.Header.ResolutionX), int(file.Header.ResolutionY)
 	if options.XYStep < 1 {
@@ -126,8 +117,8 @@ func (file *File) buildGrid(options MeshOptions) (*grid3d, error) {
 	return grid, nil
 }
 
-// countRun adds the exposed pixels of the run [position,position+run) to the
-// covered downsample cells. A run can cross row boundaries → processed row by row.
+// countRun adds the exposed pixels of a run to the covered cells. A run can cross
+// row boundaries, so it is processed row by row.
 func countRun(counts []int32, position, run, resolutionX, step, nx, maxX, maxY int) {
 	end := position + run
 	for position < end {
@@ -165,10 +156,8 @@ func countRun(counts []int32, position, run, resolutionX, step, nx, maxX, maxY i
 	}
 }
 
-// ReconstructSTL reconstructs a surface mesh from the layer stack and returns it
-// as a binary STL. Greedy meshing merges coplanar boundary faces into large
-// rectangles (drastically fewer triangles at the same resolution). Output is
-// Z-up (print height = Z); the viewer orients Z-up models itself.
+// ReconstructSTL returns a binary STL of the layer stack. Greedy meshing merges
+// coplanar boundary faces into large rectangles. Output is Z-up.
 func (file *File) ReconstructSTL(options MeshOptions) ([]byte, MeshStats, error) {
 	grid, failure := file.buildGrid(options)
 	if failure != nil {
@@ -182,7 +171,6 @@ func (file *File) ReconstructSTL(options MeshOptions) ([]byte, MeshStats, error)
 
 	var body bytes.Buffer
 	triangleCount := 0
-	// emitQuad writes two triangles for the rectangle origin, origin+edge1, origin+edge1+edge2, origin+edge2.
 	emitQuad := func(origin, edge1, edge2, normal [3]float32) {
 		cornerA := origin
 		cornerB := add(origin, edge1)
@@ -204,9 +192,8 @@ func (file *File) ReconstructSTL(options MeshOptions) ([]byte, MeshStats, error)
 	return output.Bytes(), stats, nil
 }
 
-// greedyMesh extracts the surface of the occupancy grid with greedy meshing
-// (coplanar neighboring faces → large quads) and calls emit per quad. It returns
-// the number of occupied voxels. Classic algorithm over the 3 axes × 2 directions.
+// greedyMesh extracts the surface of the occupancy grid, calling emit per quad,
+// and returns the number of occupied voxels.
 func greedyMesh(grid *grid3d, cellSize [3]float32, emit func(origin, edge1, edge2, normal [3]float32)) int {
 	dims := [3]int{grid.nx, grid.ny, grid.nz}
 	occupied := 0

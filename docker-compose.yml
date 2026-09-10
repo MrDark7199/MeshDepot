@@ -44,7 +44,7 @@ services:
     # Every entry below says whether it is required or optional. "Optional" means
     # the line can be deleted and the app still starts with the default named.
     environment:
-      # ── Required - the app does not start without these two ─────────────────
+      # - Required - the app does not start without these two ---------
       # APP_KEY derives the per-user AES-256 key that encrypts all stored
       # platform credentials. There is deliberately no default: the app refuses
       # to start without one, and the `:?` below turns that into an immediate
@@ -65,7 +65,7 @@ services:
       #   - HTTP_ADDR=127.0.0.1:${APP_PORT:-9000}
       - HTTP_ADDR=:${APP_PORT:-9000}
 
-      # ── Optional: reverse proxy / TLS ───────────────────────────────────────
+      # - Optional: reverse proxy / TLS --------------------
       # Default false. Set to true when a TLS-terminating proxy sits in front:
       # it enables Secure cookies and HSTS. Leave it false for plain
       # http://localhost, otherwise the browser drops the session cookie and the
@@ -76,10 +76,15 @@ services:
       # served from the same origin as the API - the normal case.
       - APP_URL=${APP_URL:-}
 
-      # ── Optional: operations ────────────────────────────────────────────────
+      # - Optional: operations ------------------------
       # none | error | warning | info | all. Set to `error` here for production
-      # use; the app's own default is `all`. `info` traces every download step
-      # and is only useful for debugging.
+      # use; the app's own default is `all`. `info` adds the ordinary course of
+      # events - startup, sync runs, downloads - and `all` the traces that are
+      # only useful while chasing something down.
+      #
+      # It covers the Firefox resolver in the same container as well. What it
+      # never silences is a startup failure: a container that refuses to run
+      # says why at every level.
       - LOG_LEVEL=${LOG_LEVEL:-error}
       # Drives the scheduler's wall-clock decisions and log timestamps. The image
       # sets no timezone, so without this the container runs on UTC.
@@ -92,7 +97,7 @@ services:
       # bridge address.
       #   - TRUSTED_PROXIES=127.0.0.1/32
 
-      # ── Optional: the three internal ports ──────────────────────────────────
+      # - Optional: the three internal ports -----------------
       # These are the services that run inside the container and, because it
       # shares the host's network stack, bind on the host. They are kept on
       # 127.0.0.1 deliberately: nothing outside this machine may reach them.
@@ -118,7 +123,7 @@ services:
       # sooner, raise it if a long queue keeps re-warming the browser.
       - MAKERWORLD_IDLE_MS=${MAKERWORLD_IDLE_MS:-900000}
 
-      # ── Nothing to configure here ───────────────────────────────────────────
+      # - Nothing to configure here ----------------------
       # Nothing to configure for the platforms: every token and login belongs to
       # a user and is entered in the web UI, not here. There is no server-wide
       # fallback token (see PlatformToken in internal/platforms/helpers.go).

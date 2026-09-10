@@ -226,7 +226,7 @@ export function AddDesignModal(props: AddDesignModalProps) {
 
         <div style={{ display: 'flex', 'flex-direction': 'column' }}>
 
-        {/* ── URL Import mode ── */}
+        {/* - URL Import mode - */}
         <Show when={activeMode() === 'url'}>
           <div style={{ display: 'flex', 'flex-direction': 'column', gap: '15px' }}>
             <div>
@@ -293,7 +293,7 @@ export function AddDesignModal(props: AddDesignModalProps) {
           </div>
         </Show>
 
-        {/* ── Manual mode ── */}
+        {/* - Manual mode - */}
         <Show when={activeMode() === 'manual'}>
           <div style={{ display: 'flex', 'flex-direction': 'column', gap: '15px' }}>
             <div>

@@ -8,8 +8,8 @@ import (
 	"strings"
 )
 
-// DecodeJSON reads the request body as JSON into target. An empty body is
-// allowed and leaves target unchanged.
+// DecodeJSON reads the body as JSON into target. An empty body is allowed and
+// leaves target unchanged.
 func DecodeJSON(request *http.Request, target any) error {
 	body, failure := io.ReadAll(io.LimitReader(request.Body, 1<<20))
 	if failure != nil {
@@ -22,13 +22,12 @@ func DecodeJSON(request *http.Request, target any) error {
 }
 
 // trustedProxies are the networks whose X-Real-IP header ClientIP believes.
-// Empty by default: the standard deployment publishes the app port directly
-// (docker-compose.yml), and there any client can set the header itself.
+// Empty by default: the standard deployment publishes the app port directly, and
+// there any client can set the header itself.
 var trustedProxies []*net.IPNet
 
-// SetTrustedProxies configures the reverse proxies whose X-Real-IP header is
-// honoured. Entries are CIDRs ("10.0.0.0/8") or plain IPs ("172.18.0.5").
-// Invalid entries are reported and ignored. Call once at startup.
+// SetTrustedProxies takes CIDRs or plain IPs; invalid entries are reported and
+// ignored. Call once at startup.
 func SetTrustedProxies(entries []string) []string {
 	var networks []*net.IPNet
 	var invalid []string
@@ -55,11 +54,9 @@ func SetTrustedProxies(entries []string) []string {
 	return invalid
 }
 
-// ClientIP determines the client IP. X-Real-IP is only believed when the request
-// actually came from a configured trusted proxy - otherwise it is attacker
-// controlled: with the app directly exposed, a client can send a fresh value per
-// request and walk straight through the login rate limit. X-Forwarded-For is
-// deliberately ignored entirely.
+// ClientIP believes X-Real-IP only from a configured trusted proxy - otherwise it
+// is attacker controlled, and a client could send a fresh value per request and
+// walk through the login rate limit. X-Forwarded-For is ignored entirely.
 func ClientIP(request *http.Request) string {
 	remote := remoteIP(request)
 	if realIP := request.Header.Get("X-Real-IP"); realIP != "" && isTrustedProxy(remote) {
@@ -73,7 +70,6 @@ func ClientIP(request *http.Request) string {
 	return "unknown"
 }
 
-// remoteIP is the peer address of the connection, without the port.
 func remoteIP(request *http.Request) string {
 	if host, _, failure := net.SplitHostPort(request.RemoteAddr); failure == nil {
 		return host
@@ -81,7 +77,6 @@ func remoteIP(request *http.Request) string {
 	return request.RemoteAddr
 }
 
-// isTrustedProxy reports whether address is one of the configured proxies.
 func isTrustedProxy(address string) bool {
 	if len(trustedProxies) == 0 {
 		return false
@@ -98,14 +93,10 @@ func isTrustedProxy(address string) bool {
 	return false
 }
 
-// IsSecureConnection reports whether the request reached this server over a
-// connection nobody on the way could read.
-//
-// TLS terminated here is the plain case. Behind a reverse proxy the connection
-// to this process is plaintext by design, so the proxy's own statement is used -
-// but only from a proxy the operator configured as trusted. An
-// X-Forwarded-Proto from anywhere else is a claim by whoever sent the request,
-// and believing it would make the check decorative.
+// IsSecureConnection reports whether the request arrived over a connection nobody
+// on the way could read. Behind a reverse proxy the last hop is plaintext by
+// design, so the proxy's X-Forwarded-Proto is used - but only from one the
+// operator configured as trusted, since otherwise it is the sender's own claim.
 func IsSecureConnection(request *http.Request) bool {
 	if request.TLS != nil {
 		return true
@@ -121,12 +112,9 @@ func IsSecureConnection(request *http.Request) bool {
 	return forwarded == "https"
 }
 
-// IsLocalClient reports whether the peer is this machine or its own network.
-//
-// Used where a plaintext connection is tolerable: a request from the same
-// machine or the same house crosses nothing an outsider could listen on, and a
-// self-hosted MeshDepot on a home network is the ordinary case. From anywhere
-// else, plaintext means the secret in the header is readable on the way.
+// IsLocalClient reports whether the peer is this machine or its own network,
+// where a plaintext connection crosses nothing an outsider could listen on - the
+// ordinary case for a self-hosted MeshDepot.
 func IsLocalClient(request *http.Request) bool {
 	address := net.ParseIP(ClientIP(request))
 	if address == nil {

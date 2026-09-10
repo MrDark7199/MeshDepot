@@ -2,17 +2,15 @@ package api
 
 // Import of a design collected by the browser extension.
 //
-// Deliberately outside the download queue. The links the extension hands over
-// are presigned and expire about five minutes after MakerWorld issues them, so a
-// job waiting behind a backlog would arrive to find them dead. The import runs
-// during the request and answers with what happened - which is also what the
-// extension needs in order to say "done" or "failed" while the visitor is still
-// looking at the page.
+// Deliberately outside the download queue: the links are presigned and expire
+// about five minutes after MakerWorld issues them, so a job waiting behind a
+// backlog would arrive to find them dead. The import runs during the request and
+// answers with what happened, which is what the extension needs while the visitor
+// is still on the page.
 
 import (
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
@@ -22,36 +20,29 @@ import (
 	"meshdepot/internal/platforms"
 	"meshdepot/internal/quota"
 	"meshdepot/internal/translate"
+
+	"meshdepot/internal/logx"
 )
 
-// BrowserImportAPIVersion is the contract this server speaks with the browser
-// extension, and BrowserImportAPIMinVersion the oldest it still accepts.
+// BrowserImportAPIVersion is the contract this server speaks with the extension,
+// BrowserImportAPIMinVersion the oldest it still accepts. The two halves update
+// separately, so without a version to compare a mismatch shows up as an import
+// that fails for no stated reason.
 //
-// They exist because the two halves are updated separately: the extension lives
-// in someone's browser and updates itself, the server is self-hosted and gets
-// updated when its operator gets round to it. Without a version to compare, a
-// mismatch shows up as an import that fails for no stated reason.
-//
-// Raise BrowserImportAPIVersion when the payload gains something an older server
-// would ignore; raise the minimum only when an older extension can genuinely no
-// longer be served.
+// Raise the version when the payload gains something an older server would
+// ignore; raise the minimum only when an older extension cannot be served.
 const (
 	BrowserImportAPIVersion    = 1
 	BrowserImportAPIMinVersion = 1
 )
 
-// maxBrowserImportFiles bounds one import. A model with more plates than this
-// does not exist in practice, and the limit keeps a malformed or hostile request
-// from turning into an unbounded series of downloads.
+// maxBrowserImportFiles keeps a malformed or hostile request from turning into
+// an unbounded series of downloads.
 const maxBrowserImportFiles = 40
 
 // BrowserImportStatus tells the extension whether it can reach this instance and
-// whether its key is good, in one call.
-//
-// The public health endpoint answers the first question but not the second, and
-// a client that shows "connected" on the strength of a reachable host is
-// misleading: the import would still fail on a revoked key. Reaching this at all
-// means the key passed the middleware.
+// whether its key is good, in one call. The public health endpoint answers only
+// the first, and "connected" on the strength of a reachable host is misleading.
 func (server *Server) BrowserImportStatus(responseWriter http.ResponseWriter, request *http.Request) {
 	var name string
 	server.DB.QueryRow("SELECT name FROM users WHERE id = ?", userID(request)).Scan(&name)
@@ -76,8 +67,7 @@ type browserImportBody struct {
 		Images      []string `json:"images"`
 		Tags        []string `json:"tags"`
 	} `json:"meta"`
-	// AddToCollection files the design under a collection of the extension's own,
-	// for members who want their browser imports kept together.
+	// AddToCollection files the design under a collection of the extension's own.
 	AddToCollection bool `json:"add_to_collection"`
 	Files           []struct {
 		Name string `json:"name"`
@@ -86,7 +76,6 @@ type browserImportBody struct {
 }
 
 // BrowserImport takes a design the extension collected and stores it.
-//
 // Authenticated by API key only (see auth.RequireAPIKey): the route downloads
 // files from URLs in the request body, and one reachable with an ambient session
 // cookie could be triggered by any page the member happens to visit.
@@ -104,9 +93,8 @@ func (server *Server) BrowserImport(responseWriter http.ResponseWriter, request 
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.url_required")
 		return
 	}
-	// The platform is derived from the URL rather than believed: the body says
-	// what it likes, and this decides where the design is filed and which sync
-	// later touches it.
+	// Derived from the URL rather than believed: the body says what it likes, and
+	// this decides where the design is filed and which sync later touches it.
 	platform := detectPlatform(sourceURL)
 	if platform == "" {
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.unsupported_platform")
@@ -121,9 +109,13 @@ func (server *Server) BrowserImport(responseWriter http.ResponseWriter, request 
 		return
 	}
 
-	// Checked before anything is fetched, exactly as the download queue does: a
-	// design that cannot be kept should not spend minutes being downloaded first.
-	if usage := quota.Of(server.DB, currentUserID); usage.Exceeded() {
+	// Before anything is fetched, as the download queue does it. A quota that
+	// could not be read is not a quota of zero: refuse for now rather than let
+	// the import past a limit nobody could check.
+	if usage := quota.Of(server.DB, currentUserID); usage.Unknown {
+		httpx.Error(responseWriter, http.StatusServiceUnavailable, "error.storage_check_failed")
+		return
+	} else if usage.Exceeded() {
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.storage_quota_exceeded")
 		return
 	}
@@ -139,8 +131,7 @@ func (server *Server) BrowserImport(responseWriter http.ResponseWriter, request 
 		return
 	}
 
-	// Asking for this design by hand outranks an earlier "delete and keep it
-	// gone", exactly as it does for a queued download.
+	// Asking for this design by hand outranks an earlier "delete and keep it gone".
 	platforms.LiftSyncExclusion(server.DB, currentUserID, platform, "", sourceURL)
 
 	importRequest := browserImportRequestFrom(body, platform, sourceURL)
@@ -152,10 +143,9 @@ func (server *Server) BrowserImport(responseWriter http.ResponseWriter, request 
 
 	outcome, failure := platforms.ImportFromBrowser(server.DB, server.owner(request), importRequest)
 	if failure != nil {
-		// The download URLs are left out of the log on purpose: for their five
-		// minutes they are a complete substitute for the visitor's session on
-		// that platform, and a log file outlives them by rather longer.
-		log.Printf("[browser-import] user %d, %s: %v (%d link(s) unusable)",
+		// The download URLs are left out on purpose: for their five minutes they are a
+		// complete substitute for the visitor's session, and a log outlives them.
+		logx.Errorf("[browser-import] user %d, %s: %v (%d link(s) unusable)",
 			currentUserID, sourceURL, failure, len(outcome.SkippedURL))
 		key := failure.Error()
 		if !strings.HasPrefix(key, "error.") {
@@ -170,18 +160,15 @@ func (server *Server) BrowserImport(responseWriter http.ResponseWriter, request 
 	httpx.SuccessStatus(responseWriter, http.StatusCreated, map[string]any{
 		"design_id":  outcome.DesignID,
 		"file_count": outcome.FileCount,
-		// How many links were dead by the time the server tried them. The import
-		// still counts as done - four of five plates beats none - but the
-		// extension should be able to say so.
+		// How many links were dead by the time the server tried them. The import still
+		// counts as done, but the extension should be able to say so.
 		"skipped_count": len(outcome.SkippedURL),
 		"platform":      platform,
-		// Named back so the extension can say where the design went, and stay
-		// quiet when the filing did not happen.
+		// So the extension can say where the design went.
 		"collection": outcome.Collection,
 	}, "Design imported")
 }
 
-// coerceName reads a design name out of a row, with a fallback for the message.
 func coerceName(value any) string {
 	if text, ok := value.(string); ok && text != "" {
 		return text
@@ -189,17 +176,11 @@ func coerceName(value any) string {
 	return "Unknown"
 }
 
-// BrowserImportUpload takes a design whose files the extension carries itself.
-//
-// The sibling of BrowserImport, and it exists because not every platform hands
-// out a link the server can follow. Thingiverse assembles its archive in the
-// browser - that is the countdown before the download starts - and the result is
-// a blob: address that means nothing outside that browser. There is nothing to
-// fetch, so the bytes come with the request.
-//
-// multipart/form-data: "payload" carries the same JSON as the link route, and
-// every "file" part is one file. Authenticated by API key only, for the same
-// reason as its sibling.
+// BrowserImportUpload takes a design whose files the extension carries itself,
+// for platforms that hand out no link the server can follow: Thingiverse
+// assembles its archive in the browser, and a blob: address means nothing outside
+// it. "payload" carries the same JSON as the link route, every "file" part is one
+// file. API key only, for the same reason as its sibling.
 func (server *Server) BrowserImportUpload(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 
@@ -221,7 +202,10 @@ func (server *Server) BrowserImportUpload(responseWriter http.ResponseWriter, re
 		return
 	}
 
-	if usage := quota.Of(server.DB, currentUserID); usage.Exceeded() {
+	if usage := quota.Of(server.DB, currentUserID); usage.Unknown {
+		httpx.Error(responseWriter, http.StatusServiceUnavailable, "error.storage_check_failed")
+		return
+	} else if usage.Exceeded() {
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.storage_quota_exceeded")
 		return
 	}
@@ -253,8 +237,7 @@ func (server *Server) BrowserImportUpload(responseWriter http.ResponseWriter, re
 		fileHeader := header
 		uploads = append(uploads, platforms.BrowserUpload{
 			Name: fileHeader.Filename,
-			// Opened when the file is actually written, so nothing is held open
-			// while the others are processed.
+			// Opened when the file is written, so nothing is held open meanwhile.
 			Open: func() (io.ReadCloser, error) { return fileHeader.Open() },
 		})
 	}
@@ -262,7 +245,7 @@ func (server *Server) BrowserImportUpload(responseWriter http.ResponseWriter, re
 	outcome, failure := platforms.ImportUploadsFromBrowser(
 		server.DB, server.owner(request), browserImportRequestFrom(body, platform, sourceURL), uploads)
 	if failure != nil {
-		log.Printf("[browser-import] upload for user %d, %s: %v", currentUserID, sourceURL, failure)
+		logx.Errorf("[browser-import] upload for user %d, %s: %v", currentUserID, sourceURL, failure)
 		key := failure.Error()
 		if !strings.HasPrefix(key, "error.") {
 			key = "error.browser_import_failed"
@@ -282,8 +265,8 @@ func (server *Server) BrowserImportUpload(responseWriter http.ResponseWriter, re
 	}, "Design imported")
 }
 
-// browserImportRequestFrom builds the platform-layer request from a decoded
-// body. Shared by both routes, which differ only in where the files come from.
+// browserImportRequestFrom is shared by both routes, which differ only in where
+// the files come from.
 func browserImportRequestFrom(body browserImportBody, platform, sourceURL string) platforms.BrowserImportRequest {
 	request := platforms.BrowserImportRequest{
 		SourceURL:   sourceURL,
@@ -308,15 +291,10 @@ func browserImportRequestFrom(body browserImportBody, platform, sourceURL string
 	return request
 }
 
-// afterBrowserImport does what the download queue does once a design is stored.
-//
-// Both were missing here, and both are things a member has already asked for
-// elsewhere: the texts go through the translator when that is switched on - a
-// design imported in Spanish stayed Spanish, while the same design through the
-// queue arrived in English - and the storage warning fires on the crossing.
-//
-// Neither may fail the import. The design is in the library by this point, and
-// reporting an error over a translation would be a lie about what happened.
+// afterBrowserImport does what the download queue does once a design is stored:
+// the texts go through the translator when that is switched on - a design
+// imported in Spanish stayed Spanish - and the storage warning fires on the
+// crossing. Neither may fail the import, which has already succeeded.
 func (server *Server) afterBrowserImport(userID int, outcome platforms.BrowserImportOutcome) {
 	var description *string
 	if strings.TrimSpace(outcome.Description) != "" {

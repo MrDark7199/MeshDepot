@@ -1,28 +1,25 @@
 package platforms
 
-// Thingiverse downloader. Loads a design via the Thingiverse REST API (bearer
-// token, no browser); the model files are fetched via Tor with retry because of
-// CDN IP blocks.
+// Thingiverse downloader. The design comes from the REST API with a bearer token;
+// the files go through Tor with retry, because of CDN IP blocks.
 
 import (
 	"fmt"
-	"log"
 	"meshdepot/internal/coerce"
 	"net/url"
 	"path/filepath"
 	"regexp"
+
+	"meshdepot/internal/logx"
 )
 
-// thingIDPattern extracts the thing ID from a Thingiverse URL.
 var thingIDPattern = regexp.MustCompile(`(?i)(?:thing[:\-/])(\d+)`)
 
-// printableExtPattern recognizes printable file extensions (preferred selection).
+// printableExtPattern recognizes the extensions preferred for import.
 var printableExtPattern = regexp.MustCompile(`(?i)\.(stl|3mf|obj|step|stp)$`)
 
-// Thingiverse implements Downloader for thingiverse.com.
 type Thingiverse struct{ Deps }
 
-// Download loads a Thingiverse design via the REST API.
 func (thingiverse Thingiverse) Download(sourceURL string, owner Owner, progress func(step, label string, current, total int)) (Result, error) {
 	// The numeric id is only for credentials; every path comes from owner.Layout.
 	userID := owner.ID
@@ -66,7 +63,7 @@ func (thingiverse Thingiverse) Download(sourceURL string, owner Owner, progress 
 		}
 	}
 
-	// Images via the dedicated images endpoint (largest size preferred).
+	// From the dedicated images endpoint, largest size preferred.
 	allImageURLs := thingiverse.collectImageURLs(thingID, token, thingData)
 
 	fileList, _ := thingiverseAPI("https://api.thingiverse.com/things/"+thingID+"/files", token).([]any)
@@ -109,10 +106,9 @@ func (thingiverse Thingiverse) Download(sourceURL string, owner Owner, progress 
 			continue
 		}
 
-		// api.thingiverse.com/v2/files/.../download returns the file directly (200).
-		// Direct first; only on an IP block (403/soft block: HTML/JSON instead of file)
-		// retry via Tor with a route change - datacenter IPs are partly blocked, Tor
-		// exits conversely blocked by Thingiverse itself.
+		// The API returns the file directly. Direct first; only on an IP block - a 403,
+		// or HTML instead of a file - retry via Tor with a route change, since datacenter
+		// IPs are partly blocked and Tor exits are blocked by Thingiverse itself.
 		authHeader := map[string]string{"Authorization": "Bearer " + token}
 		tempPath := filepath.Join(tempDir, sanitizeFileName(fileName))
 		stored := downloadFileTo(downloadClient(), downloadURL, tempPath, authHeader)
@@ -122,7 +118,7 @@ func (thingiverse Thingiverse) Download(sourceURL string, owner Owner, progress 
 					stored = true
 					break
 				}
-				log.Printf("[dl] %s: Tor attempt %d failed", fileName, attempt)
+				logx.Debugf("[dl] %s: Tor attempt %d failed", fileName, attempt)
 			}
 		}
 		if !stored {
@@ -161,8 +157,7 @@ func (thingiverse Thingiverse) Download(sourceURL string, owner Owner, progress 
 	}, nil
 }
 
-// collectImageURLs fetches the image URLs (largest size preferred) from the
-// images endpoint with a fallback to default_image.
+// collectImageURLs prefers the largest size and falls back to default_image.
 func (thingiverse Thingiverse) collectImageURLs(thingID, token string, thingData map[string]any) []string {
 	var urls []string
 	imageList, _ := thingiverseAPI("https://api.thingiverse.com/things/"+thingID+"/images", token).([]any)
@@ -206,14 +201,12 @@ func (thingiverse Thingiverse) collectImageURLs(thingID, token string, thingData
 	return urls
 }
 
-// Validate checks a Thingiverse app token via /users/me.
 func (thingiverse Thingiverse) Validate(credentials Credentials) bool {
 	return thingiverse.ValidateReason(credentials) == ""
 }
 
-// ValidateReason checks token and username separately and returns an i18n key
-// for the exact failure cause (or "" on success), so the frontend can show a
-// precise message.
+// ValidateReason checks token and username separately and returns an i18n key for
+// the exact cause, so the frontend can be precise.
 func (thingiverse Thingiverse) ValidateReason(credentials Credentials) string {
 	if credentials.Token == "" {
 		return "error.platform_invalid_token"
@@ -221,24 +214,22 @@ func (thingiverse Thingiverse) ValidateReason(credentials Credentials) string {
 	// 1) Token valid? /users/me must return the own account.
 	me, _ := thingiverseAPI("https://api.thingiverse.com/users/me", credentials.Token).(map[string]any)
 	if coerce.Text(me["name"]) == "" {
-		log.Printf("[tv-validate] token invalid: /users/me keys=%v", mapKeys(me))
+		logx.Warnf("[tv-validate] token invalid: /users/me keys=%v", mapKeys(me))
 		return "error.platform_invalid_token"
 	}
-	// 2) Username (if given) must be a real Thingiverse user - the library sync
-	// calls /users/{username}/likes; a typo would otherwise silently run into the
-	// void. NOT compared by equality with /users/me (the own display name may
-	// differ), but: is /users/{username} resolvable?
+	// 2) The username must be a real user - the library sync calls
+	// /users/{username}/likes, and a typo would silently run into the void. Checked
+	// for resolvability, not equality: the own display name may differ.
 	if credentials.Email != "" {
 		resolvedUser, _ := thingiverseAPI("https://api.thingiverse.com/users/"+url.PathEscape(credentials.Email), credentials.Token).(map[string]any)
 		if coerce.Text(resolvedUser["name"]) == "" {
-			log.Printf("[tv-validate] username %q not resolvable, keys=%v", credentials.Email, mapKeys(resolvedUser))
+			logx.Warnf("[tv-validate] username %q not resolvable, keys=%v", credentials.Email, mapKeys(resolvedUser))
 			return "error.platform_invalid_username"
 		}
 	}
 	return ""
 }
 
-// mapKeys returns the keys of a JSON map (only for debug logging).
 func mapKeys(input map[string]any) []string {
 	keys := make([]string, 0, len(input))
 	for key := range input {
@@ -247,8 +238,7 @@ func mapKeys(input map[string]any) []string {
 	return keys
 }
 
-// isFileBody checks whether a response body is a real file (not an empty body
-// and not an HTML/JSON error page of a soft block).
+// isFileBody rejects an empty body and the HTML or JSON page of a soft block.
 func isFileBody(data []byte) bool {
 	return len(data) >= minSmallFileBytes && data[0] != '<' && data[0] != '{'
 }

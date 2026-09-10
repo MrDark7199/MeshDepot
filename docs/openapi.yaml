@@ -247,7 +247,7 @@ security:
 
 paths:
 
-  # ── Health ──────────────────────────────────────────────────────────────────
+  # - Health ---------------------------------
 
   /version:
     get:
@@ -293,7 +293,7 @@ paths:
                 properties:
                   status: { type: string, example: ok }
 
-  # ── Auth ────────────────────────────────────────────────────────────────────
+  # - Auth ----------------------------------
 
   /auth/login:
     post:
@@ -426,7 +426,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  # ── Designs ─────────────────────────────────────────────────────────────────
+  # - Designs ---------------------------------
 
   /designs:
     get:
@@ -646,7 +646,7 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/Collection' }
 
-  # ── Design Files ─────────────────────────────────────────────────────────────
+  # - Design Files -------------------------------
 
   /designs/{id}/files:
     parameters:
@@ -848,7 +848,7 @@ paths:
         '404':
           description: Token expired or invalid
 
-  # ── Design Images ────────────────────────────────────────────────────────────
+  # - Design Images ------------------------------
 
   /designs/{id}/images:
     parameters:
@@ -907,7 +907,7 @@ paths:
                 properties:
                   cover_path: { type: string }
 
-  # ── Covers (public) ──────────────────────────────────────────────────────────
+  # - Covers (public) -----------------------------
 
   /covers/{path}:
     parameters:
@@ -944,7 +944,7 @@ paths:
             one answer for all three, so counting through design ids tells the
             caller nothing
 
-  # ── Tags ─────────────────────────────────────────────────────────────────────
+  # - Tags -----------------------------------
 
   /tags:
     get:
@@ -1031,7 +1031,7 @@ paths:
         '200':
           description: Tags updated
 
-  # ── Collections ──────────────────────────────────────────────────────────────
+  # - Collections -------------------------------
 
   /collections:
     get:
@@ -1163,7 +1163,7 @@ paths:
         '200':
           description: Removed
 
-  # ── Downloads ────────────────────────────────────────────────────────────────
+  # - Downloads --------------------------------
 
   /imports/browser/upload:
     post:
@@ -1474,7 +1474,7 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/QueueBlock' }
 
-  # ── Shares ───────────────────────────────────────────────────────────────────
+  # - Shares ----------------------------------
 
   /designs/{id}/shares:
     parameters:
@@ -1523,7 +1523,7 @@ paths:
         '200':
           description: Removed
 
-  # ── Users ────────────────────────────────────────────────────────────────────
+  # - Users ----------------------------------
 
   /users/search:
     get:
@@ -1953,7 +1953,7 @@ paths:
         '200':
           description: Sync triggered
 
-  # ── Notifications ────────────────────────────────────────────────────────────
+  # - Notifications ------------------------------
 
   /users/{id}/notifications:
     parameters:
@@ -2036,7 +2036,7 @@ paths:
         '200':
           description: Saved
 
-  # ── Admin ────────────────────────────────────────────────────────────────────
+  # - Admin ----------------------------------
 
   /admin/users:
     get:

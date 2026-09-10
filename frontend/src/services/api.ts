@@ -75,7 +75,7 @@ export interface DesignPage {
 }
 
 export const api = {
-  // ── Auth ──────────────────────────────────────────────────────────────────
+  // - Auth ---------------------------------
   login:       (credentials: { email: string; password: string; remember?: boolean }) => request('POST', '/auth/login', credentials),
   totpVerify:  (body: { pending_token: string; code: string; remember?: boolean }) => request('POST', '/auth/totp/verify', body),
   totpSetup:   () => request('POST', '/auth/totp/setup'),
@@ -84,7 +84,7 @@ export const api = {
   logout:      () => request('POST', '/auth/logout'),
   me:          () => request<User>('GET',  '/auth/me'),
 
-  // ── Designs ───────────────────────────────────────────────────────────────
+  // - Designs --------------------------------
   getDesigns: (searchQuery: string, filters: Partial<Filters> = {}, page = 1, perPage = 50, sort?: { field: string; dir: string }) => {
     const params = new URLSearchParams()
     if (searchQuery) params.set('search', searchQuery)
@@ -110,12 +110,12 @@ export const api = {
   checkDuplicates: (designId: DesignID) => request('GET', `/designs/${designId}/duplicates`),
   checkUrl: (url: string) => request<UrlCheckResult>('GET', `/designs/check-url?url=${encodeURIComponent(url)}`),
 
-  // ── Design Images ─────────────────────────────────────────────────────────
+  // - Design Images -----------------------------
   uploadImage: (designId: DesignID, formData: FormData) => upload(`/designs/${designId}/images`, formData),
   deleteImage: (designId: DesignID, imageId: number) => request('DELETE', `/designs/${designId}/images/${imageId}`),
   setDesignImageCover: (designId: DesignID, imageId: number) => request('PUT', `/designs/${designId}/images/${imageId}/cover`),
 
-  // ── Design Files ──────────────────────────────────────────────────────────
+  // - Design Files -----------------------------
   getFiles:    (designId: DesignID) => request<DesignFile[]>('GET', `/designs/${designId}/files`),
   uploadFile:  (designId: DesignID, formData: FormData) => upload(`/designs/${designId}/files`, formData),
   addEntries:  (designId: DesignID, fileVersionId: number, formData: FormData) =>
@@ -133,13 +133,13 @@ export const api = {
     request('POST', `/designs/${designId}/files/${fileVersionId}/entry/${entryId}/token`),
   stlUrl:      (designId: DesignID, fileVersionId: number) => `${BASE}/designs/${designId}/files/${fileVersionId}/stl`,
 
-  // ── Tags ─────────────────────────────────────────────────────────────────
+  // - Tags ---------------------------------
   getTags:   () => request<Tag[]>('GET', '/tags'),
   searchTags: (q: string, limit = 20) => request<Tag[]>('GET', `/tags/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   createTag: (data: { name: string; color: string }) => request<Tag>('POST', '/tags', data),
   deleteTag: (tagId: number) => request('DELETE', `/tags/${tagId}`),
 
-  // ── Collections ───────────────────────────────────────────────────────────
+  // - Collections ------------------------------
   getCollections:      (includeHidden = false) => request<Collection[]>('GET', `/collections${includeHidden ? '?include_hidden=1' : ''}`),
   createCollection:    (data: Record<string, unknown>) => request<Collection>('POST', '/collections', data),
   updateCollection:    (collectionId: number, data: Record<string, unknown>) => request('PUT', `/collections/${collectionId}`, data),
@@ -151,7 +151,7 @@ export const api = {
   removeFromCollection:(collectionId: number, designId: DesignID) => request('DELETE', `/collections/${collectionId}/designs/${designId}`),
   getDesignCollections:(designId: DesignID, includeHidden = false) => request<Collection[]>('GET', `/designs/${designId}/collections${includeHidden ? '?include_hidden=1' : ''}`),
 
-  // ── Share links (a design handed to someone without an account) ───────────
+  // - Share links (a design handed to someone without an account) ------
   getShareLinks:    (designId: DesignID) => request<ShareLink[]>('GET', `/designs/${designId}/links`),
   /** Every link of the account, whichever design it belongs to. */
   getUserShareLinks: (userId: string) => request<UserShareLink[]>('GET', `/users/${encodeURIComponent(userId)}/share-links`),
@@ -161,12 +161,12 @@ export const api = {
   /** The address to hand out - the page it opens needs no session. */
   shareLinkUrl:     (token: string) => `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(token)}`,
 
-  // ── Shares ────────────────────────────────────────────────────────────────
+  // - Shares --------------------------------
   getShares:    (designId: DesignID) => request<DesignShare[]>('GET', `/designs/${designId}/shares`),
   shareDesign:  (designId: DesignID, emails: string[]) => request('POST', `/designs/${designId}/shares`, { emails }),
   unshareDesign:(designId: DesignID, shareId: number) => request('DELETE', `/designs/${designId}/shares/${shareId}`),
 
-  // ── Users ─────────────────────────────────────────────────────────────────
+  // - Users ---------------------------------
   searchUsers:         (query: string) => request<User[]>('GET', `/users/search?q=${encodeURIComponent(query)}`),
   updateProfile:       (userId: string, data: Record<string, unknown>) => request<User>('PUT', `/users/${encodeURIComponent(userId)}/profile`, data),
   uploadAvatar:        (userId: string, file: File) => {
@@ -187,7 +187,7 @@ export const api = {
   /** Cooldowns, queue depth and whether any platform account exists - what the sync buttons need. */
   getSyncState:        (userId: string) => request<SyncState>('GET', `/users/${encodeURIComponent(userId)}/sync-state`),
 
-  // ── Download Queue ────────────────────────────────────────────────────────
+  // - Download Queue ----------------------------
   queueDownload:    (data: { source_url: string; platform?: string }) => request('POST', '/download', data),
   getQueue:         () => request<QueueItem[]>('GET', '/download/queue'),
   getQueueItem:     (queueId: number) => request<QueueItem>('GET', `/download/${queueId}`),
@@ -197,7 +197,7 @@ export const api = {
   /** Platforms whose download queue is currently paused or auto-blocked. */
   getQueueBlocks:   () => request<QueueBlock[]>('GET', '/queue/blocks'),
 
-  // ── Admin ─────────────────────────────────────────────────────────────────
+  // - Admin ---------------------------------
   adminStats:         () => request('GET', '/admin/stats'),
   adminListUsers:     () => request<User[]>('GET', '/admin/users'),
   adminCreateUser:    (data: Record<string, unknown>) => request('POST', '/admin/users', data),
@@ -217,7 +217,7 @@ export const api = {
   adminTranslationBackfill: () => request('POST', '/admin/translations/backfill'),
   getPublicSettings:   () => request('GET', '/settings/public'),
 
-  // ── Notifications ─────────────────────────────────────────────────────────
+  // - Notifications -----------------------------
   getNotifications:   (userId: string) => request('GET',  `/users/${encodeURIComponent(userId)}/notifications`),
   markAllRead:        (userId: string) => request('POST',   `/users/${encodeURIComponent(userId)}/notifications/read-all`),
   deleteAllNotifications: (userId: string) => request('DELETE', `/users/${encodeURIComponent(userId)}/notifications`),
@@ -225,10 +225,10 @@ export const api = {
   getNotifPrefs:      (userId: string) => request('GET',  `/users/${encodeURIComponent(userId)}/notification-prefs`),
   saveNotifPrefs:     (userId: string, data: Record<string, number | null>) => request('PUT', `/users/${encodeURIComponent(userId)}/notification-prefs`, data),
 
-  // ── Covers ────────────────────────────────────────────────────────────────
+  // - Covers --------------------------------
   coverUrl: (relativePath: string) => `${BASE}/covers/${relativePath}`,
 
-  // ── Platform Accounts ─────────────────────────────────────────────────────
+  // - Platform Accounts ---------------------------
   getPlatformAccounts:   (userId: string) => request<PlatformAccount[]>('GET', `/users/${encodeURIComponent(userId)}/platform-accounts`),
   savePlatformAccount:   (userId: string, data: Record<string, unknown>) => request('POST', `/users/${encodeURIComponent(userId)}/platform-accounts`, data),
   validatePlatformAccount: (userId: string, data: Record<string, unknown>) => request('POST', `/users/${encodeURIComponent(userId)}/platform-accounts/validate`, data),

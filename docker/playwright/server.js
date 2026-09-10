@@ -11,6 +11,20 @@ app.use(express.json())
 // be a second place to keep in sync.
 const LOOPBACK = '127.0.0.1'
 
+/**
+ * The same log levels the app honours (LOG_LEVEL: none|error|warning|info|all).
+ * The variable is set on the container, so this process inherits it. Anything
+ * unusable keeps every line rather than silencing the log by accident. Startup
+ * failures below print regardless: a service that refuses to run has to say why.
+ */
+const LOG_LEVELS = { none: 0, error: 1, warning: 2, info: 3, all: 4 }
+const LOG_LEVEL = LOG_LEVELS[(process.env.LOG_LEVEL || 'all').trim().toLowerCase()] ?? LOG_LEVELS.all
+
+function logError(message) { if (LOG_LEVEL >= LOG_LEVELS.error) console.error('[playwright] ' + message) }
+function logWarn(message)  { if (LOG_LEVEL >= LOG_LEVELS.warning) console.warn('[playwright] ' + message) }
+function logInfo(message)  { if (LOG_LEVEL >= LOG_LEVELS.info) console.log('[playwright] ' + message) }
+function logDebug(message) { if (LOG_LEVEL >= LOG_LEVELS.all) console.log('[playwright] ' + message) }
+
 function fatal(message) {
     console.error('[playwright] ' + message)
     process.exit(1)
@@ -37,7 +51,7 @@ function listenTarget() {
     // credentials and hands back session cookies.
     const isLocal = ['localhost', '0.0.0.0', '::', '::1'].includes(host) || /^127\./.test(host)
     if (!isLocal) {
-        console.warn('[playwright] PLAYWRIGHT_URL points at ' + host + ', not this container - listening on ' + LOOPBACK + ':' + port + ' instead')
+        logWarn('PLAYWRIGHT_URL points at ' + host + ', not this container - listening on ' + LOOPBACK + ':' + port + ' instead')
         return { host: LOOPBACK, port }
     }
     return { host, port }
@@ -72,7 +86,7 @@ app.use((req, res, next) => {
     next()
 })
 
-// ── Concurrency guard ────────────────────────────────────────────────────────
+// - Concurrency guard ----------------------------
 // Every request launches its own Firefox (partly headful under Xvfb), so N
 // parallel calls mean N browser processes. Without a limit a handful of requests
 // is enough to exhaust the container's memory. Requests beyond the limit wait in
@@ -113,7 +127,7 @@ function limited(handler) {
         try {
             await acquireSlot()
         } catch {
-            console.warn('[playwright] queue full - rejecting ' + req.path)
+            logWarn('queue full - rejecting ' + req.path)
             return res.status(503).json({ error: 'sidecar busy - try again later' })
         }
         let timer
@@ -123,7 +137,7 @@ function limited(handler) {
                 new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('request timeout')), REQUEST_TIMEOUT_MS) }),
             ])
         } catch (err) {
-            console.error('[playwright] ' + req.path + ': ' + err.message)
+            logError(req.path + ': ' + err.message)
             // A timed-out handler keeps running in the background; closing its
             // browser here is what actually frees the memory (and usually makes
             // the handler fail fast on its next Playwright call).
@@ -164,7 +178,7 @@ async function cults3dLogin(page, email, password, tag) {
     if (page.url().includes('sign-in')) {
         throw new Error('Login failed - check email/password in settings')
     }
-    console.log('[playwright] ' + tag + ': login successful')
+    logInfo(tag + ': login successful')
 }
 
 /**
@@ -218,8 +232,8 @@ app.post('/resolve/myminifactory', limited(async (req, res) => {
             // navigation (goto rejects); we only need the captured 302 Location.
             await page.goto(dlUrl, { waitUntil: 'commit', timeout: 30000 }).catch(() => {})
             await page.waitForTimeout(1200)
-            if (pendingLoc) console.log('[playwright] mmf-resolve: ' + dlUrl + ' -> ok')
-            else console.warn('[playwright] mmf-resolve: ' + dlUrl + ' -> no download URL captured')
+            if (pendingLoc) logDebug('mmf-resolve: ' + dlUrl + ' -> ok')
+            else logWarn('mmf-resolve: ' + dlUrl + ' -> no download URL captured')
             resolved.push({ url: dlUrl, s3: pendingLoc })
         }
 
@@ -228,7 +242,7 @@ app.post('/resolve/myminifactory', limited(async (req, res) => {
         return res.json({ resolved })
     } catch (err) {
         if (browser) await browser.close().catch(() => {})
-        console.error('[playwright] mmf-resolve error: ' + err.message)
+        logError('mmf-resolve error: ' + err.message)
         return res.status(500).json({ error: err.message })
     }
 }))
@@ -323,7 +337,7 @@ app.post('/collections/cults3d', limited(async (req, res) => {
         return res.json({ collections })
     } catch (err) {
         if (browser) await browser.close().catch(() => {})
-        console.error('[playwright] cults3d-collections error: ' + err.message)
+        logError('cults3d-collections error: ' + err.message)
         return res.status(500).json({ error: err.message })
     }
 }))
@@ -378,7 +392,7 @@ app.post('/download/cults3d-url', limited(async (req, res) => {
                     if (seen.has(key)) return
                     seen.add(key)
                     files.push({ name, data: buf.toString('base64') })
-                    console.log('[playwright] cults3d-url: captured ' + name + ' (' + buf.length + ' bytes)')
+                    logDebug('cults3d-url: captured ' + name + ' (' + buf.length + ' bytes)')
                 }).catch(() => {})
             } catch (_) {}
         }
@@ -391,8 +405,8 @@ app.post('/download/cults3d-url', limited(async (req, res) => {
                 if (seen.has(key)) return
                 seen.add(key)
                 files.push({ name, data: buf.toString('base64') })
-                console.log('[playwright] cults3d-url: download event ' + name + ' (' + buf.length + ' bytes)')
-            } catch (e) { console.error('[playwright] cults3d-url: dl error ' + e.message) }
+                logDebug('cults3d-url: download event ' + name + ' (' + buf.length + ' bytes)')
+            } catch (e) { logError('cults3d-url: dl error ' + e.message) }
         }
         context.on('response', captureResponse)
         context.on('page', np => np.on('download', captureDownload))
@@ -444,7 +458,7 @@ app.post('/download/cults3d-url', limited(async (req, res) => {
                     await page.waitForTimeout(1000)
                 }
                 await page.waitForTimeout(3000)
-            } catch (e) { console.error('[playwright] cults3d-url: nav error ' + e.message) }
+            } catch (e) { logError('cults3d-url: nav error ' + e.message) }
         }
         await page.waitForTimeout(2000)
 
@@ -461,12 +475,12 @@ app.post('/download/cults3d-url', limited(async (req, res) => {
         return res.json({ files, cookieJar: outJar })
     } catch (err) {
         if (browser) await browser.close().catch(() => {})
-        console.error('[playwright] cults3d-url error: ' + err.message)
+        logError('cults3d-url error: ' + err.message)
         return res.status(500).json({ error: err.message })
     }
 }))
 
-// ── Warm MakerWorld Firefox ──────────────────────────────────────────────────
+// - Warm MakerWorld Firefox -------------------------
 // The other endpoints launch a browser per request and throw it away. MakerWorld
 // is the exception: its GeeTest cookies are domain-wide and are handed out on the
 // first visit, so a browser that stays open resolves many downloads off one visit
@@ -509,7 +523,7 @@ async function makerworldDispose() {
     makerworldPage    = null
     if (browser) {
         await browser.close().catch(() => {})
-        console.log('[playwright] makerworld: warm browser closed')
+        logInfo('makerworld: warm browser closed')
     }
 }
 
@@ -518,7 +532,7 @@ function makerworldStartReaper() {
     makerworldReaper = setInterval(() => {
         if (!makerworldBrowser) return
         if (Date.now() - makerworldLastUsed < MAKERWORLD_IDLE_MS) return
-        console.log('[playwright] makerworld: warm browser idle - closing')
+        logInfo('makerworld: warm browser idle - closing')
         makerworldSerial(() => makerworldDispose())
     }, 60000)
     // Do not hold the process open just for the reaper.
@@ -595,7 +609,7 @@ async function makerworldEnsurePage() {
         await makerworldDispose()
         throw Object.assign(new Error('cloudflare bot-check'), { botWall: true })
     }
-    console.log('[playwright] makerworld: warm browser established')
+    logInfo('makerworld: warm browser established')
 
     makerworldStartReaper()
     return makerworldPage
@@ -664,7 +678,7 @@ app.post('/resolve-makerworld', limited(async (req, res) => {
             }
         } catch (err) {
             if (err && err.botWall) throw err
-            console.warn('[playwright] makerworld: session unusable (' + err.message + ')')
+            logWarn('makerworld: session unusable (' + err.message + ')')
             return null
         }
 
@@ -709,24 +723,24 @@ app.post('/resolve-makerworld', limited(async (req, res) => {
             } catch (_) {}
 
             if (url) {
-                console.log('[playwright] makerworld: model=' + modelID + ' instance=' + instanceID + ' -> ok')
+                logDebug('makerworld: model=' + modelID + ' instance=' + instanceID + ' -> ok')
             } else {
                 // Never the body: it can carry the captcha payload and, on some
                 // errors, the token that was sent.
-                console.warn('[playwright] makerworld: model=' + modelID + ' instance=' + instanceID +
+                logWarn('makerworld: model=' + modelID + ' instance=' + instanceID +
                              ' -> no url (HTTP ' + result.status + ')')
             }
             return res.json({ status: result.status, body: result.body, url })
         } catch (err) {
             if (err && err.botWall) {
-                console.warn('[playwright] makerworld: STOP - Cloudflare bot-check served instead of MakerWorld')
+                logError('makerworld: STOP - Cloudflare bot-check served instead of MakerWorld')
                 await makerworldDispose()
                 if (!res.headersSent) {
                     return res.json({ status: 403, body: '', url: null, botWall: true })
                 }
                 return
             }
-            console.error('[playwright] makerworld error: ' + err.message)
+            logError('makerworld error: ' + err.message)
             await makerworldDispose()
             if (!res.headersSent) return res.status(500).json({ error: err.message })
         }
@@ -735,4 +749,4 @@ app.post('/resolve-makerworld', limited(async (req, res) => {
 
 app.get('/health', (_, res) => res.json({ ok: true }))
 
-app.listen(PORT, HOST, () => console.log('[playwright] Server listening on ' + HOST + ':' + PORT))
+app.listen(PORT, HOST, () => logInfo('Server listening on ' + HOST + ':' + PORT))

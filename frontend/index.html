@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MeshDepot</title>
     <style>
-      /* ── Default (dark) theme variables - prevents flash of unstyled content ── */
+      /* - Default (dark) theme variables - prevents flash of unstyled content - */
       :root {
         --bg:            #141414;
         --bg2:           #1c1c1c;
@@ -34,7 +34,7 @@
         --scrollbar:     #333333;
       }
 
-      /* ── Reset + base ── */
+      /* - Reset + base - */
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
       html, body, #root {
@@ -46,7 +46,7 @@
         -webkit-font-smoothing: antialiased;
       }
 
-      /* ── Scrollbar ──
+      /* - Scrollbar -
          The ::-webkit- rules are Chromium-only; Firefox ignores them and falls
          back to the system theme, which on a light GTK theme draws a pale strip
          down the right edge of a dark page - visible even with nothing to
@@ -58,11 +58,11 @@
       ::-webkit-scrollbar-track { background: var(--bg2); }
       ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 5px; }
 
-      /* ── Native controls (select arrows, number spinners, date pickers) follow the theme ── */
+      /* - Native controls (select arrows, number spinners, date pickers) follow the theme - */
       html[data-theme="dark"]  { color-scheme: dark; }
       html[data-theme="light"] { color-scheme: light; }
 
-      /* ── Animations ── */
+      /* - Animations - */
       @keyframes spin {
         to { transform: rotate(360deg); }
       }
@@ -71,7 +71,7 @@
         to   { opacity: 1; transform: translateX(-50%) translateY(0); }
       }
 
-      /* ── Loading screen before JS hydrates ── */
+      /* - Loading screen before JS hydrates - */
       #root:empty::after {
         content: '';
         position: fixed;

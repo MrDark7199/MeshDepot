@@ -4,19 +4,19 @@ package dbutil
 
 import (
 	"database/sql"
-	"log"
+	"errors"
 	"strings"
+
+	"meshdepot/internal/logx"
 )
 
-// Querier is the common interface of *sql.DB and *sql.Tx.
 type Querier interface {
 	Query(query string, args ...any) (*sql.Rows, error)
 	QueryRow(query string, args ...any) *sql.Row
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
-// QueryMaps runs a query and returns every row as a map. []byte values are
-// normalized to string (for clean JSON).
+// QueryMaps returns every row as a map, with []byte normalized to string.
 func QueryMaps(querier Querier, query string, args ...any) ([]map[string]any, error) {
 	rows, failure := querier.Query(query, args...)
 	if failure != nil {
@@ -46,14 +46,11 @@ func QueryMaps(querier Querier, query string, args ...any) ([]map[string]any, er
 	return results, rows.Err()
 }
 
-// QueryMap returns the first row of a query.
-//
-// found=false means the query ran and matched nothing; a non-nil error means the
-// query itself failed. The two must stay apart: the earlier two-value form
-// returned a nil map for both, so every caller that read nil as "not found"
-// silently treated a locked or broken database as an empty result - and acted on
-// it. That is how FilesDeleteEntry came to delete a whole version when a COUNT(*)
-// hit a busy timeout.
+// QueryMap returns the first row. found=false means the query ran and matched
+// nothing, a non-nil error means it failed - the two must stay apart. The earlier
+// two-value form returned nil for both, so callers treated a locked database as
+// an empty result: that is how FilesDeleteEntry came to delete a whole version
+// when a COUNT(*) hit a busy timeout.
 func QueryMap(querier Querier, query string, args ...any) (map[string]any, bool, error) {
 	rows, failure := QueryMaps(querier, query, args...)
 	if failure != nil {
@@ -65,7 +62,27 @@ func QueryMap(querier Querier, query string, args ...any) (map[string]any, bool,
 	return rows[0], true, nil
 }
 
-// normalize converts []byte to string (otherwise base64 ends up in the JSON).
+// Exists reports whether the query matched a row, and whether the question could
+// be answered at all.
+//
+// The second result is the point. A probe written as `Scan(...) == nil` reads a
+// busy or briefly unreachable database as "no such row", and the caller then
+// creates the duplicate it was checking for. Callers that must not do that pass
+// on the "unknown" case instead of treating it as "no". The failure is logged
+// here so it cannot pass unnoticed either.
+func Exists(querier Querier, query string, args ...any) (found bool, known bool) {
+	var marker int
+	failure := querier.QueryRow(query, args...).Scan(&marker)
+	if failure == nil {
+		return true, true
+	}
+	if errors.Is(failure, sql.ErrNoRows) {
+		return false, true
+	}
+	logx.Errorf("[db] probe failed: %s: %v", queryHead(query), failure)
+	return false, false
+}
+
 func normalize(value any) any {
 	if raw, ok := value.([]byte); ok {
 		return string(raw)
@@ -74,21 +91,15 @@ func normalize(value any) any {
 }
 
 // ExecLogged runs a statement whose result is not needed and logs a failure with
-// the beginning of the statement.
-//
-// Dropping the error - the previous house style at ~60 call sites - made a
-// partial write failure completely invisible: no log, no error response, no
-// metric. A symptom like "sometimes the tags are missing after a sync" was not
-// diagnosable. Only the query is logged, never the arguments (they carry user
-// data and secrets).
+// the beginning of it. Dropping the error at ~60 call sites made a partial write
+// invisible - "sometimes the tags are missing after a sync" was not diagnosable.
+// Only the query is logged, never the arguments.
 func ExecLogged(querier Querier, query string, args ...any) {
 	if _, failure := querier.Exec(query, args...); failure != nil {
-		log.Printf("[db] exec failed: %s: %v", queryHead(query), failure)
+		logx.Errorf("[db] exec failed: %s: %v", queryHead(query), failure)
 	}
 }
 
-// queryHead shortens a statement to its first words, enough to identify it in a
-// log line.
 func queryHead(query string) string {
 	words := strings.Fields(query)
 	if len(words) > 8 {
@@ -97,7 +108,6 @@ func queryHead(query string) string {
 	return strings.Join(words, " ")
 }
 
-// IsUniqueViolation detects a UNIQUE constraint violation (SQLite).
 func IsUniqueViolation(failure error) bool {
 	return failure != nil && strings.Contains(failure.Error(), "UNIQUE constraint failed")
 }

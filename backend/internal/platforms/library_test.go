@@ -18,7 +18,7 @@ func TestExtractLibSourceID(t *testing.T) {
 		{"https://makerworld.com/en/models/999", "makerworld", "999"},
 		{"https://www.myminifactory.com/object/abc123", "myminifactory", "abc123"},
 		{"https://thangs.com/model/55", "thangs", "55"},
-		// cults3d: last path segment incl. hyphens (= source_id of the download).
+		// cults3d: last path segment, as the download stores it.
 		{"https://cults3d.com/en/3d-model/game/widget77", "cults3d", "widget77"},
 		{"https://cults3d.com/en/3d-model/game/widget-77", "cults3d", "widget-77"},
 	}
@@ -52,8 +52,7 @@ func TestMwHitID(t *testing.T) {
 	}
 }
 
-// newSettingsDatabase builds the smallest database LibrarySyncEnabled needs:
-// the key/value table the admin settings live in.
+// newSettingsDatabase builds the smallest database LibrarySyncEnabled needs.
 func newSettingsDatabase(t *testing.T, value string) *sql.DB {
 	t.Helper()
 	database, failure := sql.Open("sqlite", filepath.Join(t.TempDir(), "settings.db"))
@@ -72,8 +71,7 @@ func newSettingsDatabase(t *testing.T, value string) *sql.DB {
 	return database
 }
 
-// The switch decides for the whole server, so its default matters: an
-// installation that never saw the setting keeps syncing.
+// An installation that never saw the setting keeps syncing.
 func TestLibrarySyncEnabledDefaultsToOn(t *testing.T) {
 	if !LibrarySyncEnabled(newSettingsDatabase(t, "")) {
 		t.Fatal("a missing row switched the sync off")
@@ -86,8 +84,7 @@ func TestLibrarySyncEnabledDefaultsToOn(t *testing.T) {
 	}
 }
 
-// captureLog collects what the sync writes while fn runs; the log line is the
-// only observable the gate produces.
+// captureLog: the log line is the only observable the gate produces.
 func captureLog(t *testing.T, fn func()) string {
 	t.Helper()
 	var buffer bytes.Buffer
@@ -98,9 +95,9 @@ func captureLog(t *testing.T, fn func()) string {
 	return buffer.String()
 }
 
-// The scheduler, the admin force flag and the manual trigger all end up in
-// these two functions, so the gate sits inside them: a forgotten check upstream
-// must not be able to start a sync the admin switched off.
+// The scheduler, the force flag and the manual trigger all end up in these two
+// functions, so a forgotten check upstream cannot start a sync that is switched
+// off.
 func TestRunLibrarySyncStopsWhileDisabled(t *testing.T) {
 	deps := Deps{DB: newSettingsDatabase(t, "0")}
 
@@ -114,8 +111,6 @@ func TestRunLibrarySyncStopsWhileDisabled(t *testing.T) {
 	}
 }
 
-// The counter-test: with the switch on, the same call walks past the gate and
-// only stops at the (here empty) account list.
 func TestRunLibrarySyncPassesTheGateWhileEnabled(t *testing.T) {
 	deps := Deps{DB: newSettingsDatabase(t, "1")}
 
@@ -129,8 +124,8 @@ func TestRunLibrarySyncPassesTheGateWhileEnabled(t *testing.T) {
 	}
 }
 
-// newCollectionsDatabase builds the part of the schema findOrCreateCollection
-// touches, including the trigger, so a stray UPDATE shows up in updated_at.
+// newCollectionsDatabase includes the trigger, so a stray UPDATE shows up in
+// updated_at.
 func newCollectionsDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 	database, failure := sql.Open("sqlite", filepath.Join(t.TempDir(), "collections.db"))
@@ -151,7 +146,6 @@ func newCollectionsDatabase(t *testing.T) *sql.DB {
 	return database
 }
 
-// collectionRow reads back what the sync stored under an id.
 func collectionRow(t *testing.T, database *sql.DB, id int) (name string, sourceName sql.NullString) {
 	t.Helper()
 	if failure := database.QueryRow("SELECT name, source_name FROM collections WHERE id=?", id).
@@ -161,8 +155,8 @@ func collectionRow(t *testing.T, database *sql.DB, id int) (name string, sourceN
 	return name, sourceName
 }
 
-// The first sight of a collection stores the prefixed name for the UI and the
-// bare platform name as the reference every later comparison runs against.
+// The first sight stores the prefixed name for the UI and the bare platform name
+// as the reference every later comparison runs against.
 func TestFindOrCreateCollectionCreatesWithSourceName(t *testing.T) {
 	database := newCollectionsDatabase(t)
 
@@ -180,8 +174,8 @@ func TestFindOrCreateCollectionCreatesWithSourceName(t *testing.T) {
 	}
 }
 
-// The match runs over the platform id. A renamed collection must land on the
-// existing row, otherwise the designs stay behind on an orphaned copy.
+// Matched over the platform id: a renamed collection must land on the existing
+// row, or the designs stay behind on an orphaned copy.
 func TestFindOrCreateCollectionMatchesByIDNotName(t *testing.T) {
 	database := newCollectionsDatabase(t)
 	first := findOrCreateCollection(database, 1, "printables", "col-1", "Deko")
@@ -198,7 +192,6 @@ func TestFindOrCreateCollectionMatchesByIDNotName(t *testing.T) {
 	}
 }
 
-// Nobody touched the name locally, so the rename on the platform comes through.
 func TestFindOrCreateCollectionFollowsPlatformRename(t *testing.T) {
 	database := newCollectionsDatabase(t)
 	id := findOrCreateCollection(database, 1, "printables", "col-1", "Deko")
@@ -214,8 +207,8 @@ func TestFindOrCreateCollectionFollowsPlatformRename(t *testing.T) {
 	}
 }
 
-// The user renamed it here. Their name wins - but source_name still follows the
-// platform, so a later comparison comes out right instead of drifting.
+// The user's name wins, but source_name still follows the platform so a later
+// comparison comes out right.
 func TestFindOrCreateCollectionKeepsLocalRename(t *testing.T) {
 	database := newCollectionsDatabase(t)
 	id := findOrCreateCollection(database, 1, "printables", "col-1", "Deko")
@@ -235,7 +228,7 @@ func TestFindOrCreateCollectionKeepsLocalRename(t *testing.T) {
 }
 
 // A local rename that keeps the prefix used to be indistinguishable from an
-// untouched name, which is exactly what source_name settles.
+// untouched name.
 func TestFindOrCreateCollectionKeepsLocalRenameWithPrefix(t *testing.T) {
 	database := newCollectionsDatabase(t)
 	id := findOrCreateCollection(database, 1, "printables", "col-1", "Deko")
@@ -250,9 +243,8 @@ func TestFindOrCreateCollectionKeepsLocalRenameWithPrefix(t *testing.T) {
 	}
 }
 
-// Rows from before the column carry no reference name. Guessing one could hand
-// the next rename a name the platform never owned, so the local name is left
-// alone and only the reference is filled in.
+// Rows from before the column carry no reference name, and guessing one could
+// hand the next rename a name the platform never owned.
 func TestFindOrCreateCollectionBackfillsLegacyRow(t *testing.T) {
 	database := newCollectionsDatabase(t)
 	result, failure := database.Exec(
@@ -282,10 +274,9 @@ func TestFindOrCreateCollectionBackfillsLegacyRow(t *testing.T) {
 	}
 }
 
-// The rule lives in one shared function, but every platform reaches it through
-// its own fetcher, and each one has to bring a stable collection id along. This
-// walks the same rename twice per platform - once untouched, once renamed here -
-// so a fetcher that ever starts handing over a name instead of an id fails here.
+// Every platform reaches the shared rule through its own fetcher, and each has to
+// bring a stable collection id along - so a fetcher that starts handing over a
+// name instead of an id fails here.
 func TestFindOrCreateCollectionRuleHoldsForEveryPlatform(t *testing.T) {
 	cases := []struct{ platform, label string }{
 		{"thingiverse", "Thingiverse"},
@@ -322,8 +313,8 @@ func TestFindOrCreateCollectionRuleHoldsForEveryPlatform(t *testing.T) {
 	}
 }
 
-// Nothing changed, so nothing may be written: the trigger on updated_at turns a
-// pointless UPDATE into a visible change on every sync run.
+// Nothing changed, so nothing may be written: the updated_at trigger turns a
+// pointless UPDATE into a visible change on every run.
 func TestFindOrCreateCollectionIsIdempotent(t *testing.T) {
 	database := newCollectionsDatabase(t)
 	id := findOrCreateCollection(database, 1, "printables", "col-1", "Deko")
@@ -337,5 +328,36 @@ func TestFindOrCreateCollectionIsIdempotent(t *testing.T) {
 	database.QueryRow("SELECT updated_at FROM collections WHERE id=?", id).Scan(&updatedAt)
 	if updatedAt != "2000-01-01 00:00:00" {
 		t.Errorf("an unchanged collection was written again: updated_at = %q", updatedAt)
+	}
+}
+
+// A design the member deleted and excluded must stay gone even when the check
+// itself cannot run: read as "not excluded", a busy database hands the design
+// back on the next sync - which is exactly what the exclusion was for.
+func TestSyncExclusionHoldsWhenTheDatabaseCannotAnswer(t *testing.T) {
+	database, failure := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "exclusions.db"))
+	if failure != nil {
+		t.Fatalf("open database: %v", failure)
+	}
+	database.SetMaxOpenConns(1)
+	if _, failure := database.Exec(`CREATE TABLE sync_exclusions (
+		id INTEGER PRIMARY KEY, user_id INTEGER, source_platform TEXT, source_id TEXT, source_url TEXT)`); failure != nil {
+		t.Fatalf("schema: %v", failure)
+	}
+
+	if IsExcludedFromSync(database, 1, "printables", "42", "https://www.printables.com/model/42") {
+		t.Fatal("nothing is excluded yet")
+	}
+	if _, failure := database.Exec(
+		"INSERT INTO sync_exclusions (user_id, source_platform, source_id) VALUES (1, 'printables', '42')"); failure != nil {
+		t.Fatalf("seed: %v", failure)
+	}
+	if !IsExcludedFromSync(database, 1, "printables", "42", "") {
+		t.Error("a stored exclusion has to be found")
+	}
+
+	database.Close()
+	if !IsExcludedFromSync(database, 1, "printables", "42", "https://www.printables.com/model/42") {
+		t.Error("an unanswerable check has to count as excluded")
 	}
 }

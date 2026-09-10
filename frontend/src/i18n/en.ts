@@ -261,7 +261,7 @@ export default {
   download_step_translating:       'Translating…',
   download_credentials_required: 'This platform requires credentials. Configure them in Account Settings → Platforms first.',
 
-  // ── DesignPage labels ──────────────────────────────────────────────────────
+  // - DesignPage labels ---------------------------
   label_print_time:        'Print Time',
   label_size:              'Size',
   label_format:            'Format',
@@ -324,12 +324,12 @@ export default {
   delete_image_body:       'The image will be marked for deletion and only removed when you click Save. Until then you can restore it.',
   confirm_delete_file:     'Delete file "{name}"?',
 
-  // ── Notifications panel ────────────────────────────────────────────────────
+  // - Notifications panel --------------------------
   notif_title: 'Notifications',
 
-  // ── Bulk import ────────────────────────────────────────────────────────────
+  // - Bulk import ------------------------------
 
-  // ── ServerSettings ─────────────────────────────────────────────────────────
+  // - ServerSettings -----------------------------
   admin_settings_title:   'Server Settings',
   admin_tab_stats:        'Statistics',
   admin_tab_users:        'Users',
@@ -381,7 +381,7 @@ export default {
   admin_about_title:      'About MeshDepot',
   admin_system_health:    'System Health',
 
-  // ── Health check ───────────────────────────────────────────────────────────
+  // - Health check ------------------------------
   health_storage_label:    'Storage ({path})',
   health_storage_message:  '{free} free of {total} ({pct}% used)',
   health_download_label:   'Download Worker',
@@ -428,7 +428,7 @@ export default {
   validation_email_required:    'Email is required',
   validation_password_required: 'Password is required',
 
-  // ── Backend error keys ─────────────────────────────────────────────────────
+  // - Backend error keys ---------------------------
   'error.url_required':          'Please enter a URL.',
   'error.name_required':         'Name is required.',
   'error.collection_name_taken': 'A collection with this name already exists.',
@@ -437,6 +437,7 @@ export default {
   'error.mail_no_own_address':   'Your own account has no e-mail address, so there is nowhere to send the test to.',
   'error.mail_send_failed':      'The test message could not be sent.',
   'error.storage_quota_exceeded': 'Your storage limit is reached. Delete designs or versions you no longer need, or ask an administrator for more space.',
+  'error.storage_check_failed': 'Your storage use could not be checked just now. Please try again in a moment.',
   'error.credentials_required':  'Please enter email and password.',
   'error.invalid_credentials':   'Invalid email or password.',
   'error.account_deactivated':   'This account has been deactivated. Ask an administrator to reactivate it.',
@@ -536,14 +537,14 @@ export default {
   'error.makerworld_login_blocked':      'MakerWorld rejected the login before checking the two-factor code. This is a block on their side, not a wrong secret.',
   'error.makerworld_rate_limited':       'Too many MakerWorld login attempts - the service is throttling. It will be retried automatically.',
 
-  // ── App toasts & confirms ──────────────────────────────────────────────────
+  // - App toasts & confirms -------------------------
   confirm_delete_card:           'Delete "{name}"? This cannot be undone.',
   toast_design_deleted_named:    '"{name}" deleted',
   toast_delete_failed:           'Delete failed',
   toast_sync_failed:             'Failed to queue sync',
   toast_no_syncable_designs:     'No syncable designs',
 
-  // ── User stats (AccountSettings) ──────────────────────────────────────────
+  // - User stats (AccountSettings) ---------------------
   stats_storage_heading:         'STORAGE',
   stats_pct_used_free:           '{pct}% used · {free} free',
   stats_label_designs:           'Designs',
@@ -564,17 +565,17 @@ export default {
   stats_sub_added:               'added',
   stats_platforms_heading:       'PLATFORMS',
 
-  // ── Design modals ──────────────────────────────────────────────────────────
+  // - Design modals -----------------------------
   label_platform:                'Platform',
   label_unknown:                 'Unknown',
   warning_unknown_platform:      '⚠ URL not from a known platform',
   duplicate_warning_named:       'Already in library as "{name}"',
   btn_minimize:                  'Minimize',
 
-  // ── Design page ────────────────────────────────────────────────────────────
+  // - Design page ------------------------------
   toast_images_uploaded:         '{count} images uploaded',
 
-  // ── STL Viewer ─────────────────────────────────────────────────────────────
+  // - STL Viewer -------------------------------
   viewer_load_failed:            'Failed to load model',
   viewer_controls_hint:          'Drag to rotate · Scroll to zoom · Right-drag to pan · Double-click to focus',
   viewer_btn_reset:              'Reset view',
@@ -647,7 +648,7 @@ export default {
   viewer_photo_retake:           'Retake',
   viewer_photo_done:             'Done',
 
-  // ── Frontend validation ────────────────────────────────────────────────────
+  // - Frontend validation --------------------------
   'validation.url_required':     'Please enter a URL.',
   'validation.name_required':    'Please enter a name.',
   'validation.file_required':    'Please select a file.',
@@ -657,7 +658,7 @@ export default {
   'validation.password_same':    'New password must differ from the current one.',
   'validation.current_password': 'Please enter your current password.',
 
-  // ── Platform tab ───────────────────────────────────────────────────────────
+  // - Platform tab ------------------------------
   platform_accounts_intro:       'Platform accounts allow MeshDepot to download paid or private models automatically. Click a row to add or update credentials.',
   platform_not_configured:       'Not configured - click to add ↓',
   platform_cancel_form:          'Cancel ↑',
@@ -694,7 +695,7 @@ export default {
   platform_token_label_myminifactory: 'API Key',
   platform_token_ph_myminifactory: 'Paste your API key here…',
 
-  // ── Notifications tab ──────────────────────────────────────────────────────
+  // - Notifications tab ---------------------------
   notif_tab_intro: 'Choose which in-app notifications you want to receive.',
   sync_tab_intro: 'Control whether and how often your designs are checked for updates at their source platform in the background.',
   toast_sync_saved:     'Sync settings saved.',
@@ -709,7 +710,7 @@ export default {
   sync_cooldown_hint:   'Started a few minutes ago - available again in {min} min.',
   sync_cooldown_short:  'in {min} min',
 
-  // ── Design card ────────────────────────────────────────────────────────────
+  // - Design card ------------------------------
   card_by:                  'by',
   sync_status_queued:       'Queued',
   sync_status_syncing:      'Syncing…',
@@ -728,15 +729,15 @@ export default {
   sync_done_notif_body:     'Design has been checked successfully.',
   sync_modal_waiting:       'Starting soon…',
 
-  // ── Nav dropdown ───────────────────────────────────────────────────────────
+  // - Nav dropdown ------------------------------
   btn_sign_out: 'Sign out',
 
-  // ── Add design modal ───────────────────────────────────────────────────────
+  // - Add design modal ----------------------------
   tab_import_url:              'Import URL',
   tab_manual_entry:            'Manual',
   add_design_name_placeholder: 'e.g. Cable Management Clip',
 
-  // ── Collections page ───────────────────────────────────────────────────────
+  // - Collections page ----------------------------
   col_select_hint:       'Select a collection',
   col_search_placeholder: 'Search…',
   col_all_platforms:     'All platforms',
@@ -754,14 +755,14 @@ export default {
   col_add_done:          '{n} design(s) added',
   col_add_failed:        'Could not add designs',
 
-  // ── Design page ────────────────────────────────────────────────────────────
+  // - Design page ------------------------------
   label_upload_new_version: 'Upload New Version',
   btn_save_notes:           'Save Notes',
   notes_placeholder:        'Add your private notes here…',
   share_search_placeholder: 'Search users by name or email…',
   btn_delete:               'Delete',
 
-  // ── Filter modal ───────────────────────────────────────────────────────────
+  // - Filter modal ------------------------------
   filter_title:          'Filter Designs',
   filter_platform:       'Platform',
   filter_all_platforms:  'All platforms',
@@ -778,21 +779,21 @@ export default {
   filter_clear:          'Clear',
   filter_apply:          'Apply',
 
-  // ── Misc ───────────────────────────────────────────────────────────────────
+  // - Misc ----------------------------------
   label_loading_model:             'Loading model…',
   file_version_note_downloaded:    'Downloaded',
   notes_no_notes:                  'No notes.',
   delete_file_version_title:       'Delete File Version',
   delete_file_version_body:        'Delete this file version? This cannot be undone.',
 
-  // ── Library Sync ───────────────────────────────────────────────────────────
+  // - Library Sync ------------------------------
   platform_sync_collections_label: 'Sync collections',
   platform_sync_hint:              'Automatically imported daily at {hour}:00',
   platform_sync_now_btn:           'Sync now',
   platform_sync_server_disabled:   'The library sync is switched off for the whole server. No platform account is being read, and the manual run is unavailable until an administrator turns it back on.',
   platform_sync_started_toast:     'Library sync started',
 
-  // ── Platform wizard ────────────────────────────────────────────────────────
+  // - Platform wizard ----------------------------
   platform_wizard_title_new:       'Set up platform: {name}',
   platform_wizard_title_edit:      'Edit {name}',
   platform_wizard_step_creds:      'Credentials',
@@ -846,7 +847,7 @@ export default {
   admin_library_sync_enabled_label: 'Enable library sync',
   admin_library_sync_enabled_hint:  'Applies server-wide and overrides the per-user settings: while the sync is disabled here, no account syncs - no matter what the user configured.',
 
-  // ── Design updates ─────────────────────────────────────────────────────────
+  // - Design updates -----------------------------
   admin_design_update_heading:      'Design updates',
   admin_design_update_desc:         'Designs that were already imported are re-fetched from their source platform in the background: description, images and tags are refreshed, changed files are stored as a new version. Every check is a full download.',
   admin_design_update_enabled_label: 'Enable design updates',
@@ -855,7 +856,7 @@ export default {
   admin_design_update_days_hint:    'Shortest gap between two checks of the same design. Members can pick a longer interval, never a shorter one. Minimum: {min} days.',
   unit_days:                        'days',
 
-  // ── Download Cooldowns ─────────────────────────────────────────────────────
+  // - Download Cooldowns ---------------------------
   admin_download_cooldown_heading: 'Download Cooldowns',
   admin_download_cooldown_desc:    'Minimum pause in seconds between consecutive downloads from the same platform. Use this to avoid rate-limiting. Values apply to automatic library sync and manual downloads.',
   admin_download_cooldown_default: 'Default (all platforms)',
@@ -878,7 +879,7 @@ export default {
   queue_block_alert_paused:            'Downloads manually paused.',
   'error.invalid_platform':            'Unknown platform.',
 
-  // ── Automatic translation ──────────────────────────────────────────────────
+  // - Automatic translation -------------------------
   admin_user_quota_label:        'Storage limit',
   admin_user_quota_hint:         'In MB. Empty or 0 means unlimited.',
   admin_user_quota_unlimited:    'unlimited',

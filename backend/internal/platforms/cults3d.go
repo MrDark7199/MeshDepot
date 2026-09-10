@@ -1,10 +1,9 @@
 package platforms
 
-// Cults3D downloader. Metadata comes from the public HTML (OpenGraph, JSON-LD,
-// gallery); the files are fetched via the rod browser: login → order flow
-// (already ordered / open_priced cart with amount 0 / free_order / direct free
-// order) → /downloaden/ links. Files are collected both from browser downloads
-// and from captured file responses; ZIPs are extracted.
+// Cults3D downloader. Metadata comes from the public HTML; the files go through
+// the rod browser: login, order flow (already ordered / open_priced cart with
+// amount 0 / free_order) and then the /downloaden/ links. Files are collected
+// from browser downloads as well as captured responses; ZIPs are extracted.
 
 import (
 	"archive/zip"
@@ -49,16 +48,13 @@ var (
 	orderAnyPattern     = regexp.MustCompile(`(?i)/(?:bestellungen|orders|commandes)/\d+`)
 )
 
-// Cults3D implements Downloader for cults3d.com.
 type Cults3D struct{ Deps }
 
-// capturedFile is a file collected by the browser.
 type capturedFile struct {
 	name string
 	data []byte
 }
 
-// Download loads a Cults3D model (metadata via HTML, files via browser).
 func (cults3d Cults3D) Download(sourceURL string, owner Owner, progress func(step, label string, current, total int)) (Result, error) {
 	// The numeric id is only for credentials; every path comes from owner.Layout.
 	userID := owner.ID
@@ -71,8 +67,8 @@ func (cults3d Cults3D) Download(sourceURL string, owner Owner, progress func(ste
 		modelSlug = filepath.Base(strings.TrimRight(parsed.Path, "/"))
 	}
 
-	// A password that cannot be decrypted (app key changed) is indistinguishable
-	// from none at all here, and both are fixed the same way: re-enter it.
+	// A password that cannot be decrypted is indistinguishable from none at all
+	// here, and both are fixed the same way: re-enter it.
 	account := cults3d.loadAccount(userID, "cults3d")
 	if !account.hasLogin() {
 		return Result{}, fmt.Errorf("error.cults3d_restricted:Could not download files from this Cults3D model. " +
@@ -87,23 +83,21 @@ func (cults3d Cults3D) Download(sourceURL string, owner Owner, progress func(ste
 
 	progress("downloading_files", "", 0, 0)
 
-	// Preferred: if the model is ordered (bought or obtained for free), the
-	// GraphQL API returns the ready download URL - we skip the name-your-price/
-	// cart detour. The file itself is fetched by the Firefox resolver (web session
-	// needed; rod-Chromium is blocked by Cloudflare during login).
+	// Preferred: an ordered model has a ready download URL in the GraphQL API, which
+	// skips the cart detour. The file itself goes through the Firefox resolver, since
+	// rod-Chromium is blocked by Cloudflare during login.
 	var captured []capturedFile
 	if nickname, apiKey := cults3d.cults3dAPICreds(userID); nickname != "" && apiKey != "" {
 		if downloadURL := cults3dOrderDownloadURL(nickname, apiKey, modelSlug); downloadURL != "" {
 			cookieJar := cults3d.cults3dCookieJar(userID)
 
-			// Fastest path: direct HTTP GET with the cached cookie jar
-			// (cf_clearance + _session_id) - no browser. Works as long as the
-			// clearance is valid.
+			// Fastest: a direct GET with the cached cookie jar, no browser, for as long as
+			// the clearance is valid.
 			if cookieJar != "" {
 				captured = cults3dDirectDownload(cookieJar, downloadURL)
 			}
 
-			// Fallback: Firefox resolver (solves CF/login, reseeds the jar).
+			// Fallback: Firefox resolver, which solves CF and reseeds the jar.
 			if len(captured) == 0 && cults3d.Cfg.PlaywrightURL != "" {
 				files, newJar := cults3dFirefoxDownload(cults3d.Cfg.PlaywrightURL, username, password, cookieJar, []string{downloadURL})
 				captured = files
@@ -114,7 +108,7 @@ func (cults3d Cults3D) Download(sourceURL string, owner Owner, progress func(ste
 		}
 	}
 
-	// Fallback: full rod order flow (for un-ordered free models).
+	// Fallback: the full rod order flow, for un-ordered free models.
 	if len(captured) == 0 {
 		browserFiles, failure := cults3d.browserDownload(username, password, sourceURL)
 		if failure != nil {
@@ -138,7 +132,7 @@ func (cults3d Cults3D) Download(sourceURL string, owner Owner, progress func(ste
 			"The model may be paid or member-only. Check your account in Account Settings → Platforms → Cults3D.")
 	}
 
-	// Resolve imgproxy URLs to direct CDN URLs + deduplicate.
+	// Resolve imgproxy URLs to direct CDN URLs and deduplicate.
 	resolved := uniqueStrings(mapStrings(meta.imageURLs, resolveCults3dImageURL))
 	progress("downloading_images", "", 0, len(resolved))
 	allImages := downloadAllImages(owner.Layout, resolved, progress)
@@ -159,7 +153,6 @@ func (cults3d Cults3D) Download(sourceURL string, owner Owner, progress func(ste
 	}, nil
 }
 
-// cults3dMeta bundles the metadata extracted from the HTML.
 type cults3dMeta struct {
 	name        string
 	description string
@@ -168,8 +161,8 @@ type cults3dMeta struct {
 	imageURLs   []string
 }
 
-// parseCults3dMetadata extracts name/description/author/tags/images from the
-// public model HTML (OpenGraph, JSON-LD, gallery regex, tag links).
+// parseCults3dMetadata reads name, description, author, tags and images from the
+// public model HTML.
 func parseCults3dMetadata(htmlBody, sourceURL string) cults3dMeta {
 	openGraph := func(property string) string {
 		pattern := regexp.MustCompile(`(?i)<meta[^>]+property=["']og:` + regexp.QuoteMeta(property) + `["'][^>]+content=["']([^"']+)["']`)
@@ -281,7 +274,6 @@ func parseCults3dMetadata(htmlBody, sourceURL string) cults3dMeta {
 	return cults3dMeta{name: name, description: description, author: author, tags: tags, imageURLs: imageURLs}
 }
 
-// jsonLDImages normalizes the image field of a JSON-LD item to URL strings.
 func jsonLDImages(value any) []string {
 	var output []string
 	switch image := value.(type) {
@@ -302,7 +294,6 @@ func jsonLDImages(value any) []string {
 	return output
 }
 
-// resolveCults3dImageURL extracts the direct CDN URL from an imgproxy URL.
 func resolveCults3dImageURL(imageURL string) string {
 	if match := imgproxyRealPattern.FindStringSubmatch(imageURL); match != nil {
 		return match[1]
@@ -310,8 +301,7 @@ func resolveCults3dImageURL(imageURL string) string {
 	return imageURL
 }
 
-// saveCapturedFiles writes the collected files into tempDir; ZIPs are extracted.
-// Returns the DownloadedFile list (Name = relative/original name).
+// saveCapturedFiles writes the collected files into tempDir, extracting ZIPs.
 func saveCapturedFiles(tempDir string, captured []capturedFile) []DownloadedFile {
 	var files []DownloadedFile
 	for _, capturedEntry := range captured {
@@ -330,8 +320,7 @@ func saveCapturedFiles(tempDir string, captured []capturedFile) []DownloadedFile
 	return files
 }
 
-// extractZip extracts a ZIP archive (from memory) into tempDir and returns the
-// contained files.
+// extractZip extracts an archive held in memory.
 func extractZip(tempDir string, data []byte) []DownloadedFile {
 	zipReader, failure := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if failure != nil {
@@ -362,8 +351,7 @@ func extractZip(tempDir string, data []byte) []DownloadedFile {
 	return files
 }
 
-// extractZipFile extracts a ZIP from disk into tempDir and returns the contained
-// files (for large archives, without keeping them in memory).
+// extractZipFile extracts an archive from disk, for ones too large to hold.
 func extractZipFile(tempDir, zipPath string) []DownloadedFile {
 	zipReader, failure := zip.OpenReader(zipPath)
 	if failure != nil {
@@ -395,8 +383,7 @@ func extractZipFile(tempDir, zipPath string) []DownloadedFile {
 	return files
 }
 
-// browserDownload runs the full rod browser flow (login + order + file capture)
-// and returns the collected files.
+// browserDownload runs the full rod flow: login, order and file capture.
 func (cults3d Cults3D) browserDownload(email, password, modelURL string) ([]capturedFile, error) {
 	if cults3d.Browser == nil {
 		return nil, fmt.Errorf("browser unavailable")
@@ -433,7 +420,7 @@ func (cults3d Cults3D) browserDownload(email, password, modelURL string) ([]capt
 		// Capture file responses (octet-stream/attachment/.stl…).
 		fileRequestIDs := map[proto.NetworkRequestID]string{}
 		var responseMutex sync.Mutex
-		// Own goroutine: WithPage's recover does not reach it, so guard it here.
+		// Own goroutine: WithPage's recover does not reach it.
 		safego.Go("cults3d.response-capture", page.EachEvent(func(event *proto.NetworkResponseReceived) {
 			responseURL := event.Response.URL
 			if !strings.Contains(responseURL, "cults3d.com") {
@@ -489,8 +476,7 @@ func (cults3d Cults3D) browserDownload(email, password, modelURL string) ([]capt
 	return captured, nil
 }
 
-// cults3dLogin signs in on the sign-in page (remove cookie banner, fill the form,
-// form.submit()).
+// cults3dLogin removes the cookie banner, fills the form and submits it.
 func cults3dLogin(page *rod.Page, email, password string) error {
 	if failure := page.Navigate("https://cults3d.com/en/users/sign-in"); failure != nil {
 		return failure
@@ -499,9 +485,8 @@ func cults3dLogin(page *rod.Page, email, password string) error {
 	time.Sleep(1500 * time.Millisecond)
 	dismissCults3dCookies(page)
 
-	// Cloudflare sometimes shows a JS interstitial ("Just a moment") before the
-	// login form; the headless browser solves it automatically, but it takes a
-	// few seconds. So wait generously for the email field.
+	// Cloudflare sometimes shows a JS interstitial before the login form. The
+	// headless browser solves it, but it takes seconds - hence the generous wait.
 	emailElement, failure := page.Timeout(45 * time.Second).Element(`input[name="user[email]"]`)
 	if failure != nil {
 		if info, infoFailure := page.Info(); infoFailure == nil && strings.Contains(strings.ToLower(info.Title), "just a moment") {
@@ -525,8 +510,7 @@ func cults3dLogin(page *rod.Page, email, password string) error {
 	return nil
 }
 
-// cults3dOrderFlow ensures a (free) order exists and navigates to the order
-// page.
+// cults3dOrderFlow ensures a free order exists and opens the order page.
 func cults3dOrderFlow(page *rod.Page, modelURL string) error {
 	slug := ""
 	if parsed, failure := url.Parse(modelURL); failure == nil {
@@ -586,8 +570,7 @@ func cults3dOrderFlow(page *rod.Page, modelURL string) error {
 	return nil
 }
 
-// cults3dFetchDownloadLinks visits all /downloaden/ links of the current page to
-// trigger the file downloads.
+// cults3dFetchDownloadLinks visits every /downloaden/ link to trigger the files.
 func cults3dFetchDownloadLinks(page *rod.Page) {
 	links := allPageLinks(page)
 	for _, link := range links {
@@ -647,8 +630,7 @@ func cults3dCSRF(page *rod.Page) string {
 	return evalResult.Value.Str()
 }
 
-// cults3dCartPost posts the cart with amount 0 (using the browser cookies) and
-// returns the order URL on success.
+// cults3dCartPost posts the cart with amount 0 and returns the order URL.
 func cults3dCartPost(page *rod.Page, cartPostURL, csrfToken string) string {
 	cookies, failure := page.Cookies([]string{})
 	if failure != nil {
@@ -663,8 +645,8 @@ func cults3dCartPost(page *rod.Page, cartPostURL, csrfToken string) string {
 		"line[amount_in_currency]": {"0"},
 		"button":                   {""},
 	}.Encode()
-	// directPost follows redirects; the final URL is not directly available in the
-	// response - so check the orders list afterwards (cults3dLatestOrder).
+	// directPost follows redirects and the final URL is not available in the
+	// response, so the orders list is checked afterwards.
 	directPost(cartPostURL, form, map[string]string{
 		"User-Agent":   cults3dUserAgent,
 		"Content-Type": "application/x-www-form-urlencoded",
@@ -693,7 +675,6 @@ func absCults3d(href string) string {
 	return "https://cults3d.com" + href
 }
 
-// collectDownloadDir reads finished files from the browser download directory.
 func collectDownloadDir(directory string, addFile func(string, []byte)) {
 	entries, failure := os.ReadDir(directory)
 	if failure != nil {
@@ -709,7 +690,7 @@ func collectDownloadDir(directory string, addFile func(string, []byte)) {
 	}
 }
 
-// Validate checks email/password via HTTP form login (Devise, _session_id).
+// Validate checks email and password via the HTTP form login.
 func (cults3d Cults3D) Validate(credentials Credentials) bool {
 	return credentials.Email != "" && credentials.Password != "" && cults3dAutoLogin(credentials.Email, credentials.Password) != ""
 }
@@ -719,13 +700,12 @@ var (
 	cults3dCookiePattern = regexp.MustCompile(`(?i)_session_id=([^;]+)`)
 )
 
-// cults3dAutoLogin signs in via HTTP form and returns the _session_id
-// cookie. Pure HTTP flow without a browser.
+// cults3dAutoLogin returns the _session_id cookie, without a browser.
 func cults3dAutoLogin(email, password string) string {
 	loginURL := "https://cults3d.com/en/users/sign-in"
 	client := noRedirectClient()
 
-	// Step 1: fetch the sign-in page → CSRF token + initial _session_id.
+	// Step 1: the sign-in page, for the CSRF token and initial _session_id.
 	_, header1, loginBody := rawRequest(client, "GET", loginURL, "", map[string]string{"User-Agent": cults3dUserAgent})
 	csrfMatch := cults3dCSRFPattern.FindStringSubmatch(string(loginBody))
 	if csrfMatch == nil {
@@ -740,7 +720,7 @@ func cults3dAutoLogin(email, password string) string {
 		}
 	}
 
-	// Step 2: post credentials (do not follow the redirect, 302/303 expected).
+	// Step 2: post the credentials without following the redirect.
 	form := url.Values{
 		"authenticity_token": {csrfToken},
 		"user[email]":        {email},
@@ -764,7 +744,6 @@ func cults3dAutoLogin(email, password string) string {
 	return ""
 }
 
-// cdpHeader reads a header case-insensitively from the CDP response headers.
 func cdpHeader(headers proto.NetworkHeaders, name string) string {
 	for key, value := range headers {
 		if strings.EqualFold(key, name) {
@@ -774,8 +753,7 @@ func cdpHeader(headers proto.NetworkHeaders, name string) string {
 	return ""
 }
 
-// isCults3dFile decides based on URL/content-type/disposition whether a response
-// is a downloadable file.
+// isCults3dFile decides by URL, content-type and disposition.
 func isCults3dFile(responseURL, contentType, contentDisposition string) bool {
 	if regexp.MustCompile(`(?i)attachment`).MatchString(contentDisposition) && !regexp.MustCompile(`(?i)\.txt`).MatchString(contentDisposition) {
 		return true
@@ -786,7 +764,6 @@ func isCults3dFile(responseURL, contentType, contentDisposition string) bool {
 	return regexp.MustCompile(`(?i)\.(stl|3mf|obj|step|zip)(\?|$)`).MatchString(responseURL)
 }
 
-// cults3dRespName determines the file name from Content-Disposition or URL.
 func cults3dRespName(responseURL, contentDisposition string) string {
 	if match := regexp.MustCompile(`(?i)filename\*?=(?:UTF-8''|["']?)([^"';\n]+)`).FindStringSubmatch(contentDisposition); match != nil {
 		name := strings.TrimSpace(strings.ReplaceAll(match[1], `"`, ""))
@@ -808,9 +785,8 @@ func cults3dRespName(responseURL, contentDisposition string) string {
 	return base
 }
 
-// cults3dOrderDownloadURL queries the GraphQL API (basic auth nickname:apiKey)
-// for the download URL of the order belonging to the given model slug. Empty if
-// the model has not (yet) been ordered.
+// cults3dOrderDownloadURL asks the GraphQL API for the download URL of the order
+// belonging to a slug. Empty when the model has not been ordered.
 func cults3dOrderDownloadURL(nickname, apiKey, slug string) string {
 	const query = `query={ myself { ordersBatch(limit:100){ results { lines { downloadUrl creation { slug } } } } } }`
 	request, failure := http.NewRequest(http.MethodPost, "https://cults3d.com/graphql", strings.NewReader(query))
@@ -853,9 +829,8 @@ func cults3dOrderDownloadURL(nickname, apiKey, slug string) string {
 	return ""
 }
 
-// cults3dFirefoxDownload lets the Firefox resolver sidecar visit the given
-// download URLs (from the API) and collect the files (web session needed; Firefox
-// passes Cloudflare). Returns: captured files.
+// cults3dFirefoxDownload lets the resolver sidecar visit the download URLs and
+// collect the files; the web session is needed and Firefox passes Cloudflare.
 func cults3dFirefoxDownload(playwrightURL, email, password, cookieJar string, urls []string) ([]capturedFile, string) {
 	requestBody, _ := json.Marshal(map[string]any{
 		"email": email, "password": password, "urls": urls, "cookieJar": cookieJar,
@@ -894,11 +869,9 @@ func cults3dFirefoxDownload(playwrightURL, email, password, cookieJar string, ur
 	return output, parsed.CookieJar
 }
 
-// cults3dDirectDownload loads the file via a simple HTTP GET with the cached
-// cookie jar (cf_clearance + _session_id) and Firefox user agent - without a
-// browser. Cults3D/downloads redirects to the file (or CDN) with a valid session.
-// Returns nil if an HTML page comes instead (Cloudflare challenge or login
-// redirect) - then the Firefox fallback takes over.
+// cults3dDirectDownload fetches the file with the cached cookie jar and no
+// browser. Returns nil when HTML arrives instead - a Cloudflare challenge or a
+// login redirect - and the Firefox fallback takes over.
 func cults3dDirectDownload(cookieJar, downloadURL string) []capturedFile {
 	request, failure := http.NewRequest(http.MethodGet, downloadURL, nil)
 	if failure != nil {
@@ -916,7 +889,7 @@ func cults3dDirectDownload(cookieJar, downloadURL string) []capturedFile {
 		return nil
 	}
 	contentType := strings.ToLower(response.Header.Get("Content-Type"))
-	// HTML = Cloudflare interstitial or login page → not a file.
+	// HTML means an interstitial or login page, not a file.
 	if strings.Contains(contentType, "text/html") {
 		return nil
 	}
@@ -928,8 +901,7 @@ func cults3dDirectDownload(cookieJar, downloadURL string) []capturedFile {
 	return []capturedFile{{name: name, data: data}}
 }
 
-// cults3dCookieJar returns the stored (encrypted) cookie jar (cf_clearance +
-// _session_id) of the account, or "" if none exists.
+// cults3dCookieJar returns the stored jar (cf_clearance + _session_id), or "".
 func (cults3d Cults3D) cults3dCookieJar(userID int) string {
 	var encrypted sql.NullString
 	_ = cults3d.DB.QueryRow(
@@ -944,8 +916,7 @@ func (cults3d Cults3D) cults3dCookieJar(userID int) string {
 	return ""
 }
 
-// saveCults3dCookieJar stores the cookie jar encrypted so that later downloads
-// can skip both the Cloudflare check and the login.
+// saveCults3dCookieJar lets later downloads skip both Cloudflare and the login.
 func (cults3d Cults3D) saveCults3dCookieJar(userID int, jar string) {
 	if encrypted, failure := cults3d.Crypto.Encrypt(jar, userID); failure == nil {
 		dbutil.ExecLogged(cults3d.DB, "UPDATE platform_accounts SET session_cookie=? WHERE user_id=? AND platform='cults3d'", encrypted, userID)

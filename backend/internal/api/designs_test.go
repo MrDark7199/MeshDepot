@@ -5,14 +5,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"meshdepot/internal/coerce"
 	"meshdepot/internal/publicid"
 )
 
-// indexItems runs DesignsIndex with the given query string and returns the item
-// list together with the reported total.
+// indexItems runs DesignsIndex and returns the items with the reported total.
 func (testHarness *harness) indexItems(query string) ([]map[string]any, int) {
 	testHarness.t.Helper()
 	answer := testHarness.asUser(http.MethodGet, "/api/v1/designs"+query, nil)
@@ -27,7 +27,6 @@ func (testHarness *harness) indexItems(query string) ([]map[string]any, int) {
 	return rows, coerce.Int(payload["total"])
 }
 
-// names collects the design names of an item list in order.
 func names(rows []map[string]any) []string {
 	result := make([]string, 0, len(rows))
 	for _, row := range rows {
@@ -152,8 +151,6 @@ func TestDesignsIndexSortsByName(t *testing.T) {
 	}
 }
 
-// An unknown sort field or direction must not reach the SQL - it falls back to
-// the default instead.
 func TestDesignsIndexIgnoresAnUnknownSortField(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.insertDesign(testHarness.userID, "Alpha")
@@ -237,8 +234,7 @@ func TestDesignsIndexWithSharedOnlyLeavesOutOwnDesigns(t *testing.T) {
 	}
 }
 
-// since_id went with the numeric ids: it filtered by rowid, and no client is
-// told a rowid any more. A leftover value must not quietly change the page.
+// since_id went with the numeric ids and must not quietly change the page.
 func TestDesignsIndexIgnoresTheRetiredSinceIDParameter(t *testing.T) {
 	testHarness := newHarness(t)
 	for index := 0; index < 5; index++ {
@@ -286,8 +282,7 @@ func TestDesignsIndexRejectsTooManyTagFilters(t *testing.T) {
 	}
 }
 
-// An unparsable tag id used to become tag_id = 0 and silently return an empty
-// list; it has to be a 422 instead.
+// An unparsable tag id used to become tag_id = 0 and return an empty list.
 func TestDesignsIndexRejectsAnUnusableTagID(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -302,9 +297,8 @@ func TestDesignsIndexRejectsAnUnusableTagID(t *testing.T) {
 	}
 }
 
-// The promise of the public id: a design is addressed by it, and the rowid it
-// replaces never travels. A response that still carried the numeric id would
-// hand out exactly the sequential number the change exists to hide.
+// The promise of the public id: the rowid it replaces never travels, or the
+// response hands out the sequential number the change exists to hide.
 func TestDesignsAreAddressedByPublicIDOnly(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit oeffentlicher Id")
@@ -330,7 +324,6 @@ func TestDesignsAreAddressedByPublicIDOnly(t *testing.T) {
 	}
 }
 
-// An id of the right shape that names nothing is a 404, not a 500.
 func TestDesignsAnswerAnUnknownPublicIDWithNotFound(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -371,7 +364,6 @@ func TestDesignsShowReturnsTagsImagesAndShares(t *testing.T) {
 	}
 }
 
-// The recipient of a share sees the design, but not who else it was shared with.
 func TestDesignsShowHidesTheShareListFromTheRecipient(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.adminID, "Geteilt")
@@ -451,8 +443,8 @@ func TestDesignsStoreDefaultsToTheManualPlatform(t *testing.T) {
 	}
 }
 
-// nullStr has to turn blank optional fields into NULL - otherwise every
-// "IS NOT NULL" check downstream has to carry an "AND != ”" along.
+// nullStr has to turn blank optional fields into NULL, or every "IS NOT NULL"
+// downstream needs an "AND != ”" along.
 func TestDesignsStoreWritesBlankOptionalFieldsAsNull(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -507,8 +499,8 @@ func TestDesignsUpdateWritesTheWhitelistedFields(t *testing.T) {
 	}
 }
 
-// The whitelist is the whole protection here: without it a caller could hand
-// their design to somebody else by sending user_id.
+// Without the whitelist a caller could hand their design to somebody else by
+// sending user_id.
 func TestDesignsUpdateIgnoresFieldsOutsideTheWhitelist(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Alt")
@@ -575,7 +567,6 @@ func TestDesignsUpdateDoesNotTouchAForeignDesign(t *testing.T) {
 	}
 }
 
-// Being the recipient of a share is not ownership: it must not allow writing.
 func TestDesignsUpdateIsDeniedToTheShareRecipient(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.adminID, "Geteilt")
@@ -665,8 +656,8 @@ func TestDesignsSyncQueuesTheDesign(t *testing.T) {
 	}
 }
 
-// sync_queue has no unique constraint, so the duplicate check is the only thing
-// keeping a second job for the same design out.
+// sync_queue has no unique constraint, so this check is the only thing keeping a
+// second job for the same design out.
 func TestDesignsSyncDoesNotQueueTheSameDesignTwice(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit Quelle")
@@ -684,7 +675,6 @@ func TestDesignsSyncDoesNotQueueTheSameDesignTwice(t *testing.T) {
 	}
 }
 
-// A finished job no longer blocks: the design may be synced again.
 func TestDesignsSyncQueuesAgainAfterAFinishedJob(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit Quelle")
@@ -840,8 +830,6 @@ func TestDesignsCheckUrlFindsAnExistingDesign(t *testing.T) {
 	}
 }
 
-// The check is per user: a design of somebody else must not show up as "already
-// in your library".
 func TestDesignsCheckUrlIgnoresForeignDesigns(t *testing.T) {
 	testHarness := newHarness(t)
 	foreign := testHarness.insertDesign(testHarness.adminID, "Fremd")
@@ -950,10 +938,9 @@ func TestDesignsFetchCoverRejectsAForeignDesign(t *testing.T) {
 	}
 }
 
-// The column feeds the outgoing link and the sync. A value that leads nowhere is
-// a dead link and a design the sync can never resolve, so it is refused rather
-// than stored. "http://afeefafefefaffefef" is the case that used to slip
-// through: it parses, and it has a host, but there is no such site.
+// A value that leads nowhere is a dead link and a design the sync can never
+// resolve. "http://afeefafefefaffefef" used to slip through: it parses and has a
+// host, but there is no such site.
 func TestDesignsUpdateRefusesASourceURLThatIsNotOne(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit Quelle")
@@ -982,8 +969,7 @@ func TestDesignsUpdateRefusesASourceURLThatIsNotOne(t *testing.T) {
 	}
 }
 
-// Nobody types "https://" in front of an address they copied, so a bare host is
-// accepted and stored with the scheme the sync needs.
+// Nobody types "https://" in front of an address they copied.
 func TestDesignsUpdateFillsInTheMissingScheme(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Mit Quelle")
@@ -1000,5 +986,63 @@ func TestDesignsUpdateFillsInTheMissingScheme(t *testing.T) {
 	}
 	if stored != "https://www.printables.com/model/1" {
 		t.Fatalf("stored %q, want the https scheme filled in", stored)
+	}
+}
+
+func TestDesignsSyncIsRefusedWithoutPlatformCredentials(t *testing.T) {
+	testHarness := newHarness(t)
+	designID := testHarness.insertDesign(testHarness.userID, "Ohne Zugangsdaten")
+	testHarness.setDesignFields(designID, map[string]any{
+		"source_url":      "https://www.myminifactory.com/object/3d-print-1234",
+		"source_platform": "myminifactory",
+	})
+
+	answer := testHarness.asUser(http.MethodPost, "/api/v1/designs/"+testHarness.designPID(designID)+"/sync", nil)
+	if answer.status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", answer.status)
+	}
+	if key := answer.errorKey(t); !strings.HasPrefix(key, "error.platform_credentials_required") {
+		t.Errorf("error = %q, want the credentials key", key)
+	}
+	if queued := testHarness.count("SELECT COUNT(*) FROM sync_queue WHERE design_id = ?", designID); queued != 0 {
+		t.Errorf("%d job(s) queued; the point is that none is", queued)
+	}
+}
+
+func TestDesignsSyncQueuesOnceTheCredentialsAreThere(t *testing.T) {
+	testHarness := newHarness(t)
+	designID := testHarness.insertDesign(testHarness.userID, "Mit Zugangsdaten")
+	testHarness.setDesignFields(designID, map[string]any{
+		"source_url":      "https://www.myminifactory.com/object/3d-print-1234",
+		"source_platform": "myminifactory",
+	})
+	testHarness.insertPlatformAccount(testHarness.userID, "myminifactory", "a-token", "")
+
+	answer := testHarness.asUser(http.MethodPost, "/api/v1/designs/"+testHarness.designPID(designID)+"/sync", nil)
+	if answer.status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", answer.status)
+	}
+	if queued := testHarness.count("SELECT COUNT(*) FROM sync_queue WHERE design_id = ?", designID); queued != 1 {
+		t.Errorf("%d job(s) queued, want 1", queued)
+	}
+}
+
+func TestDesignsShowNamesWhyTheSyncIsBlocked(t *testing.T) {
+	testHarness := newHarness(t)
+	designID := testHarness.insertDesign(testHarness.userID, "Ohne Zugangsdaten")
+	testHarness.setDesignFields(designID, map[string]any{
+		"source_url":      "https://www.myminifactory.com/object/3d-print-1234",
+		"source_platform": "myminifactory",
+	})
+
+	blocked := testHarness.asUser(http.MethodGet, "/api/v1/designs/"+testHarness.designPID(designID), nil).data(t)
+	if reason, _ := blocked["sync_blocked_reason"].(string); !strings.HasPrefix(reason, "error.platform_credentials_required") {
+		t.Errorf("sync_blocked_reason = %q, want the credentials key", reason)
+	}
+
+	testHarness.insertPlatformAccount(testHarness.userID, "myminifactory", "a-token", "")
+	open := testHarness.asUser(http.MethodGet, "/api/v1/designs/"+testHarness.designPID(designID), nil).data(t)
+	if reason, _ := open["sync_blocked_reason"].(string); reason != "" {
+		t.Errorf("sync_blocked_reason = %q, want it empty once the account is there", reason)
 	}
 }

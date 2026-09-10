@@ -1,8 +1,7 @@
 package platforms
 
-// Shared helpers of the platform downloaders: HTTP GET (direct + via Tor with circuit
-// rotation), Thingiverse API call, temp directory, cover download and platform token
-// resolution.
+// Shared helpers of the platform downloaders: HTTP GET direct and through Tor,
+// temp directories, cover download and token resolution.
 
 import (
 	"bytes"
@@ -37,19 +36,16 @@ const (
 	apiTimeoutSecond     = 30
 	userAgent            = "MeshDepot/1.0 (+https://github.com/meshdepot)"
 
-	// maxDownloadBytes caps a single streamed file. The container runs with
-	// mem_limit 2g and the disk is shared with the library, so a platform that
-	// answers with an endless stream must not be able to fill either.
+	// The container runs with mem_limit 2g and shares its disk with the library, so
+	// a platform answering with an endless stream must not fill either.
 	maxDownloadBytes = 4 << 30 // 4 GiB
-	// maxResponseBytes caps responses that are read into memory (API JSON, HTML
-	// pages, images). Nothing legitimate on those paths comes close.
+	// maxResponseBytes caps what is read into memory: API JSON, HTML, images.
 	maxResponseBytes = 256 << 20 // 256 MiB
-	// sniffBytes is how much of a response is inspected to tell a real file from
-	// an HTML/JSON block page served with status 200.
+	// sniffBytes is how much of a response is inspected to tell a real file from an
+	// HTML or JSON block page served with status 200.
 	sniffBytes = 512
 )
 
-// Deps bundles the dependencies that all downloaders share.
 type Deps struct {
 	DB      *sql.DB
 	Crypto  *crypto.Crypto
@@ -59,9 +55,8 @@ type Deps struct {
 }
 
 // newOutboundRequest builds a request with our User-Agent and the caller's
-// headers on top of it. The URL is used as given - whether it may be sanitised
-// is the caller's decision: percent-escaping the path breaks presigned CDN URLs
-// whose signature covers it.
+// headers. The URL is used as given: percent-escaping the path breaks presigned
+// CDN URLs whose signature covers it.
 func newOutboundRequest(method, rawURL, body string, headers map[string]string) (*http.Request, error) {
 	var payload io.Reader
 	if body != "" {
@@ -78,13 +73,9 @@ func newOutboundRequest(method, rawURL, body string, headers map[string]string) 
 	return request, nil
 }
 
-// fetch performs one outbound request and reads the response body, capped at
-// maxResponseBytes. It is the single place where the outbound request policy
-// lives: sanitised URL, our User-Agent, caller headers on top of it. Returns
-// body + HTTP status, or (nil, 0) on a transport error.
-//
-// The four wrappers below differ only in the client (direct vs. Tor, API vs.
-// download timeout) and the method - that was four copies of this function.
+// fetch performs one outbound request and reads the body, capped at
+// maxResponseBytes. The single place the outbound policy lives; the four
+// wrappers below differ only in client and method. (nil, 0) on a transport error.
 func fetch(client *http.Client, method, rawURL, body string, headers map[string]string) ([]byte, int) {
 	request, failure := newOutboundRequest(method, sanitizeURL(rawURL), body, headers)
 	if failure != nil {
@@ -101,12 +92,10 @@ func fetch(client *http.Client, method, rawURL, body string, headers map[string]
 	return output, response.StatusCode
 }
 
-// apiClient is the client for metadata/API calls, with the shorter timeout.
 func apiClient() *http.Client {
 	return &http.Client{Timeout: apiTimeoutSecond * time.Second}
 }
 
-// directGet performs a direct HTTP GET (follows redirects).
 func directGet(rawURL string, headers map[string]string) ([]byte, int) {
 	return fetch(&http.Client{Timeout: defaultTimeoutSecond * time.Second}, http.MethodGet, rawURL, "", headers)
 }
@@ -117,13 +106,11 @@ func directGetWith(client *http.Client, rawURL string, headers map[string]string
 	return fetch(client, http.MethodGet, rawURL, "", headers)
 }
 
-// directPost performs a direct HTTP POST with a raw body.
 func directPost(rawURL, body string, headers map[string]string) ([]byte, int) {
 	return fetch(apiClient(), http.MethodPost, rawURL, body, headers)
 }
 
-// torGet always performs a GET through the Tor SOCKS5 proxy and rotates the
-// route beforehand.
+// torGet rotates the circuit beforehand.
 func (deps Deps) torGet(rawURL string, headers map[string]string) ([]byte, int) {
 	if deps.Tor == nil {
 		return nil, 0
@@ -136,8 +123,7 @@ func (deps Deps) torGet(rawURL string, headers map[string]string) ([]byte, int) 
 	return fetch(client, http.MethodGet, rawURL, "", headers)
 }
 
-// torPost performs a POST through the Tor SOCKS5 proxy. Unlike torGet it does
-// not rotate the circuit: a POST usually continues a session on the current one.
+// torPost does not rotate the circuit: a POST usually continues a session.
 func (deps Deps) torPost(rawURL, body string, headers map[string]string) ([]byte, int) {
 	if deps.Tor == nil {
 		return nil, 0
@@ -149,17 +135,15 @@ func (deps Deps) torPost(rawURL, body string, headers map[string]string) ([]byte
 	return fetch(client, http.MethodPost, rawURL, body, headers)
 }
 
-// storeImage downloads a single image and stores it under
-// the user's staging directory. Returns the absolute staged path, or "" when
-// the URL yields nothing usable: too small, unreachable, or not one of the
-// raster formats on the allowlist. suffix only keeps the file names apart when
-// several images are stored within the same nanosecond.
+// storeImage downloads one image into the user's staging directory and returns
+// the absolute path, or "" when the URL yields nothing usable: too small,
+// unreachable, or not one of the allowed raster formats. suffix only keeps names
+// apart within the same nanosecond.
 func storeImage(user storage.UserLayout, imageURL string, suffix int) string {
 	return storeImageWith(user, imageURL, suffix, false)
 }
 
-// storeImageGuarded is storeImage for a picture address a client supplied. See
-// outboundguard.go.
+// storeImageGuarded is storeImage for an address a client supplied.
 func storeImageGuarded(user storage.UserLayout, imageURL string, suffix int) string {
 	return storeImageWith(user, imageURL, suffix, true)
 }
@@ -168,9 +152,8 @@ func storeImageWith(user storage.UserLayout, imageURL string, suffix int, guarde
 	if imageURL == "" {
 		return ""
 	}
-	// Staged inside the user's temp directory: the design id is only known once
-	// the row exists, so SaveDownload/AddImages move the file into the design's
-	// pictures directory afterwards.
+	// Staged in the user's temp directory: the design id only exists once the row
+	// does, so SaveDownload moves the file into the pictures directory afterwards.
 	directory := filepath.Join(user.Temp(), "images")
 	if failure := storage.MkdirAll(directory); failure != nil {
 		return ""
@@ -196,15 +179,14 @@ func storeImageWith(user storage.UserLayout, imageURL string, suffix int, guarde
 	return staged
 }
 
-// downloadAllImages loads several image URLs and stores the usable ones.
-// progress reports - if set - the progress of the "downloading_images" phase per
-// image, so the "checking images" category becomes visible during sync
-// (otherwise it would be a single moment invisible to the polling).
+// downloadAllImages stores the usable ones. progress reports the
+// "downloading_images" phase per image, which would otherwise be a single moment
+// invisible to the polling.
 func downloadAllImages(user storage.UserLayout, imageURLs []string, progress func(step, label string, current, total int)) []string {
 	return downloadAllImagesWith(user, imageURLs, progress, false)
 }
 
-// downloadAllImagesGuarded is downloadAllImages for addresses a client supplied.
+// downloadAllImagesGuarded is the same for addresses a client supplied.
 func downloadAllImagesGuarded(user storage.UserLayout, imageURLs []string) []string {
 	return downloadAllImagesWith(user, imageURLs, nil, true)
 }
@@ -230,16 +212,13 @@ func downloadAllImagesWith(user storage.UserLayout, imageURLs []string,
 	return saved
 }
 
-// downloadFileTo fetches rawURL through client and writes it to destPath without
-// ever holding the file in memory. It returns false when the response is not a
-// usable file, in which case no file is left behind.
+// downloadFileTo writes the response to destPath without holding the file in
+// memory, and leaves nothing behind when the response is not a usable file.
 //
-// The buffered alternative (directGet → os.WriteFile) needs the full file on the
-// heap - a 500 MB 3MF costs 500 MB per job, next to a 2 GiB container limit and
-// several jobs in flight. The only reason it existed is the soft-block check:
-// several platforms answer a blocked download with an HTML or JSON error page
-// and status 200. Sniffing the first sniffBytes gives that check the same
-// information without the rest of the body ever being buffered.
+// The buffered alternative costs a 500 MB heap for a 500 MB 3MF, against a 2 GiB
+// container limit and several jobs in flight. It only existed for the soft-block
+// check - several platforms answer a blocked download with an error page and
+// status 200 - and sniffing the first sniffBytes answers that just as well.
 func downloadFileTo(client *http.Client, rawURL, destPath string, headers map[string]string) bool {
 	request, failure := newOutboundRequest(http.MethodGet, sanitizeURL(rawURL), "", headers)
 	if failure != nil {
@@ -286,17 +265,14 @@ func (deps Deps) torDownloadFileTo(rawURL, destPath string, headers map[string]s
 	return downloadFileTo(client, rawURL, destPath, headers)
 }
 
-// downloadClient is the client for streamed file downloads; the timeout covers
-// the whole transfer, so it is far longer than the API one.
+// downloadClient covers the whole transfer, so its timeout is far longer.
 func downloadClient() *http.Client {
 	return &http.Client{Timeout: downloadTimeout}
 }
 
-// downloadTimeout bounds a complete file transfer.
 const downloadTimeout = 600 * time.Second
 
-// tvApi calls the Thingiverse REST API and returns the decoded JSON. On
-// error/invalid JSON the result is nil.
+// thingiverseAPI returns the decoded JSON, or nil on error or invalid JSON.
 func thingiverseAPI(rawURL, token string) any {
 	headers := map[string]string{}
 	if token != "" {
@@ -313,7 +289,6 @@ func thingiverseAPI(rawURL, token string) any {
 	return decoded
 }
 
-// sanitizeURL percent-encodes the path segments and keeps the query.
 func sanitizeURL(raw string) string {
 	parsed, failure := url.Parse(raw)
 	if failure != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -330,7 +305,6 @@ func sanitizeURL(raw string) string {
 	return output
 }
 
-// makeTmpDir creates a unique temp directory for a download.
 func makeTempDir(user storage.UserLayout) (string, error) {
 	directory := filepath.Join(user.Temp(),
 		fmt.Sprintf("dl_%d_%d", time.Now().UnixNano(), os.Getpid()))
@@ -340,16 +314,13 @@ func makeTempDir(user storage.UserLayout) (string, error) {
 	return directory, nil
 }
 
-// coverFilenamePattern filters the file extension out of a cover URL path.
 var coverFilenamePattern = regexp.MustCompile(`[^\w.\-]`)
 
-// downloadCover loads the title image of a design. Returns the absolute path of
-// the staged file.
+// downloadCover returns the absolute path of the staged title image.
 func downloadCover(user storage.UserLayout, imageURL string) string {
 	return storeImage(user, imageURL, os.Getpid())
 }
 
-// imageExtensions maps the raster formats we accept to their file extension.
 // SVG is deliberately absent: it is a document format that can carry <script>,
 // and these files are served from the app's own origin.
 var imageExtensions = map[string]string{
@@ -359,11 +330,10 @@ var imageExtensions = map[string]string{
 	"image/webp": "webp",
 }
 
-// imageExtension determines the file extension from the actual bytes. The URL
-// extension must not be trusted: a platform's metadata can point at .../x.html
-// or .../x.svg, and http.ServeFile derives the Content-Type from the extension -
-// so arbitrary HTML would be served as text/html on the app origin, with the
-// viewer's session in reach. Returns false for anything not on the allowlist.
+// imageExtension reads the format from the bytes. The URL extension cannot be
+// trusted - a platform may point at .../x.svg, and http.ServeFile derives the
+// Content-Type from it, so arbitrary HTML would be served on the app origin with
+// the viewer's session in reach.
 func imageExtension(body []byte) (string, bool) {
 	contentType := http.DetectContentType(body)
 	if index := strings.IndexByte(contentType, ';'); index >= 0 {
@@ -373,9 +343,8 @@ func imageExtension(body []byte) (string, bool) {
 	return extension, ok
 }
 
-// PlatformToken returns the stored platform token of a user (decrypted) or empty
-// if none is stored. Tokens come exclusively from the user's account
-// (Account Settings → Platforms); there is no server-wide fallback.
+// PlatformToken returns the user's decrypted platform token. Tokens come from
+// the account alone; there is no server-wide fallback.
 func (deps Deps) PlatformToken(userID int, platform string) string {
 	var encrypted sql.NullString
 	failure := deps.DB.QueryRow(
@@ -390,16 +359,13 @@ func (deps Deps) PlatformToken(userID int, platform string) string {
 	return ""
 }
 
-// sanitizeFileName replaces every character outside [\w.-] with "_".
 func sanitizeFileName(name string) string {
 	return coverFilenamePattern.ReplaceAllString(name, "_")
 }
 
-// totpAlphabet is the RFC 4648 base32 alphabet (without padding).
 const totpAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
-// generateTotp computes the 6-digit TOTP code (30-second window, HMAC-SHA1) from
-// a base32 secret.
+// generateTotp computes the 6-digit code (30-second window, HMAC-SHA1).
 func generateTotp(secret string) string {
 	secret = strings.ToUpper(strings.ReplaceAll(secret, " ", ""))
 	var buffer uint64
@@ -428,22 +394,21 @@ func generateTotp(secret string) string {
 	return fmt.Sprintf("%06d", code)
 }
 
-// streamDownload streams a URL to disk (follows redirects) and returns the
-// written size + HTTP status (for 403/magic-byte checks).
+// streamDownload streams a URL to disk and returns the written size and HTTP
+// status, for the 403 and magic-byte checks.
 func streamDownload(rawURL, destPath string, headers map[string]string) (int64, int) {
 	return streamDownloadWith(downloadClient(), rawURL, destPath, headers)
 }
 
 // streamDownloadGuarded is streamDownload for an address this server did not
-// choose. Every connection is checked against the private ranges - see
-// outboundguard.go for why that check belongs at the socket and not at the URL.
+// choose: every connection is checked against the private ranges. outboundguard.go
+// explains why that belongs at the socket rather than at the URL.
 func streamDownloadGuarded(rawURL, destPath string, headers map[string]string) (int64, int) {
 	return streamDownloadWith(guardedDownloadClient(), rawURL, destPath, headers)
 }
 
 func streamDownloadWith(client *http.Client, rawURL, destPath string, headers map[string]string) (int64, int) {
-	// The URL is passed through unsanitised: these are presigned CDN links whose
-	// signature covers the path.
+	// Unsanitised: these are presigned CDN links whose signature covers the path.
 	request, failure := newOutboundRequest(http.MethodGet, rawURL, "", headers)
 	if failure != nil {
 		return 0, 0
@@ -455,8 +420,8 @@ func streamDownloadWith(client *http.Client, rawURL, destPath string, headers ma
 	}
 	defer response.Body.Close()
 	recordRequest(rawURL, requestKindDownload, response.StatusCode)
-	// Status first: creating the file before checking it left a 0-byte corpse in
-	// the temp directory behind every 403 from a platform.
+	// Status first: creating the file before checking left a 0-byte corpse behind
+	// every 403.
 	if response.StatusCode >= 400 {
 		return 0, response.StatusCode
 	}
@@ -467,16 +432,16 @@ func streamDownloadWith(client *http.Client, rawURL, destPath string, headers ma
 	written, copyFailure := io.Copy(output, io.LimitReader(response.Body, maxDownloadBytes))
 	closeFailure := output.Close()
 	if copyFailure != nil || closeFailure != nil {
-		// A truncated file is worse than none: it would pass the size checks in
-		// SaveDownload and end up in the library as a corrupt model.
+		// A truncated file would pass the size checks in SaveDownload and land in the
+		// library as a corrupt model.
 		_ = os.Remove(destPath)
 		return 0, response.StatusCode
 	}
 	return written, response.StatusCode
 }
 
-// jwtExpired checks whether a JWT access token is expired according to its `exp`
-// claim. Tokens that are not JWTs (e.g. cookies) count as "not expired" (false).
+// jwtExpired reads the exp claim. Anything that is not a JWT, a cookie for
+// instance, counts as not expired.
 func jwtExpired(token string) bool {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -484,7 +449,6 @@ func jwtExpired(token string) bool {
 	}
 	payload, failure := base64.RawURLEncoding.DecodeString(parts[1])
 	if failure != nil {
-		// Some tokens use standard base64/padding.
 		payload, failure = base64.StdEncoding.DecodeString(parts[1])
 		if failure != nil {
 			return false
@@ -499,8 +463,8 @@ func jwtExpired(token string) bool {
 	return time.Now().Unix() >= claims.Exp
 }
 
-// uniqueStrings removes duplicates (order preserved). Not slices.Compact:
-// that only drops *consecutive* duplicates and would need a sort first.
+// uniqueStrings preserves order. Not slices.Compact: that drops only consecutive
+// duplicates and would need a sort first.
 func uniqueStrings(values []string) []string {
 	seen := map[string]bool{}
 	output := make([]string, 0, len(values))

@@ -8,15 +8,13 @@ import (
 	"meshdepot/internal/coerce"
 )
 
-// printablesURL is the URL of choice wherever the queueing itself is what is
-// under test. Printables needs a platform account like every other platform, so
-// those tests call withPrintablesAccount first.
+// printablesURL is used wherever the queueing itself is under test; Printables
+// needs an account, so those tests call withPrintablesAccount first.
 const printablesURL = "https://www.printables.com/model/98765-lampe"
 
 const thingiverseURL = "https://www.thingiverse.com/thing:12345"
 
-// withPrintablesAccount stores the login the printables downloader needs, so a
-// queue request gets past the credential check.
+// withPrintablesAccount gets a queue request past the credential check.
 func withPrintablesAccount(testHarness *harness) *harness {
 	testHarness.insertPlatformAccount(testHarness.userID, "printables", "", "member@example.org")
 	return testHarness
@@ -54,9 +52,9 @@ func TestDownloadQueueNeedsAURL(t *testing.T) {
 	}
 }
 
-// The platform is taken from the parsed host. A URL that only mentions a
-// platform in its query string is not that platform - that check is what keeps
-// the downloaders from being pointed at an arbitrary server.
+// The platform comes from the parsed host: a URL that only mentions one in its
+// query string is not that platform, which is what keeps the downloaders from
+// being pointed at an arbitrary server.
 func TestDownloadQueueRejectsAnUnsupportedURL(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -102,8 +100,8 @@ func TestDownloadQueueAcceptsAPlatformOnceItsCredentialsExist(t *testing.T) {
 	}
 }
 
-// MakerWorld re-fetches its short-lived token with the login, so a token on its
-// own cannot keep downloads working and does not get a job through.
+// MakerWorld re-fetches its short-lived token with the login, so a token alone
+// cannot keep downloads working.
 func TestDownloadQueueRejectsMakerWorldWithOnlyAToken(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.insertPlatformAccount(testHarness.userID, "makerworld", "ein-token", "")
@@ -116,9 +114,8 @@ func TestDownloadQueueRejectsMakerWorldWithOnlyAToken(t *testing.T) {
 	}
 }
 
-// The token is only created by the first successful login, so an account that
-// has just been entered has none yet. Demanding one rejected credentials that
-// were stored correctly - the e-mail alone has to be enough.
+// The token only exists after the first successful login, so demanding one
+// rejected credentials that were stored correctly.
 func TestDownloadQueueAcceptsMakerWorldWithOnlyAnEmail(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.insertPlatformAccount(testHarness.userID, "makerworld", "", "jemand@example.org")
@@ -131,8 +128,7 @@ func TestDownloadQueueAcceptsMakerWorldWithOnlyAnEmail(t *testing.T) {
 	}
 }
 
-// Cults3D downloads with the login, not with the API key, so the username alone
-// gets the job through.
+// Cults3D downloads with the login, not the API key.
 func TestDownloadQueueAcceptsCults3dWithOnlyAUsername(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.insertPlatformAccount(testHarness.userID, "cults3d", "", "jemand@example.org")

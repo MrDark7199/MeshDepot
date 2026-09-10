@@ -1,13 +1,7 @@
 /**
- * The sites this extension works on, and how to read a design from each.
- *
- * Only MakerWorld needs anything of its own. Its download links are produced by
- * an API call that can be read from the page, and its metadata is better taken
- * from the same API than from the markup. Everywhere else the generic reader
- * below is enough - and the part that actually matters, catching the download,
- * is the browser's own downloads API and knows nothing about platforms at all.
- *
- * Loaded into the page's world alongside page.js, so both can use it.
+ * The sites this extension works on, and how to read a design from each. Only
+ * MakerWorld needs anything of its own; catching the download is the browser's
+ * job and knows nothing about platforms.
  */
 
 const MESHDEPOT_PLATFORMS = [
@@ -15,10 +9,7 @@ const MESHDEPOT_PLATFORMS = [
     key: 'makerworld',
     label: 'MakerWorld',
     hostPattern: /(^|\.)makerworld\.com$/i,
-    // /models/123456 - the id is what the API is addressed by.
     pathPattern: /\/models\/(\d+)/,
-    // The site's own API answers with title, author, tags, cover and the list of
-    // instances; richer and steadier than anything scraped from the markup.
     useApi: true,
   },
   {
@@ -32,22 +23,11 @@ const MESHDEPOT_PLATFORMS = [
     label: 'Thingiverse',
     hostPattern: /(^|\.)thingiverse\.com$/i,
     pathPattern: /\/thing:(\d+)/,
-    // Thingiverse needs its file list fetched, and with a token of the site's
-    // own.
-    //
-    // "Download all files" builds the archive in the browser and hands out a
-    // blob: address - which the server cannot fetch, a content script cannot
-    // read, and the page revokes moments later. The file names in the markup
-    // carry no address at all; they are rendered from data the page fetched.
-    //
-    // That data is behind /api/v2/things/<id>/complete, which answers 401 to a
-    // bare request and 200 with a guest token from /api/v2/auth/view - free for
-    // the asking, no account involved. Inside it, zip_data.files names every file
-    // with a direct CDN address that needs no token at all.
-    //
-    // So the browser asks and the server fetches, each doing the part only it
-    // can: the server is challenged by Cloudflare on those endpoints, and the
-    // browser has no reason to download files whose addresses are public.
+    // "Download all files" builds the archive in the browser behind a blob:
+    // address nobody else can read. /api/v2/things/<id>/complete lists every
+    // file with a public CDN address instead; it needs a guest token from
+    // /api/v2/auth/view, which is free for the asking. The browser fetches it
+    // because Cloudflare challenges the server on those endpoints.
     fetchExtras: async identifier => {
       const guest = await fetch('/api/v2/auth/view', { credentials: 'include' })
       if (!guest.ok) {
@@ -69,9 +49,8 @@ const MESHDEPOT_PLATFORMS = [
       const zipData = (complete && complete.zip_data) || {}
       if (!Array.isArray(zipData.files)) throw new Error('Thingiverse listed no files for this design.')
 
-      // The pictures come from the same answer, and they are the design's own -
-      // the page's Open Graph tag names Thingiverse's house image, which is
-      // branding rather than a photo of the model.
+      // Pictures and creator come from the same answer: the page's Open Graph
+      // tag and author meta name Thingiverse itself, not the design.
       const named = list => (Array.isArray(list) ? list : [])
         .filter(entry => entry && typeof entry.url === 'string' && entry.url)
         .map(entry => ({ url: entry.url, name: (entry.name || '').trim() }))
@@ -82,9 +61,6 @@ const MESHDEPOT_PLATFORMS = [
       return {
         files: named(zipData.files),
         images: named(zipData.images).map(image => image.url),
-        // Taken from the same answer for the same reason as the pictures: the
-        // page's author meta tag names Thingiverse itself, not whoever made the
-        // design.
         meta: {
           name: (complete.name || '').trim(),
           author: (creator.name || '').trim(),
@@ -104,12 +80,8 @@ const MESHDEPOT_PLATFORMS = [
 ]
 
 /**
- * The match patterns for every supported site, as one list.
- *
- * Firefox treats host permissions in a Manifest V3 extension as optional: until
- * they are granted the content scripts do not run at all, and the button never
- * appears. So the extension has to be able to ask for them itself, and both the
- * page and the background need the same list to do that.
+ * Firefox treats host permissions in MV3 as optional, so the extension has to
+ * ask for them itself - and both sides need the same list to do that.
  */
 const MESHDEPOT_SITE_ORIGINS = [
   'https://makerworld.com/*',
@@ -142,12 +114,9 @@ function meshdepotMeta(names) {
 }
 
 /**
- * schema.org data, which every one of these sites emits in some form.
- *
- * Preferred over CSS selectors because it is a contract the site keeps for
- * search engines: a redesign moves the markup around, the structured data
- * survives it. Selectors written against a particular page break the week
- * somebody changes a class name.
+ * schema.org data, which every one of these sites emits. Preferred over CSS
+ * selectors: it is a contract the site keeps for search engines, and it survives
+ * the redesigns that break selectors.
  */
 function meshdepotStructuredData() {
   const found = {}
@@ -187,17 +156,10 @@ function meshdepotStructuredData() {
 }
 
 /**
- * The design's address, the same one from every tab of it.
- *
- * Derived from the path rather than taken from the canonical link, because these
- * sites number their tabs into the URL: opening Files on Printables makes it
- * /model/123-name/files, and the canonical link follows. MeshDepot recognises a
- * design it already has by exactly this string, so a description tab and a files
- * tab reporting two different addresses import the same model twice - which is
- * what they did.
- *
- * The path is cut after the segment holding the id, so everything below it -
- * files, comments, remixes, makes - collapses onto the design itself.
+ * The design's address, the same from every tab of it. The canonical link is not
+ * usable: these sites put their tabs in the URL, and MeshDepot recognises a
+ * design it already has by exactly this string - so /files and the description
+ * tab imported the same model twice. Cut after the segment holding the id.
  */
 function meshdepotDesignUrl(current) {
   const path = window.location.pathname
@@ -216,23 +178,14 @@ function meshdepotDesignKey(current) {
 }
 
 /**
- * Every picture on the page that looks like one of the model's own.
- *
- * Three sources, because no single one is complete. Open Graph often carries
- * only the cover; structured data sometimes has the gallery; and what is
- * actually on screen has all of it but needs a size threshold, since a page is
- * also full of avatars, icons and badges.
- *
- * Order matters: the cover comes first, because MeshDepot makes the first
- * picture the design's cover.
+ * Three sources, because none is complete on its own. Order matters: MeshDepot
+ * makes the first picture the design's cover.
  */
 function meshdepotReadImages(structured) {
   const found = []
   const seen = new Set()
-  // Pictures that belong to the site rather than to the design: its logo, its
-  // Open Graph house image, favicons, promo banners, placeholder thumbnails. A
-  // design imported with the platform's own branding as its cover looks wrong in
-  // a library and tells nobody what the model is.
+  // Pictures belonging to the site rather than the design - a library full of
+  // platform logos as covers tells nobody what the models are.
   const siteFurniture = /\/site\/img\/|opengraph|favicon|\/logo|promo-|\/default\/|_next\/static\/media\//i
 
   const add = value => {
@@ -255,9 +208,8 @@ function meshdepotReadImages(structured) {
   if (Array.isArray(structured.images)) structured.images.forEach(add)
   else add(structured.image)
 
-  // Rendered size rather than the attributes: a lazy-loaded gallery often has no
-  // width in the markup, and an avatar that is 300px in the file is still drawn
-  // at 40 and should not count as a photo of the model.
+  // Rendered size, not the attributes: a lazy gallery states no width, and an
+  // avatar drawn at 40px is not a photo of the model whatever its file says.
   for (const image of document.querySelectorAll('img')) {
     const box = image.getBoundingClientRect()
     if (Math.min(box.width, box.height) < 160) continue
@@ -267,60 +219,41 @@ function meshdepotReadImages(structured) {
 }
 
 /**
- * The description as a reader sees it, not the one-line summary.
- *
- * og:description is written for search results: a single truncated line. Taking
- * it means importing a design whose description stops mid-sentence.
- *
- * The trick is that the short version is almost always the beginning of the long
- * one. So the short text becomes a probe: find where it appears in the page, and
- * the description is the block around it. That needs no class names and no
- * knowledge of any particular site, which is what the previous attempt depended
- * on - and Printables does not name its containers the way that assumed.
+ * og:description is a single truncated line written for search results, but it
+ * is also the beginning of the real description - so it serves as a probe: find
+ * where it appears in the page and take the block around it. That needs no class
+ * names, which is what the previous attempt got wrong on Printables.
  */
 function meshdepotReadDescription(fallback) {
   const flatten = text => (text || '').replace(/\s+/g, ' ').trim()
   const short = flatten(fallback).replace(/[.…\s]+$/, '')
   const best = meshdepotDescriptionAroundProbe(short) || meshdepotDescriptionByName()
 
-  // Only when it genuinely beats the summary. A heuristic that misfires should
-  // cost the long version, never the short one.
+  // Only when it genuinely beats the summary: a misfire must cost the long
+  // version, never the short one.
   if (best && flatten(best).length > short.length) return meshdepotDropLeadingHeading(best, short)
   return fallback || ''
 }
 
 /**
- * Drops a heading the block carried in front of the text.
- *
- * The container found is usually the tab body, and the tab body starts with the
- * word "Description". Harmless but wrong: it is a label on the page, not the
- * first word of what the designer wrote. Removed only when what follows really
- * is the description, so nothing can be cut off by accident.
+ * The block found is usually the tab body, which opens with the word
+ * "Description" - a label on the page, not the designer's first word.
  */
 function meshdepotDropLeadingHeading(text, short) {
   const probe = short.slice(0, 40)
   if (probe.length < 20) return text
 
-  // Cut at the description's own first words rather than at a line break. A
-  // heading may or may not bring a newline with it - that depends on how the
-  // page lays it out - and a rule that needs one works in the browser and not in
-  // a test, or the other way round.
+  // Cut at the description's own first words, not at a line break: whether a
+  // heading brings one depends on the page's layout.
   const at = String(text).indexOf(probe)
   if (at > 0 && at <= 60) return String(text).slice(at)
   return text
 }
 
 /**
- * The text of an element, including anything it is currently hiding.
- *
- * innerText is what a reader sees, and that turned out to be the trap: a long
- * description behind a "show more" is in the document but not rendered, so
- * innerText returns the visible first paragraph and nothing else. textContent
- * has it all.
- *
- * The price is that textContent puts no breaks between blocks, so the paragraphs
- * are rebuilt here from the elements themselves. That keeps a description
- * readable rather than delivering it as one run-on wall.
+ * textContent rather than innerText: a description behind a "show more" is in
+ * the document but not rendered, and innerText returns only the visible first
+ * paragraph. The price is that paragraphs have to be rebuilt from the elements.
  */
 function meshdepotBlockText(element) {
   const blocks = element.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, pre, br')
@@ -337,29 +270,18 @@ function meshdepotBlockText(element) {
 }
 
 /**
- * Finds the block of text the summary was taken from, then widens it.
- *
- * The summary is the *beginning* of the description, and that is the whole
- * lever: the block being looked for starts with it, while a layout wrapper
- * around it does not. On Printables the wrapper opens with breadcrumbs, the
- * title, the author card and a Follow button - some 110 characters before the
- * sentence - and climbing into it produced exactly that mess, while still
- * missing the paragraphs further down.
- *
- * So the climb continues only while the probe stays near the front. A heading
- * like "Description" inside the block is tolerated; a page header is not.
+ * Finds the block the summary was taken from, then widens it. The block starts
+ * with the probe while a layout wrapper around it does not - on Printables that
+ * wrapper opens with breadcrumbs, title and a Follow button. So the climb
+ * continues only while the probe stays near the front.
  */
 function meshdepotDescriptionAroundProbe(short) {
   const flatten = text => (text || '').replace(/\s+/g, ' ').trim()
   const probe = short.slice(0, 60)
   if (probe.length < 20) return ''
 
-  // How much may stand before the description begins. Enough for a heading,
-  // far short of a navigation trail.
+  // Enough for a heading, far short of a navigation trail.
   const MAXIMUM_PREAMBLE = 60
-  // textContent, not innerText: see meshdepotBlockText above. A collapsed
-  // description is invisible to innerText, which is how the first paragraph and
-  // the surrounding buttons ended up looking like the whole thing.
   const startsWithProbe = element => {
     const offset = flatten(element.textContent).indexOf(probe)
     return offset >= 0 && offset <= MAXIMUM_PREAMBLE
@@ -369,8 +291,7 @@ function meshdepotDescriptionAroundProbe(short) {
   for (const element of document.body.querySelectorAll('p, div, section, article, span, pre, li')) {
     if (startsWithProbe(element)) candidates.push(element)
   }
-  // The deepest ones: every ancestor matches as well, and the paragraph itself is
-  // where a climb should start.
+  // The deepest ones: every ancestor matches too, and the climb starts here.
   const anchors = candidates.filter(element =>
     !candidates.some(other => other !== element && element.contains(other)))
 
@@ -378,9 +299,8 @@ function meshdepotDescriptionAroundProbe(short) {
     'nav, footer, header, form, [class*="omment"], [class*="elated"], [class*="emix"], [class*="idebar"], '
     + '[class*="ction-bar"], [class*="ctions"], [class*="tats"], [class*="oolbar"]')
 
-  // Every anchor is climbed, not just the first: a page can carry the sentence
-  // twice - once as a summary at the top, once at the head of the real
-  // description - and the first one in document order is the wrong one.
+  // Every anchor, not just the first: a page carries the sentence twice - as a
+  // summary at the top and at the head of the real description.
   let best = ''
   for (const anchor of anchors) {
     let widest = anchor
@@ -409,13 +329,8 @@ function meshdepotDescriptionByName() {
 }
 
 /**
- * Who made it.
- *
- * Structured data first, then the usual meta tags, then the link to the
- * creator's profile - and from that link's address, not its text. The text
- * around such a link carries whatever the site puts there: on Printables it read
- * "6 mantisrobot @mantisrobot", the follower count and the handle included. The
- * address says mantisrobot and nothing else.
+ * Structured data, then meta tags, then the profile link - by its address, not
+ * its text: on Printables that text read "6 mantisrobot @mantisrobot".
  */
 function meshdepotReadAuthor(structured) {
   if (structured.author) return meshdepotCleanAuthor(structured.author)
@@ -444,14 +359,9 @@ function meshdepotReadAuthor(structured) {
 }
 
 /**
- * Reduces whatever was found to a name.
- *
- * A profile link often wraps a whole card, so its text arrives as the name with
- * the site's furniture around it - Printables gave "6 mantisrobot @mantisrobot",
- * the follower count and the handle included, on one line as often as on three.
- *
- * An @handle in there is the surest thing present, so it wins. Otherwise the
- * counters are dropped and what remains is the name.
+ * A profile link often wraps a whole card, so its text arrives with the site's
+ * furniture around it. An @handle is the surest thing present and wins;
+ * otherwise the counters are dropped.
  */
 function meshdepotCleanAuthor(value) {
   const tokens = String(value || '').split(/[\s\n]+/).map(token => token.trim()).filter(Boolean)
@@ -466,11 +376,8 @@ function meshdepotCleanAuthor(value) {
 }
 
 /**
- * Everything MeshDepot needs about the design on this page.
- *
- * Structured data first, Open Graph second, the document title last. Tags are
- * sent as they come: decoding escaped entities and folding the casing are
- * MeshDepot's job, which already does both on every other import path.
+ * Everything MeshDepot needs about the design on this page: structured data
+ * first, Open Graph second, the document title last.
  */
 function meshdepotReadPageMetadata(current) {
   const structured = meshdepotStructuredData()
@@ -485,9 +392,8 @@ function meshdepotReadPageMetadata(current) {
     source_url: meshdepotDesignUrl(current),
     platform: current.platform.key,
     meta: {
-      // Deliberately no source_id: MeshDepot derives it from the URL, per
-      // platform, with code that is already right. A second opinion from here
-      // could only disagree - and on one platform it initially did.
+      // No source_id: MeshDepot derives it from the URL per platform, and a
+      // second opinion from here could only disagree.
       name: name || '',
       author: meshdepotReadAuthor(structured),
       description: meshdepotReadDescription(shortDescription),

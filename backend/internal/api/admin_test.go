@@ -15,9 +15,8 @@ import (
 	"meshdepot/internal/scheduler"
 )
 
-// soleAdmin removes every admin except the given one, which is what the
-// last-admin protection reacts to. The schema seeds a bootstrap admin, so
-// without this there are always two.
+// soleAdmin removes every admin except the given one; the schema seeds a
+// bootstrap admin, so without this there are always two.
 func (testHarness *harness) soleAdmin(keepID int) {
 	testHarness.t.Helper()
 	if _, failure := testHarness.database.Exec(
@@ -37,15 +36,14 @@ func TestAdminListReturnsEveryUserWithStatistics(t *testing.T) {
 		t.Fatalf("the list answered %d: %s", answer.status, answer.rawBody)
 	}
 	users := answer.list(t)
-	// The bootstrap admin from the schema plus the two accounts of the harness.
+	// The bootstrap admin plus the two accounts of the harness.
 	if len(users) != 3 {
 		t.Fatalf("%d users were listed", len(users))
 	}
 	var found bool
 	for _, entry := range users {
 		row := entry.(map[string]any)
-		// Accounts are addressed by their public id; the numeric one never leaves
-		// the process.
+		// Accounts are addressed by their public id.
 		if row["id"] != testHarness.publicID(testHarness.userID) {
 			continue
 		}
@@ -59,8 +57,6 @@ func TestAdminListReturnsEveryUserWithStatistics(t *testing.T) {
 	}
 }
 
-// Everything under /admin belongs to admins; an ordinary session is refused
-// before the handler ever runs.
 func TestAdminRoutesAreClosedToOrdinaryUsers(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -137,8 +133,7 @@ func TestAdminCreateTakesTheFlags(t *testing.T) {
 	if coerce.Int(created["admin"]) != 1 || coerce.Int(created["must_change_password"]) != 1 {
 		t.Fatalf("the flags are %v / %v", created["admin"], created["must_change_password"])
 	}
-	// An account without an email address is allowed; the column stays NULL
-	// instead of holding an empty string, which a UNIQUE index would collide on.
+	// The column stays NULL rather than empty, which a UNIQUE index would collide on.
 	if count := testHarness.count("SELECT COUNT(*) FROM users WHERE public_id = ? AND email IS NULL", created["id"]); count != 1 {
 		t.Fatal("the empty email was not stored as NULL")
 	}
@@ -215,8 +210,7 @@ func TestAdminUpdateClearsTheEmailAsNull(t *testing.T) {
 	}
 }
 
-// Deactivating a user has to cut their live sessions, otherwise the cookie they
-// already hold keeps working.
+// Deactivating has to cut the live sessions, or the cookie keeps working.
 func TestAdminUpdateEndsTheSessionsOfADeactivatedUser(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -257,7 +251,6 @@ func TestAdminUpdateKeepsTheLastAdmin(t *testing.T) {
 	}
 }
 
-// With a second admin in place the protection must not stand in the way.
 func TestAdminUpdateDemotesAnAdminWhenAnotherOneRemains(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -322,8 +315,8 @@ func TestAdminResetPasswordForcesAChangeAndEndsTheSessions(t *testing.T) {
 	if flag := testHarness.scalarInt("SELECT must_change_password FROM users WHERE id = ?", testHarness.userID); flag != 1 {
 		t.Fatal("the change was not enforced")
 	}
-	// The account stays active, so a session that still worked would be the
-	// reset's own doing.
+	// The account stays active, so a session that still worked would be the reset's
+	// own doing.
 	if used := testHarness.asUser(http.MethodGet, "/api/v1/designs", nil); used.status != http.StatusUnauthorized {
 		t.Fatalf("the old session still answered %d", used.status)
 	}
@@ -420,7 +413,7 @@ func TestAdminStatsCountsTheWholeInstallation(t *testing.T) {
 	if coerce.Int(stats["synced_count"]) != 1 {
 		t.Fatalf("the synced count is %v", stats["synced_count"])
 	}
-	// The bootstrap admin plus the two harness accounts, all of them active.
+	// The bootstrap admin plus the two harness accounts, all active.
 	if coerce.Int(stats["user_count"]) != 3 || coerce.Int(stats["active_users"]) != 3 {
 		t.Fatalf("the user counts are %v / %v", stats["user_count"], stats["active_users"])
 	}
@@ -432,8 +425,6 @@ func TestAdminStatsCountsTheWholeInstallation(t *testing.T) {
 	}
 }
 
-// Only active users appear in the per-user breakdown; a deactivated account is
-// not something the admin view offers to click.
 func TestAdminStatsListsOnlyActiveUsersPerUser(t *testing.T) {
 	testHarness := newHarness(t)
 	if _, failure := testHarness.database.Exec(
@@ -476,15 +467,13 @@ func TestAdminHealthReportsEverySubsystem(t *testing.T) {
 			t.Fatalf("the check %q has no label", name)
 		}
 	}
-	// The database has no tile: this response is only reached through a session,
-	// and the session is looked up in that very database, so the check could
-	// never report anything but "ok" to anyone able to read it.
+	// The database has no tile: this response is only reached through a session
+	// looked up in that very database.
 	if _, present := checks["database"]; present {
 		t.Fatal("the database check is back")
 	}
 }
 
-// A failed download is worth a warning, not an error - the queue keeps working.
 func TestAdminHealthWarnsAboutFailedDownloads(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.insertDownloadJob(testHarness.userID, "https://example.org/eins", "failed", "datetime('now')")
@@ -502,7 +491,6 @@ func TestAdminHealthWarnsAboutFailedDownloads(t *testing.T) {
 	}
 }
 
-// healthCheck fetches one tile of the health endpoint.
 func healthCheck(t *testing.T, testHarness *harness, name string) map[string]any {
 	t.Helper()
 	checks := testHarness.asAdmin(http.MethodGet, "/api/v1/admin/health", nil).data(t)["checks"].(map[string]any)
@@ -513,8 +501,6 @@ func healthCheck(t *testing.T, testHarness *harness, name string) map[string]any
 	return check
 }
 
-// A ticking loop is what the tile is supposed to prove; the age comes from the
-// heartbeat, not from a constant.
 func TestAdminHealthReportsTheLoopHeartbeat(t *testing.T) {
 	testHarness := newHarness(t)
 
@@ -528,9 +514,8 @@ func TestAdminHealthReportsTheLoopHeartbeat(t *testing.T) {
 	}
 }
 
-// A ticking loop with the sync switched off is not a healthy one: nothing is
-// being synced, and reporting that in green with a sentence underneath was read
-// as "all good".
+// A ticking loop with the sync switched off is not a healthy one, and reporting
+// it in green with a sentence underneath was read as "all good".
 func TestAdminHealthReportsASwitchedOffScheduler(t *testing.T) {
 	for _, testCase := range []struct {
 		setting string
@@ -552,8 +537,8 @@ func TestAdminHealthReportsASwitchedOffScheduler(t *testing.T) {
 	}
 }
 
-// The case the old check could not see: the loop goroutine is gone, the queue
-// stands still, and nothing in the database shows it.
+// The case the old check could not see: the loop is gone, the queue stands still,
+// and nothing in the database shows it.
 func TestAdminHealthReportsAStoppedLoop(t *testing.T) {
 	testHarness := newHarness(t)
 	// Everything registered, but the last tick was minutes ago.
@@ -567,8 +552,6 @@ func TestAdminHealthReportsAStoppedLoop(t *testing.T) {
 	}
 }
 
-// A loop that was never started is not the same as a silent one, and it must
-// not be reported as healthy either.
 func TestAdminHealthReportsALoopThatNeverStarted(t *testing.T) {
 	testHarness := newHarness(t)
 	testHarness.server.Health = health.New()
@@ -580,8 +563,6 @@ func TestAdminHealthReportsALoopThatNeverStarted(t *testing.T) {
 	}
 }
 
-// A download holds the worker for minutes; that is not a dead loop, and the
-// tile must not go red every time something is being fetched.
 func TestAdminHealthReportsABusyWorkerAsRunning(t *testing.T) {
 	testHarness := newHarness(t)
 	endJob := testHarness.server.Health.Working(health.DownloadWorker)
@@ -598,8 +579,6 @@ func TestAdminHealthReportsABusyWorkerAsRunning(t *testing.T) {
 	}
 }
 
-// A queue that grows faster than it is worked off is worth a warning - the
-// worker itself is fine, so it must not be an error.
 func TestAdminHealthWarnsAboutASyncBacklog(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Rückstau")
@@ -659,8 +638,7 @@ func TestAdminHealthReportsAMissingChromium(t *testing.T) {
 	}
 }
 
-// fakeBinary writes an executable stub - the real Chromium is not startable in
-// a test.
+// fakeBinary writes a stub - the real Chromium is not startable in a test.
 func fakeBinary(t *testing.T, script string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "chromium")

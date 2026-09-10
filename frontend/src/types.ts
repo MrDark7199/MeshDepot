@@ -62,7 +62,7 @@ export interface GcodeMeta {
   layer_height?: number
   print_time?: string
   slicer?: string
-  // ── FDM (G-code) ──
+  // - FDM (G-code) -
   first_layer_height?: number
   nozzle_temp?: number
   bed_temp?: number
@@ -71,7 +71,7 @@ export interface GcodeMeta {
   filament_used_m?: number
   nozzle_diameter?: number
   filament_type?: string
-  // ── Resin (MSLA) ──
+  // - Resin (MSLA) -
   exposure_time?: number
   bottom_exposure_time?: number
   bottom_layers?: number
@@ -165,6 +165,8 @@ export interface Design {
   description_de?: string | null
   source_url?: string
   source_platform?: SourcePlatform
+  /** i18n key for why an update check cannot run; empty when it can. */
+  sync_blocked_reason?: string
   source_id?: string
   cover_path?: string
   category?: string

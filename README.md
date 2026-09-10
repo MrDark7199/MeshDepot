@@ -17,6 +17,10 @@ sync involved.
 
 - **Import by URL** from Thingiverse, Printables, MakerWorld, MyMiniFactory, Cults3D and Thangs -
   files, cover, gallery, description, tags and author in one paste
+- **Or import straight from the site** with the browser extension for Firefox, Chrome and
+  Chromium - open a design, press import
+- **Or let a connected account fill the library** - the collections you keep on the platform
+  come in by themselves
 - **Upload your own** designs just as easily, with no platform involved
 - **View in the browser** - STL, OBJ, 3MF, G-code and resin formats, no plugin, no download
 - **Measure** two points on a model in millimetres, and **capture** the view as a design picture
@@ -25,8 +29,8 @@ sync involved.
 - **Open in Bambu Studio, OrcaSlicer or PrusaSlicer** with one click
 - **Versions instead of copies** - unchanged files are stored once, however many versions use them
 - **Search, filter and tag** across the whole library, and group designs into collections
-- **Keep designs current** - check the source platform for new versions, or mirror your likes and
-  collections from a connected account
+- **Keep designs current** - check the source platform for new versions, per design or on a
+  schedule
 - **Share** with another user, or hand out a link that needs no account and expires when you say
 - **Several users**, each with their own library, platform accounts and storage quota
 - **Notifications** in the app and by e-mail, per event and per user
@@ -77,6 +81,18 @@ Four platforms are supported.
 Anything else - your own designs, a file from a friend, an old download - goes in as a **manual
 design**: drop the files in, add a name and a picture, done.
 
+### Import from the page you are on
+
+A browser extension in `browser-extension/`, built for **Firefox** and for **Chrome and Chromium**.
+On a model page it adds an import button: you press the site's own download button, and the
+extension hands the resulting link to MeshDepot, which fetches the files itself. The page's title,
+description, pictures and tags come along.
+
+It uses the session you already have in that browser, so MeshDepot never sees a password, a token
+or a 2FA code for those sites - which is also the way in for accounts whose login cannot be
+automated at all. Works on MakerWorld, Printables, Thingiverse and MyMiniFactory; see
+[browser-extension/README.md](browser-extension/README.md) for how to load and configure it.
+
 ### Look at the model before you print it
 
 STL, OBJ and 3MF open in the browser. So do sliced files: **G-code** and the **resin formats**,
@@ -126,8 +142,8 @@ MeshDepot can check a design against the platform it came from and pull a new ve
 designer published one. Manually per design, in bulk, or quietly in the background on a schedule
 you set.
 
-If you have a platform account connected, it can also **mirror your library there** - the things
-you liked or collected on Printables or MakerWorld show up here on their own.
+If you have a platform account connected, it can also **mirror your collections there** - what
+you collected on Thingiverse, Printables, MakerWorld or MyMiniFactory shows up here on its own.
 
 ### Share
 

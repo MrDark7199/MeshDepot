@@ -26,31 +26,26 @@ import (
 )
 
 // settingBound is the allowed range of an app setting (all settings are int).
-//
-// tooLow names the error returned when the value undercuts min. Only the
-// download cooldowns set it: silently clamping them would show the admin a
-// number they never chose, and the whole point of the floor is that a too-short
-// cooldown gets the account rate-limited or blocked. Everything else keeps the
-// old clamp - there is no harm in pulling a sync hour into 0..23.
+// tooLow names the error returned when the value undercuts min; only the
+// download cooldowns set it, because silently clamping would show the admin a
+// number they never chose. Everything else keeps the old clamp.
 type settingBound struct {
 	min, max int
 	tooLow   string
 }
 
-// cooldownBound builds the bound of a download cooldown. 30 seconds is the
-// floor everywhere; makerworld needs far more because it answers a burst with a
-// GeeTest captcha (HTTP 418) that no automation here can solve.
+// 30 seconds is the floor everywhere; makerworld needs far more because it
+// answers a burst with a GeeTest captcha (HTTP 418) nothing here can solve.
 func cooldownBound(minimum int, tooLow string) settingBound {
 	return settingBound{min: minimum, max: 3600, tooLow: tooLow}
 }
 
-// settingsSchema lists the allowed app settings with their bounds.
 var settingsSchema = map[string]settingBound{
 	"library_sync_hour":     {min: 0, max: 23},
 	"library_sync_enabled":  {min: 0, max: 1},
 	"design_update_enabled": {min: 0, max: 1},
-	// A year is a lot, but an interval nobody ever reaches is still a valid
-	// answer to "check my designs as rarely as possible".
+	// A year is a lot, but an interval nobody reaches is still a valid answer to
+	// "check my designs as rarely as possible".
 	"design_update_min_days":          {min: scheduler.DesignUpdateMinDays, max: 365, tooLow: "error.design_update_interval_too_low"},
 	"download_cooldown_default":       cooldownBound(30, "error.cooldown_too_low"),
 	"download_cooldown_printables":    cooldownBound(30, "error.cooldown_too_low"),
@@ -60,14 +55,12 @@ var settingsSchema = map[string]settingBound{
 	"download_cooldown_cults3d":       cooldownBound(30, "error.cooldown_too_low"),
 	"download_cooldown_myminifactory": cooldownBound(30, "error.cooldown_too_low"),
 	"translation_enabled":             {min: 0, max: 1},
-	// Auto-pause: how many anti-bot/rate-limit hits in a row pause a platform's
-	// queue, and for how many hours. See the queuestate package and the download
-	// worker's registerBlockStrike.
+	// Auto-pause: how many anti-bot hits in a row pause a platform's queue, and for
+	// how many hours. See queuestate and the worker's registerBlockStrike.
 	"queue_block_threshold": {min: 1, max: 20},
 	"queue_block_hours":     {min: 1, max: 720},
 }
 
-// AdminList returns all users with design/storage statistics.
 func (server *Server) AdminList(responseWriter http.ResponseWriter, request *http.Request) {
 	rows, _ := dbutil.QueryMaps(server.DB, `
 		SELECT u.public_id AS id, u.name, u.email, u.admin, u.state, u.must_change_password, u.created_at,
@@ -113,10 +106,9 @@ func (server *Server) AdminCreate(responseWriter http.ResponseWriter, request *h
 	httpx.Success(responseWriter, row)
 }
 
-// requireUserByPublicID resolves the {id} path parameter - the account's public
-// id - to the internal user id. It answers the request itself: 404 for a
-// malformed or unknown id, 500 for a broken query, and ok=false means the
-// handler must return.
+// requireUserByPublicID resolves the {id} path parameter to the internal user
+// id, answering the request itself: 404 for a malformed or unknown id, 500 for a
+// broken query. ok=false means the handler must return.
 func (server *Server) requireUserByPublicID(responseWriter http.ResponseWriter, request *http.Request) (int, bool) {
 	userID, found, failure := publicid.Resolve(server.DB, request.PathValue("id"))
 	if failure != nil {
@@ -130,7 +122,6 @@ func (server *Server) requireUserByPublicID(responseWriter http.ResponseWriter, 
 	return userID, true
 }
 
-// AdminUpdate changes existing fields of a user (with last-admin protection).
 func (server *Server) AdminUpdate(responseWriter http.ResponseWriter, request *http.Request) {
 	id, ok := server.requireUserByPublicID(responseWriter, request)
 	if !ok {
@@ -149,9 +140,8 @@ func (server *Server) AdminUpdate(responseWriter http.ResponseWriter, request *h
 		args = append(args, nullIfEmpty(strings.TrimSpace(coerce.StringOr(value, ""))))
 	}
 	if value, ok := body["admin"]; ok {
-		// Revoking admin is as final as deactivating: without this the last admin
-		// could demote themselves, and nothing short of editing the DB file brings
-		// the role back.
+		// Revoking admin is as final as deactivating: the last admin could otherwise
+		// demote themselves, and only editing the DB file brings the role back.
 		if coerce.Int(value) != 1 && !server.guardLastAdmin(responseWriter, id) {
 			return
 		}
@@ -163,9 +153,8 @@ func (server *Server) AdminUpdate(responseWriter http.ResponseWriter, request *h
 		args = append(args, coerce.Int(value))
 	}
 	if value, ok := body["storage_quota_bytes"]; ok {
-		// Anything at or below zero, and an explicit null, mean unlimited - the
-		// column is NULL then, so "no limit" has one representation rather than
-		// competing with a stored 0 that would read as "nothing allowed".
+		// At or below zero, and an explicit null, mean unlimited - so "no limit" has
+		// one representation rather than competing with a stored 0.
 		assignments = append(assignments, "storage_quota_bytes = ?")
 		if value == nil {
 			args = append(args, nil)
@@ -188,8 +177,8 @@ func (server *Server) AdminUpdate(responseWriter http.ResponseWriter, request *h
 			httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 			return
 		}
-		// Deactivating a user must also drop their live sessions, otherwise an
-		// already-authenticated cookie keeps working until it expires.
+		// Deactivating must drop the live sessions too, or an authenticated cookie
+		// keeps working until it expires.
 		if value, ok := body["state"]; ok && coerce.StringOr(value, "") != "active" {
 			server.Auth.Sessions().DeleteAllForUser(id)
 		}
@@ -201,7 +190,6 @@ func (server *Server) AdminUpdate(responseWriter http.ResponseWriter, request *h
 	httpx.Success(responseWriter, row)
 }
 
-// AdminDelete deletes a user (with last-admin protection).
 func (server *Server) AdminDelete(responseWriter http.ResponseWriter, request *http.Request) {
 	id, ok := server.requireUserByPublicID(responseWriter, request)
 	if !ok {
@@ -215,7 +203,6 @@ func (server *Server) AdminDelete(responseWriter http.ResponseWriter, request *h
 	httpx.Success(responseWriter, nil)
 }
 
-// AdminResetPassword sets the password and forces a change on the next login.
 func (server *Server) AdminResetPassword(responseWriter http.ResponseWriter, request *http.Request) {
 	id, ok := server.requireUserByPublicID(responseWriter, request)
 	if !ok {
@@ -239,8 +226,7 @@ func (server *Server) AdminResetPassword(responseWriter http.ResponseWriter, req
 		return
 	}
 	dbutil.ExecLogged(server.DB, "UPDATE users SET hash = ?, must_change_password = 1 WHERE id = ?", hash, id)
-	// Invalidate all of the user's sessions so an attacker who had hijacked one
-	// is locked out by the reset.
+	// Locks out an attacker who had hijacked a session before the reset.
 	server.Auth.Sessions().DeleteAllForUser(id)
 	httpx.SuccessMessage(responseWriter, nil, "Password reset")
 }
@@ -255,8 +241,8 @@ func (server *Server) AdminDetail(responseWriter http.ResponseWriter, request *h
 	if !ok {
 		return
 	}
-	// What the account currently occupies, so the form can show the limit against
-	// what is actually in use rather than as a number without a scale.
+	// What the account occupies, so the form can show the limit against what is in
+	// use rather than as a number without a scale.
 	if numericID := coerce.Int(row["numeric_id"]); numericID > 0 {
 		row["used_bytes"] = quota.Of(server.DB, numericID).UsedBytes
 	}
@@ -265,7 +251,6 @@ func (server *Server) AdminDetail(responseWriter http.ResponseWriter, request *h
 	httpx.Success(responseWriter, row)
 }
 
-// AdminStats returns aggregate statistics across all users.
 func (server *Server) AdminStats(responseWriter http.ResponseWriter, request *http.Request) {
 	var userTotal, userActive int
 	server.DB.QueryRow("SELECT COUNT(*), COALESCE(SUM(state = 'active'),0) FROM users").Scan(&userTotal, &userActive)
@@ -295,24 +280,22 @@ func (server *Server) AdminStats(responseWriter http.ResponseWriter, request *ht
 		"synced_count":     countScalar("SELECT COUNT(*) FROM designs WHERE source_url IS NOT NULL AND source_url != ''"),
 		"platforms":        platformCounts, "per_user": perUser, "newest_design_at": newest,
 		"disk_free": free, "disk_total": total,
-		// Notification e-mail, counted per notification rather than per message:
-		// pending ones are bundled into one e-mail per member.
+		// Counted per notification rather than per message: pending ones are bundled
+		// into one e-mail per member.
 		"mail_queued":        countScalar("SELECT COUNT(*) FROM notification_mail_queue WHERE sent_at IS NULL"),
 		"mail_sent":          countScalar("SELECT COUNT(*) FROM notification_mail_queue WHERE sent_at IS NOT NULL"),
 		"notification_count": countScalar("SELECT COUNT(*) FROM notifications"),
 	})
 }
 
-// AdminHealth returns the status of the internal subsystems of the single-
-// container stack: SQLite, storage, download/sync worker (queue depth),
-// scheduler, Tor and Chromium/rod.
+// AdminHealth reports the internal subsystems: SQLite, storage, download and
+// sync worker, scheduler, Tor and Chromium.
 func (server *Server) AdminHealth(responseWriter http.ResponseWriter, request *http.Request) {
 	checks := map[string]any{}
 
-	// The database has no tile. It was the first check, and it could only ever
-	// say "ok": this response is only reached through a session, and the session
-	// is looked up in that very database - a broken one answers the request with
-	// a 401 or a 500 long before the check runs.
+	// The database has no tile: this response is only reached through a session
+	// looked up in that very database, so a broken one answers with a 401 or 500
+	// long before the check could run.
 
 	// 1) Storage.
 	free, total := diskSpace(server.Cfg.BasePathData)
@@ -333,9 +316,8 @@ func (server *Server) AdminHealth(responseWriter http.ResponseWriter, request *h
 		"vars": map[string]any{"free": fmtBytes(free), "total": fmtBytes(total), "pct": percent},
 	}
 
-	// 2) Download worker - queue depth from the table, liveness from the loop's
-	// own heartbeat. The numbers alone say nothing: a dead loop and an empty
-	// queue read identically.
+	// 2) Download worker - queue depth from the table, liveness from the loop's own
+	// heartbeat. A dead loop and an empty queue read identically otherwise.
 	var downloadPending, downloadFailed int
 	server.DB.QueryRow("SELECT COUNT(*) FROM download_queue WHERE status IN ('pending','downloading')").Scan(&downloadPending)
 	server.DB.QueryRow("SELECT COUNT(*) FROM download_queue WHERE status='failed'").Scan(&downloadFailed)
@@ -350,8 +332,7 @@ func (server *Server) AdminHealth(responseWriter http.ResponseWriter, request *h
 		status: downloadBeat, running: downloadRunning,
 	})
 
-	// 3) Sync worker - same, plus a warning once the queue piles up faster than
-	// it is worked off.
+	// 3) Sync worker - same, plus a warning once the queue piles up.
 	var syncPending int
 	server.DB.QueryRow("SELECT COUNT(*) FROM sync_queue WHERE status IN ('pending','running')").Scan(&syncPending)
 	syncStatus, syncKey := "ok", "health_sync_ok"
@@ -365,19 +346,16 @@ func (server *Server) AdminHealth(responseWriter http.ResponseWriter, request *h
 		status: syncBeat, running: syncRunning,
 	})
 
-	// 4) Scheduler - two loops (force flag and auto-sync enqueue); the worse of
-	// the two is reported, because one dead loop is enough to stop syncing.
+	// 4) Scheduler - the worse of its two loops, since one dead loop stops syncing.
 	schedulerBeat, schedulerRunning := server.Health.Worst(health.SchedulerForce, health.SchedulerAuto)
 	schedulerCheck := loopCheck(loopReport{
 		labelKey: "health_scheduler_label", okKey: "health_scheduler_ok", busyKey: "health_scheduler_busy",
 		okStatus: "ok", vars: map[string]any{},
 		status: schedulerBeat, running: schedulerRunning,
 	})
-	// A ticking loop is not the same as a working one: with both switches off the
-	// loops keep their heartbeat and do nothing, and the tile reported "running"
-	// while nothing was being synced. Say which half is switched off, and say it
-	// in the "off" status - a green tile with a sentence under it was read as
-	// "everything is fine", which is what the sentence contradicts.
+	// A ticking loop is not a working one: with both switches off the loops keep
+	// their heartbeat and do nothing. Said in the "off" status, because a green tile
+	// with a sentence under it was read as "everything is fine".
 	if schedulerCheck["status"] == "ok" {
 		librarySync := settingEnabled(server.DB, "library_sync_enabled")
 		designUpdates := settingEnabled(server.DB, "design_update_enabled")
@@ -403,10 +381,9 @@ func (server *Server) AdminHealth(responseWriter http.ResponseWriter, request *h
 		checks["tor"] = map[string]any{"label_key": "health_tor_label", "status": "error", "message_key": "health_tor_error", "detail": failure.Error()}
 	}
 
-	// 6) Chromium/rod - the binary must be there AND start. Only the start tells
-	// a working install from a broken one: a missing shared library or a stale
-	// Xvfb lock leaves the file exactly where it was and still fails every
-	// download.
+	// 6) Chromium - the binary must be there and start. Only the start tells a
+	// working install from a broken one: a missing shared library leaves the file
+	// exactly where it was and still fails every download.
 	fileInfo, failure := os.Stat(server.Cfg.ChromiumBin)
 	switch {
 	case failure != nil || fileInfo.IsDir():
@@ -423,30 +400,27 @@ func (server *Server) AdminHealth(responseWriter http.ResponseWriter, request *h
 	httpx.Success(responseWriter, map[string]any{"checks": checks})
 }
 
-// syncBacklogWarn is the queue depth from which the sync worker is reported as
-// backed up. The scheduler enqueues at most 20 designs per tick, so a smaller
-// number is a normal working queue rather than a symptom.
+// syncBacklogWarn is the queue depth from which the sync worker counts as backed
+// up. The scheduler enqueues at most 20 per tick, so less is a working queue.
 const syncBacklogWarn = 50
 
 // loopReport is the input of loopCheck - one background loop, its queue numbers
 // and its heartbeat.
 type loopReport struct {
 	labelKey string
-	// okKey is the message of a ticking loop, busyKey the one of a loop that is
-	// inside a job.
+	// okKey is the message of a ticking loop, busyKey that of one inside a job.
 	okKey, busyKey string
-	// okStatus is the status a live loop gets; the queue numbers may already
-	// have turned it into "warn".
+	// okStatus is the status a live loop gets; the queue numbers may already have
+	// turned it into "warn".
 	okStatus string
 	vars     map[string]any
 	status   health.Status
-	// running is false when the loop never registered a heartbeat: it was never
-	// started, or it was not wired to the registry.
+	// running is false when the loop never registered a heartbeat.
 	running bool
 }
 
 // settingEnabled reads a 0/1 app setting, defaulting to enabled when the row is
-// missing - which is what the rest of the app assumes for an unset switch.
+// missing - what the rest of the app assumes for an unset switch.
 func settingEnabled(database *sql.DB, key string) bool {
 	var value string
 	if database.QueryRow("SELECT value FROM app_settings WHERE key = ?", key).Scan(&value) != nil {
@@ -455,8 +429,8 @@ func settingEnabled(database *sql.DB, key string) bool {
 	return value != "0"
 }
 
-// loopCheck turns a heartbeat into a health tile. Queue numbers only describe
-// the work; whether anyone is still doing it is what the heartbeat answers.
+// loopCheck turns a heartbeat into a health tile: the queue numbers describe the
+// work, the heartbeat whether anyone is still doing it.
 func loopCheck(report loopReport) map[string]any {
 	check := map[string]any{"label_key": report.labelKey, "vars": report.vars}
 	report.vars["age"] = fmtAge(report.status.Age)
@@ -477,7 +451,6 @@ func loopCheck(report loopReport) map[string]any {
 	return check
 }
 
-// fmtAge formats a heartbeat age compactly ("4s", "3m 12s", "1h 2m").
 func fmtAge(age time.Duration) string {
 	if age < 0 {
 		age = 0
@@ -492,36 +465,30 @@ func fmtAge(age time.Duration) string {
 	}
 }
 
-// GetSettings returns all app settings typed.
 func (server *Server) GetSettings(responseWriter http.ResponseWriter, request *http.Request) {
 	settings := server.loadSettings("SELECT key, value FROM app_settings")
-	// The manual trigger is refused during its cooldown, so the page can disable
-	// the button instead of offering a call that only comes back as 429.
+	// The manual trigger is refused during its cooldown, so the page can disable the
+	// button instead of offering a call that only comes back as 429.
 	settings["library_sync_cooldown_seconds"] = syncCooldownRemaining(coerce.StringOr(settings["library_sync_last_run"], ""))
-	// Per-platform pause/block state so the settings page can show what is
-	// suspended and offer a resume.
+	// So the settings page can show what is suspended and offer a resume.
 	settings["queue_blocks"] = queuestate.All(server.DB, time.Now())
 	httpx.Success(responseWriter, settings)
 }
 
-// GetPublicSettings returns the settings every logged-in user needs: the sync
-// hour that is displayed, and whether the library sync is switched on
-// server-side at all (the account page hides its sync controls when it is not).
+// GetPublicSettings returns what every logged-in user needs: the sync hour that
+// is displayed, and whether the library sync is switched on server-side.
 func (server *Server) GetPublicSettings(responseWriter http.ResponseWriter, request *http.Request) {
 	settings := server.loadSettings(
 		"SELECT key, value FROM app_settings WHERE key IN ('library_sync_hour', 'library_sync_enabled', 'design_update_enabled', 'design_update_min_days')")
-	// Whether notification mail can be sent at all. The account page greys its
-	// e-mail column out when it cannot, rather than offering a switch that would
-	// silently do nothing. Only the fact is exposed, never the configuration.
+	// Whether notification mail can be sent at all, so the account page can grey out
+	// its e-mail column. Only the fact is exposed, never the configuration.
 	_, mailReady := server.mailConfig()
 	settings["mail_enabled"] = mailReady
 	httpx.Success(responseWriter, settings)
 }
 
-// SaveSettings stores the whitelisted settings (upsert, int clamp).
-//
-// The whole body is validated before the first write: a rejected cooldown must
-// not leave half of the form saved.
+// SaveSettings stores the whitelisted settings. The whole body is validated
+// before the first write, so a rejected cooldown leaves nothing half-saved.
 func (server *Server) SaveSettings(responseWriter http.ResponseWriter, request *http.Request) {
 	var body map[string]any
 	_ = httpx.DecodeJSON(request, &body)
@@ -552,9 +519,8 @@ func (server *Server) SaveSettings(responseWriter http.ResponseWriter, request *
 	httpx.Success(responseWriter, updated)
 }
 
-// RunTranslationBackfill translates a batch of not-yet-translated designs: up
-// to 5 designs without an 'original' name row run through the full pipeline;
-// the frontend calls repeatedly until remaining=0 or processed=0.
+// RunTranslationBackfill translates up to 5 designs without an 'original' name
+// row; the frontend calls repeatedly until remaining=0 or processed=0.
 func (server *Server) RunTranslationBackfill(responseWriter http.ResponseWriter, request *http.Request) {
 	translator := translate.New(server.DB)
 	if !translator.Enabled() {
@@ -600,13 +566,13 @@ func (server *Server) RunTranslationBackfill(responseWriter http.ResponseWriter,
 
 // RunLibrarySync sets the force flag; the scheduler executes it.
 func (server *Server) RunLibrarySync(responseWriter http.ResponseWriter, request *http.Request) {
-	// Setting the flag while the sync is off would leave a "1" in the settings
-	// that fires the moment someone switches the sync back on.
+	// Setting the flag while the sync is off would leave a "1" that fires the moment
+	// someone switches the sync back on.
 	if !server.guardLibrarySyncEnabled(responseWriter) {
 		return
 	}
-	// This run walks every member's accounts, so pressing the button repeatedly
-	// hits the platforms harder than any single member could.
+	// This run walks every member's accounts, so pressing the button repeatedly hits
+	// the platforms harder than any single member could.
 	var lastRun string
 	server.DB.QueryRow("SELECT COALESCE(value, '') FROM app_settings WHERE key='library_sync_last_run'").Scan(&lastRun)
 	if syncCooldownRemaining(lastRun) > 0 {
@@ -618,7 +584,6 @@ func (server *Server) RunLibrarySync(responseWriter http.ResponseWriter, request
 	httpx.SuccessMessage(responseWriter, nil, "Library sync started")
 }
 
-// guardLastAdmin prevents deactivating/deleting the last active admin.
 func (server *Server) guardLastAdmin(responseWriter http.ResponseWriter, targetID int) bool {
 	var isAdmin int
 	if server.DB.QueryRow("SELECT admin FROM users WHERE id = ? LIMIT 1", targetID).Scan(&isAdmin) != nil || isAdmin != 1 {
@@ -633,7 +598,6 @@ func (server *Server) guardLastAdmin(responseWriter http.ResponseWriter, targetI
 	return true
 }
 
-// loadSettings reads key/value pairs and casts known int keys.
 func (server *Server) loadSettings(query string) map[string]any {
 	rows, _ := dbutil.QueryMaps(server.DB, query)
 	result := map[string]any{}
@@ -649,7 +613,6 @@ func (server *Server) loadSettings(query string) map[string]any {
 	return result
 }
 
-// diskSpace returns free/total storage under path (0/0 on error).
 func diskSpace(path string) (free, total int64) {
 	var stat syscall.Statfs_t
 	if failure := syscall.Statfs(path, &stat); failure != nil {
@@ -658,7 +621,6 @@ func diskSpace(path string) (free, total int64) {
 	return int64(stat.Bavail) * int64(stat.Bsize), int64(stat.Blocks) * int64(stat.Bsize)
 }
 
-// fmtBytes formats a byte count human-readable.
 func fmtBytes(bytes int64) string {
 	switch {
 	case bytes >= 1<<30:

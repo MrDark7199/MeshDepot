@@ -2,7 +2,6 @@ package api
 
 import (
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,27 +13,24 @@ import (
 	"meshdepot/internal/dbutil"
 	"meshdepot/internal/httpx"
 	"meshdepot/internal/storage"
+
+	"meshdepot/internal/logx"
 )
 
-// imagePathPattern is the allowlist of paths this endpoint may serve, and it
-// captures the two identities in them: the owner's public id and the design's
-// row id. The image root is the data root, so the structural check is what keeps
-// the endpoint from handing out the database, a blob or an account's avatar -
-// only a design's gallery file or its cover qualifies, and both are images by
-// construction.
+// imagePathPattern is the allowlist of paths this endpoint may serve, capturing
+// the owner's public id and the design's row id. The image root is the data root,
+// so this structural check is what keeps the endpoint from handing out the
+// database, a blob or an avatar.
 //
-// The shape alone is not authorization, though. A cover is stored under the
-// fixed name cover.<ext>, and the design segment is the sequential row id, so
-// the path of somebody else's cover can simply be counted to - and the owner's
-// public id is not a secret either: every share payload contains it, and the
-// user search hands it to any member. Who may see the image is therefore
-// decided below, not by the pattern.
+// The shape is not authorization: a cover has the fixed name cover.<ext> and the
+// design segment is a sequential row id, so someone else's cover can be counted
+// to - and the public id is not a secret either. Who may see the image is decided
+// below.
 var imagePathPattern = regexp.MustCompile(`^user/([0-9a-f]{32})/design/(\d+)/(?:pictures/[^/]+|cover\.[A-Za-z0-9]{1,5})$`)
 
-// CoversServe serves a cover/gallery image of a design to someone who may see
-// the design: its owner, a user it was shared with, or the holder of a share
-// link for it (?share=<token>, which is how the public share page loads its
-// pictures - it has no session by definition).
+// CoversServe serves an image to someone who may see the design: its owner, a
+// user it was shared with, or the holder of a share link (?share=<token>, which
+// is how the public share page loads its pictures).
 func (server *Server) CoversServe(responseWriter http.ResponseWriter, request *http.Request) {
 	relativePath := strings.TrimPrefix(filepath.ToSlash(filepath.Clean("/"+request.PathValue("path"))), "/")
 	match := imagePathPattern.FindStringSubmatch(relativePath)
@@ -53,20 +49,17 @@ func (server *Server) CoversServe(responseWriter http.ResponseWriter, request *h
 		http.NotFound(responseWriter, request)
 		return
 	}
-	// private, not public: the answer now depends on who asked, so a shared cache
-	// in front of the app must not hand one viewer's response to the next.
+	// private, not public: the answer depends on who asked, so a shared cache must
+	// not hand one viewer's response to the next.
 	responseWriter.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	serveImageFile(responseWriter, request, fullPath)
 }
 
-// mayViewDesignImage decides whether the request may see the pictures of a
-// design. Every answer is the same 404 at the call site: telling a stranger
-// "403" would confirm that the design exists, which is exactly what counting
-// through the row ids is after.
+// mayViewDesignImage answers every refusal with the same 404 at the call site:
+// a 403 would confirm the design exists.
 func (server *Server) mayViewDesignImage(request *http.Request, ownerPublicID string, designID int) bool {
-	// The path has to name the design's real owner. Without this the owner
-	// segment would be decoration: any valid public id would do, and the design
-	// id alone would decide which file is read.
+	// The path has to name the design's real owner, or the owner segment is
+	// decoration and the design id alone decides which file is read.
 	var designOwnerID int
 	var designOwnerPublicID string
 	if failure := server.DB.QueryRow(
@@ -79,8 +72,8 @@ func (server *Server) mayViewDesignImage(request *http.Request, ownerPublicID st
 		return false
 	}
 
-	// A share link is checked before the session: the public page carries no
-	// cookie, and a member who opens someone's link should not need one either.
+	// Checked before the session: the public page carries no cookie, and a member
+	// opening someone's link should not need one either.
 	if token := strings.TrimSpace(request.URL.Query().Get("share")); token != "" {
 		if link, ok := server.resolveShareLink(token); ok && link.designID == designID {
 			return true
@@ -92,8 +85,8 @@ func (server *Server) mayViewDesignImage(request *http.Request, ownerPublicID st
 		return false
 	}
 	if viewerID == designOwnerID {
-		// Only for an account that still exists and is active - the same
-		// re-check the Require middleware does on every other route.
+		// Only for an account that still exists and is active - the same re-check the
+		// Require middleware does elsewhere.
 		var state string
 		if failure := server.DB.QueryRow("SELECT state FROM users WHERE id = ?", viewerID).Scan(&state); failure != nil {
 			return false
@@ -182,9 +175,8 @@ func (server *Server) ImagesUpload(responseWriter http.ResponseWriter, request *
 		return
 	}
 
-	// Auto cover: if the design had no cover image yet (e.g. manually created), the
-	// first uploaded image automatically becomes the cover - so the placeholder in
-	// the card overview disappears without an extra click.
+	// A design with no cover yet - a manually created one, for instance - takes the
+	// first uploaded image, so the placeholder disappears without an extra click.
 	coverPath := design.StoredCoverPath
 	if coverPath == "" && firstImagePath != "" {
 		if _, failure := server.DB.Exec("UPDATE designs SET cover_path = ? WHERE id = ?", firstImagePath, designID); failure == nil {
@@ -195,7 +187,6 @@ func (server *Server) ImagesUpload(responseWriter http.ResponseWriter, request *
 	httpx.Success(responseWriter, map[string]any{"uploaded": saved, "cover_path": coverPath})
 }
 
-// ImagesDelete deletes a gallery image from DB and filesystem.
 func (server *Server) ImagesDelete(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -215,9 +206,8 @@ func (server *Server) ImagesDelete(responseWriter http.ResponseWriter, request *
 		return
 	}
 
-	// Deleting the row and reassigning the cover belong together: if the delete
-	// went through and the reassignment did not, the design kept pointing at a
-	// cover_path whose file is gone - a permanently broken thumbnail.
+	// The delete and the cover reassignment belong together: separately, the design
+	// keeps pointing at a cover_path whose file is gone.
 	transaction, failure := server.DB.Begin()
 	if failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
@@ -235,13 +225,13 @@ func (server *Server) ImagesDelete(responseWriter http.ResponseWriter, request *
 	writeFailed := false
 	exec := func(query string, args ...any) {
 		if _, failure := transaction.Exec(query, args...); failure != nil {
-			log.Printf("[api] images delete: %v", failure)
+			logx.Errorf("[api] images delete: %v", failure)
 			writeFailed = true
 		}
 	}
 	exec("DELETE FROM design_images WHERE id = ?", imageID)
 	if wasCover {
-		// New cover = first remaining image (or none → placeholder).
+		// New cover = first remaining image, or none.
 		exec("UPDATE designs SET cover_path = (SELECT path FROM design_images WHERE design_id = ? ORDER BY sort_order ASC, created_at ASC LIMIT 1) WHERE id = ?", designID, designID)
 		exec("UPDATE design_images SET is_cover = (id = (SELECT id FROM design_images WHERE design_id = ? ORDER BY sort_order ASC, created_at ASC LIMIT 1)) WHERE design_id = ?", designID, designID)
 	}
@@ -255,13 +245,12 @@ func (server *Server) ImagesDelete(responseWriter http.ResponseWriter, request *
 	}
 
 	// Only after the commit: a file deleted first would be missing while the row
-	// still referenced it if the transaction failed.
+	// still referenced it.
 	_ = os.Remove(image.absPath(server.layout()))
 	httpx.Success(responseWriter, nil)
 }
 
-// ImagesSetCover makes an existing gallery image the cover image of the design:
-// sets designs.cover_path and marks exactly this image as is_cover.
+// ImagesSetCover sets designs.cover_path and marks exactly this image is_cover.
 func (server *Server) ImagesSetCover(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")

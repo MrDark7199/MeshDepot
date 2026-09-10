@@ -23,7 +23,7 @@ if [ "$(id -u)" = "0" ]; then
 	exec gosu meshdepot:meshdepot "$0" "$@"
 fi
 
-# ── Resolver token ───────────────────────────────────────────────────────────
+# - Resolver token ------------------------------
 # The resolver refuses to start without one. It used to be the operator's job
 # because app and sidecar were separate containers; both now share this process
 # environment, so generate a secret that never leaves the container.
@@ -32,7 +32,7 @@ if [ -z "$PLAYWRIGHT_TOKEN" ]; then
 fi
 export PLAYWRIGHT_TOKEN
 
-# ── Xvfb ─────────────────────────────────────────────────────────────────────
+# - Xvfb -----------------------------------
 # On some sites Cloudflare only lets a *headful* Firefox through, and that needs
 # a display. After a container restart a stale lock is left behind; Xvfb then
 # refuses to start and every headful call fails silently with "cannot open
@@ -68,7 +68,7 @@ while :; do
 	sleep 1
 done &
 
-# ── Firefox resolver ─────────────────────────────────────────────────────────
+# - Firefox resolver -----------------------------
 # Respawned as well: the app only checks the resolver at startup, so without
 # this a dead node would break MyMiniFactory downloads silently.
 while :; do

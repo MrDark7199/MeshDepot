@@ -45,7 +45,7 @@ export async function splitConnectedComponents(
   const yieldEvery = 200_000
   const breathe = () => new Promise<void>(resolve => setTimeout(resolve, 0))
 
-  // ── 1. Map every corner onto a welded vertex id ────────────────────────────
+  // - 1. Map every corner onto a welded vertex id --------------
   const vertexOfCorner = new Int32Array(triangleCount * 3)
   const vertexIds = new Map<string, number>()
   let vertexCount = 0
@@ -67,7 +67,7 @@ export async function splitConnectedComponents(
     }
   }
 
-  // ── 2. Union-find over those vertices ──────────────────────────────────────
+  // - 2. Union-find over those vertices -------------------
   // Union by size with full path compression: without it a long thin part
   // degenerates into a linked list and find() turns quadratic.
   const parent = new Int32Array(vertexCount)
@@ -108,7 +108,7 @@ export async function splitConnectedComponents(
     }
   }
 
-  // ── 3. Collect the triangles per component ─────────────────────────────────
+  // - 3. Collect the triangles per component -----------------
   const trianglesPerRoot = new Map<number, number[]>()
   for (let triangle = 0; triangle < triangleCount; triangle++) {
     const root = find(vertexOfCorner[triangle * 3])

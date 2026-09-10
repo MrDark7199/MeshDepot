@@ -11,14 +11,10 @@ import (
 	"meshdepot/internal/pwmx"
 )
 
-// FilesServePwmxMesh reconstructs a 3D surface mesh from a resin-slicer file
-// (.pwmx, Anycubic Photon Workshop) and returns it as a binary STL - this lets
-// the existing Babylon viewer show an (approximate) 3D view of the model even
-// though the file itself only contains per-layer exposure images.
-//
-// The reconstruction is expensive (~seconds, ~19MB), so the result is cached
-// under {BASE_PATH_DATA}/pwmx_mesh/<blobHash>.stl and streamed directly on subsequent
-// requests.
+// FilesServePwmxMesh reconstructs a surface mesh from a resin-slicer file and
+// returns it as a binary STL, so the Babylon viewer can show an approximate 3D
+// view of a file that holds only per-layer exposure images. The reconstruction
+// costs seconds and ~19MB, so it is cached under {BASE_PATH_DATA}/pwmx_mesh/.
 func (server *Server) FilesServePwmxMesh(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "designId")
@@ -44,8 +40,8 @@ func (server *Server) FilesServePwmxMesh(responseWriter http.ResponseWriter, req
 		return
 	}
 
-	// Cache path from blob hash + mesh options (the result is deterministic per
-	// file + options; the options in the name invalidate the cache on changes).
+	// The result is deterministic per file and options, and the options in the name
+	// invalidate the cache when they change.
 	options := pwmx.DefaultMeshOptions()
 	hash := entry.BlobHash
 	if hash == "" {
@@ -82,13 +78,9 @@ func (server *Server) FilesServePwmxMesh(responseWriter http.ResponseWriter, req
 	_, _ = responseWriter.Write(stl)
 }
 
-// writeCacheFile puts data at cachePath atomically: written to a unique temp file
-// in the same directory, then renamed into place.
-//
-// os.WriteFile would publish the path the moment it creates the file, so a second
-// request reconstructing the same mesh in parallel would find it "existing" and
-// stream a truncated STL - which then stays in the cache forever, since nothing
-// invalidates it.
+// writeCacheFile renames a temp file into place: os.WriteFile publishes the path
+// the moment it creates the file, so a parallel request would find it "existing"
+// and stream a truncated STL that then stays cached forever.
 func writeCacheFile(cacheDir, cachePath string, data []byte) {
 	if failure := os.MkdirAll(cacheDir, 0o775); failure != nil {
 		return

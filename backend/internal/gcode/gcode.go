@@ -1,8 +1,7 @@
-// Package gcode extracts print parameters from the G-code files of the common
-// slicers (PrusaSlicer, OrcaSlicer, SuperSlicer, Bambu Studio, Cura). Slicers
-// store their settings as a comment block at the start OR the end of the file,
-// so only the head and tail are scanned instead of the whole (often very large)
-// file.
+// Package gcode extracts print parameters from the G-code of the common slicers
+// (PrusaSlicer, OrcaSlicer, SuperSlicer, Bambu Studio, Cura). They store their
+// settings as a comment block at the start or the end, so only head and tail are
+// scanned rather than the whole, often very large, file.
 package gcode
 
 import (
@@ -13,15 +12,13 @@ import (
 	"strings"
 )
 
-// HeadBytes and TailBytes report how much of a G-code file Parse actually looks
-// at. They are exported so a caller can read just those two slices off disk and
-// hand the concatenation to Parse instead of loading a multi-hundred-MB file.
+// HeadBytes and TailBytes are exported so a caller can read just those two slices
+// off disk instead of loading a multi-hundred-MB file.
 const (
 	HeadBytes = 256 * 1024 // head: Cura header, Prusa header
 	TailBytes = 64 * 1024  // tail: Prusa/Orca/Bambu config block
 )
 
-// IsGcode recognizes G-code files by their extension.
 func IsGcode(name string) bool {
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".gcode", ".gco", ".g":
@@ -30,8 +27,7 @@ func IsGcode(name string) bool {
 	return false
 }
 
-// Parse returns the detected, normalized print parameters. Missing fields are
-// omitted; if nothing is recognizable the map is empty.
+// Parse omits missing fields; an unrecognizable file yields an empty map.
 func Parse(data []byte) map[string]any {
 	text := headAndTail(data)
 	lines := strings.Split(text, "\n")
@@ -60,7 +56,7 @@ func Parse(data []byte) map[string]any {
 			}
 			continue
 		}
-		// G-code temperature commands as a fallback (Cura has no temp comments).
+		// Temperature commands as a fallback: Cura writes no temp comments.
 		if nozzleTempFallback == "" {
 			if value := tempArg(trimmed, "M104", "M109"); value != "" {
 				nozzleTempFallback = value
@@ -75,7 +71,7 @@ func Parse(data []byte) map[string]any {
 
 	result := map[string]any{}
 
-	// ── Layer height ──
+	// - Layer height -
 	if value, ok := firstFloat(pick(keyValues, "layer_height"), colonPairs["layer height"]); ok {
 		result["layer_height"] = value
 	}
@@ -83,7 +79,7 @@ func Parse(data []byte) map[string]any {
 		result["first_layer_height"] = value
 	}
 
-	// ── Temperatures ── (Orca: nozzle_temperature, Prusa: temperature)
+	// - Temperatures - (Orca: nozzle_temperature, Prusa: temperature)
 	if value, ok := firstFloat(pick(keyValues, "nozzle_temperature", "temperature", "first_layer_temperature"), nozzleTempFallback); ok {
 		result["nozzle_temp"] = value
 	}
@@ -91,22 +87,22 @@ func Parse(data []byte) map[string]any {
 		result["bed_temp"] = value
 	}
 
-	// ── Infill ── (Prusa: fill_density, Orca: sparse_infill_density) - percent
+	// - Infill - (Prusa: fill_density, Orca: sparse_infill_density) - percent
 	if value, ok := firstFloat(pick(keyValues, "fill_density", "sparse_infill_density")); ok {
 		result["infill"] = value
 	}
 
-	// ── Nozzle diameter ──
+	// - Nozzle diameter -
 	if value, ok := firstFloat(pick(keyValues, "nozzle_diameter")); ok {
 		result["nozzle_diameter"] = value
 	}
 
-	// ── Filament type ──
+	// - Filament type -
 	if value := pick(keyValues, "filament_type"); value != "" {
 		result["filament_type"] = firstToken(value)
 	}
 
-	// ── Filament usage ──
+	// - Filament usage -
 	if value, ok := firstFloat(pick(keyValues, "total filament used [g]", "filament used [g]", "filament_weight_total")); ok {
 		result["filament_used_g"] = value
 	}
@@ -118,7 +114,7 @@ func Parse(data []byte) map[string]any {
 		}
 	}
 
-	// ── Print time ──
+	// - Print time -
 	if value := pick(keyValues, "estimated printing time (normal mode)", "estimated printing time", "total estimated time"); value != "" {
 		result["print_time"] = value
 	} else if value := colonPairs["time"]; value != "" { // Cura: seconds
@@ -127,7 +123,7 @@ func Parse(data []byte) map[string]any {
 		}
 	}
 
-	// ── Slicer ──
+	// - Slicer -
 	if value := detectSlicer(lines); value != "" {
 		result["slicer"] = value
 	}
@@ -135,7 +131,6 @@ func Parse(data []byte) map[string]any {
 	return result
 }
 
-// headAndTail returns the head and tail region of the file as a single string.
 func headAndTail(data []byte) string {
 	if len(data) <= HeadBytes+TailBytes {
 		return string(data)
@@ -143,7 +138,6 @@ func headAndTail(data []byte) string {
 	return string(data[:HeadBytes]) + "\n" + string(data[len(data)-TailBytes:])
 }
 
-// pick returns the first non-empty value for the named keys.
 func pick(values map[string]string, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := values[key]; ok && strings.TrimSpace(value) != "" {
@@ -155,8 +149,8 @@ func pick(values map[string]string, keys ...string) string {
 
 var floatPattern = regexp.MustCompile(`-?\d+(?:\.\d+)?`)
 
-// firstFloat extracts the first number from the first non-empty candidate.
-// (Prusa sometimes lists values comma-separated: "210,210,215".)
+// firstFloat takes the first number of the first non-empty candidate. Prusa
+// sometimes lists values comma-separated: "210,210,215".
 func firstFloat(candidates ...string) (float64, bool) {
 	for _, candidate := range candidates {
 		if candidate == "" {
@@ -171,7 +165,6 @@ func firstFloat(candidates ...string) (float64, bool) {
 	return 0, false
 }
 
-// firstToken returns the first token before whitespace/semicolon/comma.
 func firstToken(value string) string {
 	value = strings.TrimSpace(value)
 	for _, separator := range []string{";", ",", " "} {
@@ -184,7 +177,6 @@ func firstToken(value string) string {
 
 var tempPattern = regexp.MustCompile(`S(\d+(?:\.\d+)?)`)
 
-// tempArg returns the S argument if the line starts with one of the commands.
 func tempArg(line string, commands ...string) string {
 	upper := strings.ToUpper(line)
 	for _, command := range commands {
@@ -197,8 +189,7 @@ func tempArg(line string, commands ...string) string {
 	return ""
 }
 
-// detectSlicer recognizes the slicer name from header lines like
-// "; generated by PrusaSlicer 2.7" or ";Generated with Cura_SteamEngine 5.6".
+// detectSlicer reads header lines like "; generated by PrusaSlicer 2.7".
 func detectSlicer(lines []string) string {
 	for _, rawLine := range lines {
 		content := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(rawLine), ";"))
@@ -214,7 +205,6 @@ func detectSlicer(lines []string) string {
 
 func round2(value float64) float64 { return float64(int(value*100+0.5)) / 100 }
 
-// FormatDuration renders a second count as "1h 5m" or "5m 30s".
 func FormatDuration(seconds int) string {
 	hours := seconds / 3600
 	minutes := (seconds % 3600) / 60

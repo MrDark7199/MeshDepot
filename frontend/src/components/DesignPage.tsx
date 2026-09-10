@@ -3,7 +3,8 @@ import { api } from '../services/api'
 import { useAuth } from '../services/AuthContext'
 import { useI18n } from '../i18n/index'
 import { useUnsavedChanges } from '../utils/unsavedChanges'
-import { StlViewerModal, is3dFile } from './StlViewer'
+import { StlViewerModal } from './StlViewer'
+import { is3dFile } from '../utils/meshTools'
 import { displayName, displayDescription } from '../utils/designText'
 import { formatDate, formatDateTime } from '../utils/datetime'
 import { ToggleSwitch } from './ToggleSwitch'
@@ -13,270 +14,20 @@ import type { Design, DesignFile, DesignFileEntry, DesignID, DesignImage, Tag, C
 import { PLATFORM_COLORS, platformLabel } from '../constants/platforms'
 import { buildDescriptionFragment, descriptionCss } from '../utils/description'
 import { browserHandlesClick, gridHref } from '../utils/navlink'
+import { sansFont, monoFont, labelStyle, inputStyle, TAG_COLOR_PRESETS } from '../styles/formStyles'
+import { GCODE_FORMATS, FDM_JOB_FORMATS, RESIN_FORMATS, RESIN_VIEWER_FORMATS, SLICER_FORMATS, SLICERS, lowerExt } from '../constants/fileFormats'
+import { isResolvableHost, normalizeSourceUrl } from '../utils/sourceUrl'
+import { formatBytes, formatPrintTime } from '../utils/format'
+import { StarRating } from './StarRating'
+import { SlicerButtons } from './SlicerButtons'
+import { ShareLinkSection } from './ShareLinkSection'
+import { ErrorBox } from './ErrorBox'
+import { designBreadcrumb, type DesignBreadcrumbDeps } from '../app/designBreadcrumb'
+import { designSyncBanner, type DesignSyncBannerDeps } from '../app/designSyncBanner'
+import { designFilesTab, type DesignFilesTabDeps } from '../app/designFilesTab'
+import { designShareTab, type DesignShareTabDeps } from '../app/designShareTab'
 
-const sansFont = { 'font-family': "'DM Sans',sans-serif" }
-const monoFont = { 'font-family': "'DM Mono',monospace" }
-const labelStyle = { display: 'block', 'font-family': "'DM Mono',monospace", 'font-size': '12px', color: 'var(--muted)', 'margin-bottom': '6px', 'text-transform': 'uppercase', 'letter-spacing': '0.05em' }
-const inputStyle = { width: '100%', background: 'var(--input-bg)', border: '1px solid var(--border2)', 'border-radius': '10px', padding: '10px 14px', color: 'var(--text)', 'font-family': "'DM Sans',sans-serif", 'font-size': '14px', outline: 'none', 'box-sizing': 'border-box' } as any
-
-const TAG_COLOR_PRESETS = ['#e63946','#f4a261','#e9c46a','#2a9d8f','#457b9d','#a8dadc','#7c3aed','#db2777','#16a34a','#64748b']
-
-// ── Printer file formats (extensions without the dot) ───────────────────────
-// Text g-code (FDM) - the server reads print parameters out of these (gcode_meta).
-const GCODE_FORMATS = ['gcode', 'gco', 'g']
-// Further FDM slicer/print-job formats (binary, no parameters extracted).
-const FDM_JOB_FORMATS = ['bgcode', 'gx', 'g3drem', 'ufp', 'makerbot']
-// Resin/MSLA slicer output. The server reads print parameters from all of these.
-const RESIN_FORMATS = ['pwmx', 'pwmo', 'pws', 'pw0', 'pwms', 'pwmb', 'sl1', 'sl1s', 'ctb', 'cbddlp', 'photon']
-// Resin formats the server can rebuild a mesh from - only these get the 3D button.
-// The layer decoder is Anycubic-PWMX-specific; everything else would 422.
-const RESIN_VIEWER_FORMATS = ['pwmx']
-// Extensions the desktop slicers can open: meshes and CAD exchange formats plus
-// the text/binary g-code they load for preview. Resin formats are absent - none
-// of the three slicers reads them.
-const SLICER_FORMATS = ['stl', '3mf', 'obj', 'step', 'stp', 'amf', ...GCODE_FORMATS, 'bgcode']
-// No `accept` on the upload pickers on purpose: the server stores whatever it is
-// sent (only .zip is treated specially, by being extracted), so filtering the
-// dialog just hid CAD sources like .FCStd, .step or .f3d from the file chooser
-// while drag-and-drop accepted them anyway. Files are served back as
-// application/octet-stream attachments, so a wider set of extensions carries no
-// extra risk - see mimeForExt in backend/internal/api/designfiles.go.
-
-const lowerExt = (name: string) => (name.split('.').pop() || '').toLowerCase()
-
-/** Mirrors validHostname in backend/internal/api/designs.go. */
-const isResolvableHost = (host: string): boolean => {
-  if (!host) return false
-  // Bracketed IPv6 and plain IPv4 are addresses, not names.
-  if (host.startsWith('[') || /^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true
-  const labels = host.replace(/\.$/, '').split('.')
-  if (labels.length < 2) return false
-  if (!labels.every(label => label.length <= 63 && /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(label))) return false
-  return /^[a-zA-Z]{2,}$/.test(labels[labels.length - 1])
-}
-
-/**
- * The source url is optional; a filled one has to be an address that leads
- * somewhere, because it becomes the outgoing link and the sync's starting point.
- *
- * "http://afeefafefefaffefef" parses and has a host, which is why it used to
- * pass - but there is no such site. A registrable name is required instead.
- * The scheme may be left out: nobody types "https://" in front of an address
- * they copied, and refusing it for that reason is a rule the user has to learn
- * from an error message. Mirrors normalizeSourceURL in the backend.
- */
-const normalizeSourceUrl = (value: string): string | null => {
-  const raw = (value || '').trim()
-  if (!raw) return ''
-  try {
-    const parsed = new URL(raw.includes('://') ? raw : 'https://' + raw)
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
-    return isResolvableHost(parsed.hostname) ? parsed.toString() : null
-  } catch { return null }
-}
-
-// Bambu Studio / OrcaSlicer / PrusaSlicer all share one downloader that matches
-// the URL scheme `<slicer>://open?file=<percent-encoded download URL>`
-// (regex ^(orcaslicer|prusaslicer|bambustudio|cura)://open[/]?\?file= in their
-// Downloader.cpp). The download URL must be percent-encoded, as Printables emits.
-const SLICERS = [
-  { name: 'Bambu Studio', scheme: (url: string) => `bambustudio://open?file=${encodeURIComponent(url)}` },
-  { name: 'OrcaSlicer',   scheme: (url: string) => `orcaslicer://open?file=${encodeURIComponent(url)}` },
-  { name: 'PrusaSlicer',  scheme: (url: string) => `prusaslicer://open?file=${encodeURIComponent(url)}` },
-]
-
-/** Formats bytes as a human-readable string. */
-function formatBytes(bytes: number): string {
-  if (!bytes) return '0 B'
-  if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB'
-  if (bytes >= 1048576)    return (bytes / 1048576).toFixed(1) + ' MB'
-  if (bytes >= 1024)       return (bytes / 1024).toFixed(0) + ' KB'
-  return bytes + ' B'
-}
-
-/** Formats minutes as "Xh Ym". */
-function formatPrintTime(minutes: number): string {
-  if (!minutes) return '-'
-  const hours = Math.floor(minutes / 60)
-  const mins = minutes % 60
-  return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
-}
-
-/** Renders star rating (0–5) with optional change handler. */
-function StarRating(props: { value: number; onChange?: (rating: number) => void }) {
-  return (
-    <div style={{ display: 'flex', gap: '4px' }}>
-      <For each={[1,2,3,4,5]}>{star => (
-        <button
-          onClick={() => props.onChange?.(star === props.value ? 0 : star)}
-          style={{ background: 'none', border: 'none', cursor: props.onChange ? 'pointer' : 'default', padding: '0', 'font-size': '22px', color: star <= props.value ? '#f4a261' : 'var(--border2)', 'transition': 'color 0.1s' }}>
-          ★
-        </button>
-      )}</For>
-    </div>
-  )
-}
-
-/**
- * Slicer deep links for the files of the current version.
- *
- * Picking the file comes first: a design usually carries several printable
- * files, and opening whichever one happened to be first is a guess the user
- * cannot correct. With a single eligible file the menu is skipped - there is
- * nothing to choose.
- */
-function SlicerButtons(props: { designId: DesignID; fileVersionId: number; entries: { id: number; filename: string }[] }) {
-  const [openFor, setOpenFor] = createSignal<string | null>(null)
-  const [busy, setBusy] = createSignal(false)
-
-  /** Fetches a one-time token for the entry and hands it to the slicer. */
-  const open = async (scheme: (url: string) => string, entryId: number) => {
-    setOpenFor(null)
-    setBusy(true)
-    try {
-      const response = await api.createDownloadToken(props.designId, props.fileVersionId, entryId) as any
-      const token = response?.token ?? response?.data?.token
-      if (!token) return
-      window.location.href = scheme(`${window.location.origin}/api/v1/files/token/${token}`)
-    } catch { /* the button stays available for another try */ }
-    finally { setBusy(false) }
-  }
-
-  const activate = (slicer: typeof SLICERS[number]) => {
-    if (props.entries.length === 1) { open(slicer.scheme, props.entries[0].id); return }
-    setOpenFor(current => current === slicer.name ? null : slicer.name)
-  }
-
-  return (
-    <div style={{ display: 'flex', gap: '7px', 'flex-wrap': 'wrap' }}>
-      <For each={SLICERS}>{slicer => (
-        <div style={{ position: 'relative' }}>
-          <button onClick={() => activate(slicer)} disabled={busy()}
-            style={{ padding: '7px 15px', background: 'var(--bg4)', border: '1px solid var(--border2)', 'border-radius': '9px', color: busy() ? 'var(--muted)' : 'var(--text)', 'font-size': '13px', cursor: busy() ? 'default' : 'pointer', ...sansFont, display: 'flex', 'align-items': 'center', gap: '7px', 'font-weight': '500', opacity: busy() ? '0.5' : '1' }}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polygon points="5 3 19 12 5 21 5 3"/>
-            </svg>
-            {slicer.name}
-          </button>
-          <Show when={openFor() === slicer.name}>
-            <>
-              {/* Click anywhere else closes the menu. */}
-              <div onClick={() => setOpenFor(null)} style={{ position: 'fixed', inset: '0', 'z-index': '40' }} />
-              <div style={{ position: 'absolute', top: 'calc(100% + 5px)', left: '0', 'z-index': '41', background: 'var(--bg2)', border: '1px solid var(--border)', 'border-radius': '10px', 'box-shadow': '0 12px 30px rgba(0,0,0,0.35)', padding: '5px', 'min-width': '220px', 'max-width': '340px', 'max-height': '260px', 'overflow-y': 'auto' }}>
-                <For each={props.entries}>{entry => (
-                  <button onClick={() => open(slicer.scheme, entry.id)}
-                    style={{ display: 'block', width: '100%', 'text-align': 'left', padding: '7px 9px', background: 'none', border: 'none', 'border-radius': '7px', cursor: 'pointer', ...monoFont, 'font-size': '12px', color: 'var(--text2)', overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap' }}>
-                    {entry.filename}
-                  </button>
-                )}</For>
-              </div>
-            </>
-          </Show>
-        </div>
-      )}</For>
-    </div>
-  )
-}
-
-/**
- * The share-link half of the share tab: create one with a lifetime, copy it,
- * revoke it. Kept out of the page component because it is self-contained and
- * that component is long enough.
- */
-function ShareLinkSection(props: {
-  links: ShareLink[]
-  days: string
-  onDays: (days: string) => void
-  creating: boolean
-  copiedToken: string
-  onCreate: () => void
-  onCopy: (token: string) => void
-  onDelete: (linkId: number) => void
-  translate: (key: string, vars?: Record<string, string | number>) => string
-  formatDate: (stamp: string) => string
-}) {
-  const expiryText = (link: ShareLink) => {
-    if (link.expired) return props.translate('share_link_expired')
-    if (!link.expires_at) return props.translate('share_link_no_expiry')
-    return props.translate('share_link_until', { date: props.formatDate(link.expires_at) })
-  }
-
-  return (
-    <div style={{ 'border-top': '1px solid var(--border)', 'padding-top': '18px', display: 'flex', 'flex-direction': 'column', gap: '12px' }}>
-      <div>
-        <div style={{ ...sansFont, 'font-size': '14px', 'font-weight': '700', color: 'var(--text)', 'margin-bottom': '4px' }}>
-          {props.translate('share_link_heading')}
-        </div>
-        <div style={{ ...sansFont, 'font-size': '12px', color: 'var(--muted)', 'line-height': '1.6' }}>
-          {props.translate('share_link_hint')}
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', gap: '10px', 'align-items': 'center' }}>
-        {/* Written out rather than spread from inputStyle: inside a JSX style
-            object the spread wins over the keys after it, so ...inputStyle
-            followed by a width silently kept the shared width: 100%. */}
-        <input type="number" min="0" max="3650" value={props.days}
-          onInput={event => props.onDays(event.currentTarget.value)}
-          style={{
-            width: '76px', 'flex-shrink': '0', 'text-align': 'right',
-            background: 'var(--input-bg)', border: '1px solid var(--border2)', 'border-radius': '10px',
-            padding: '9px 11px', color: 'var(--text)', ...sansFont, 'font-size': '13px',
-            outline: 'none', 'box-sizing': 'border-box',
-          }} />
-        <span style={{ ...sansFont, 'font-size': '13px', color: 'var(--text3)', 'flex-shrink': '0' }}>
-          {props.translate('share_link_days_unit')}
-        </span>
-        <button onClick={props.onCreate} disabled={props.creating}
-          style={{ padding: '9px 18px', background: 'var(--accent)', border: 'none', 'border-radius': '10px', color: '#fff',
-            'flex-shrink': '0', ...sansFont, 'font-size': '13px', 'font-weight': '600',
-            cursor: props.creating ? 'default' : 'pointer', opacity: props.creating ? '0.6' : '1' }}>
-          {props.creating ? '…' : props.translate('share_link_create')}
-        </button>
-      </div>
-      <div style={{ ...sansFont, 'font-size': '11px', color: 'var(--muted)', 'margin-top': '-6px' }}>
-        {props.translate('share_link_days_hint')}
-      </div>
-
-      <For each={props.links}>{link => (
-        <div style={{ display: 'flex', 'align-items': 'center', gap: '11px', background: 'var(--surface)', border: '1px solid var(--border)',
-          'border-radius': '11px', padding: '10px 14px', opacity: link.expired ? '0.55' : '1' }}>
-          <div style={{ flex: '1', 'min-width': '0' }}>
-            <div style={{ ...monoFont, 'font-size': '12px', color: 'var(--text2)', overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap' }}>
-              {api.shareLinkUrl(link.token)}
-            </div>
-            <div style={{ ...sansFont, 'font-size': '11px', color: 'var(--muted)', 'margin-top': '3px' }}>
-              {expiryText(link)} · {props.translate('share_link_views', { count: link.view_count })}
-            </div>
-          </div>
-          <button onClick={() => props.onCopy(link.token)}
-            style={{ padding: '6px 13px', background: 'var(--bg3)', border: '1px solid var(--border2)', 'border-radius': '8px',
-              color: 'var(--text2)', 'font-size': '12px', cursor: 'pointer', ...sansFont, 'flex-shrink': '0' }}>
-            {props.copiedToken === link.token ? props.translate('share_link_copied') : props.translate('share_link_copy')}
-          </button>
-          <button onClick={() => props.onDelete(link.id)}
-            style={{ padding: '6px 13px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '8px',
-              color: 'var(--danger)', 'font-size': '12px', cursor: 'pointer', ...sansFont, 'flex-shrink': '0' }}>
-            {props.translate('share_link_revoke')}
-          </button>
-        </div>
-      )}</For>
-    </div>
-  )
-}
-
-/** Inline error box. */
-function ErrorBox(props: { message: string }) {
-  return (
-    <Show when={props.message}>
-      <div style={{ background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '9px', padding: '9px 13px', color: 'var(--danger)', ...sansFont, 'font-size': '14px', 'margin-bottom': '14px' }}>
-        {props.message}
-      </div>
-    </Show>
-  )
-}
-
-interface DesignPageProps {
+export interface DesignPageProps {
   designId:             DesignID
   onBack:               () => void
   showToast:            (message: string, variant?: string) => void
@@ -292,6 +43,7 @@ interface DesignPageProps {
   syncStatus?:          string
   syncProgress?:        number
   syncStep?:            { step: string; cur: number; tot: number }
+  syncError?:           string
 }
 
 /**
@@ -856,7 +608,7 @@ export function DesignPage(props: DesignPageProps) {
     return entries.length > 0 ? { fileVersionId: cv.id, entries } : null
   }
 
-  // ── Actions ──────────────────────────────────────────────────────────────────
+  // - Actions ---------------------------------
 
   /**
    * Persists the current edit form to the API, updates the design's tag
@@ -1093,107 +845,39 @@ export function DesignPage(props: DesignPageProps) {
 
   const GRADIENT_FALLBACK = `linear-gradient(135deg, #1a1a2e, #16213e, #0f3460)`
 
+  const setFileInputRef = (element: HTMLInputElement) => { fileInputRef = element }
+
+  const designBreadcrumbDeps: DesignBreadcrumbDeps = {
+    props, translate, user, design, shownName, isLoading, isEditing, enterEditMode, exitEditMode,
+    guardClose, setConfirmDelete, startSyncStream,
+  }
+
+  const designSyncBannerDeps: DesignSyncBannerDeps = { props, translate }
+
+  const designFilesTabDeps: DesignFilesTabDeps = {
+    props, translate, lang, user, design, activeTab, fileVersions, isLoadingFiles, expandedVersionIds,
+    setExpandedVersionIds, collapsedFolders, setCollapsedFolders, nextVersion, uploadVersion,
+    setUploadVersion, uploadNotes, setUploadNotes, uploadFileObject, setUploadFileObject, uploadError,
+    isUploading, uploadDesignFile, addFilesToVersion, deleteFileEntry, setConfirmDeleteFileId,
+    showEntryInViewer, isGcodeFile, isResinFile, isResinViewable, gcodeSummary, setFileInputRef,
+    fileInputRef: () => fileInputRef,
+  }
+
+  const designShareTabDeps: DesignShareTabDeps = {
+    props, translate, lang, design, activeTab, shareOpen, setShareOpen, shareEmailInput,
+    setShareEmailInput, shareUserSuggestions, loadShareUserSuggestions, sharePicked, setSharePicked,
+    pickShareUser, shareWithUsers, unshareUser, isSharing, shareLinks, createShareLink,
+    deleteShareLink, copyShareLink, copiedToken, creatingLink, linkDays, setLinkDays,
+  }
+
+
   return (
     <div style={{ 'min-height': '100vh', background: 'var(--bg)', 'padding-bottom': '70px' }}>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
 
-      {/* Breadcrumb bar. Gone once the design turned out to be unavailable:
-          with no name and no actions left, all it still carried was a second
-          way back, and the error panel already offers one. */}
-      <Show when={design() || isLoading()}>
-      <div class="stlv-breadcrumb" style={{ background: 'var(--nav-bg)', 'backdrop-filter': 'blur(16px)', 'border-bottom': '1px solid var(--border)', padding: '0 36px', height: '56px', display: 'flex', 'align-items': 'center', gap: '16px', position: 'sticky', top: '85px', 'z-index': '90' }}>
-        {/* An anchor for the same reason as the nav logo: middle click opens the
-            grid in a new tab instead of doing nothing. A left click still runs
-            props.onBack, which walks history back to wherever this design was
-            opened from - a collection, say, which has no URL of its own. */}
-        <a href={gridHref()}
-          onClick={event => {
-            if (browserHandlesClick(event)) return
-            event.preventDefault()
-            guardClose(props.onBack)
-          }}
-          style={{ background: 'none', border: 'none', color: 'var(--text2)', cursor: 'pointer', ...sansFont, 'font-size': '14px', 'font-weight': '600', display: 'flex', 'align-items': 'center', gap: '5px', 'text-decoration': 'none' }}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-          {translate('btn_back')}
-        </a>
-        <div style={{ height: '24px', width: '1px', background: 'var(--border)' }} />
-        <span style={{ ...sansFont, 'font-size': '14px', color: 'var(--text2)', overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap', flex: '1' }}>
-          {/* The ellipsis means "still loading"; a design that will never arrive
-              must not keep pretending it is on its way. */}
-          {design() ? shownName() : isLoading() ? '…' : ''}
-        </span>
-        <Show when={design()?.is_shared}>
-          <span style={{ ...monoFont, 'font-size': '11px', background: 'rgba(69,123,157,0.2)', color: 'var(--accent-light)', 'border-radius': '5px', padding: '3px 9px' }}>
-            {translate('shared_with_you')}
-          </span>
-        </Show>
-        {/* Every action here operates on the design; with none loaded they were
-            offered anyway, so a design the user may not see still showed
-            "delete" and "edit" next to an empty page. */}
-        <div style={{ display: 'flex', gap: '8px', 'margin-left': 'auto' }}>
-          <Show when={!props.isReadOnly && design()?.source_url}>
-            {(() => {
-              const active = props.syncStatus === 'queued' || props.syncStatus === 'syncing'
-              return (
-                <button onClick={active ? undefined : startSyncStream} disabled={active}
-                  style={{ padding: '7px 15px', background: 'var(--bg4)', border: '1px solid var(--border2)', 'border-radius': '9px', color: active ? 'var(--muted)' : 'var(--text)', 'font-size': '13px', cursor: active ? 'default' : 'pointer', ...sansFont, 'font-weight': '500', display: 'flex', 'align-items': 'center', gap: '7px', opacity: active ? '0.7' : '1' }}>
-                  <Show when={active}>
-                    <div style={{ width: '12px', height: '12px', 'flex-shrink': '0', border: '2px solid var(--muted)', 'border-top-color': 'transparent', 'border-radius': '50%', animation: 'spin 0.7s linear infinite' }} />
-                  </Show>
-                  {active ? translate('btn_syncing') : translate('btn_sync')}
-                </button>
-              )
-            })()}
-          </Show>
-          <Show when={!props.isReadOnly && design()}>
-            <button onClick={() => setConfirmDelete(true)}
-              style={{ padding: '7px 13px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '9px', color: 'var(--danger)', 'font-size': '13px', cursor: 'pointer', ...sansFont }}>
-              {translate('btn_delete_design')}
-            </button>
-            <button onClick={() => {
-              if (!isEditing()) { enterEditMode() }
-              else { guardClose(exitEditMode) }
-            }}
-              style={{ padding: '7px 15px', background: isEditing() ? 'var(--surface)' : 'var(--accent)', border: `1px solid ${isEditing() ? 'var(--border)' : 'var(--accent)'}`, 'border-radius': '9px', color: isEditing() ? 'var(--muted)' : '#fff', 'font-size': '13px', cursor: 'pointer', ...sansFont, 'font-weight': '600' }}>
-              {isEditing() ? translate('btn_cancel') : translate('btn_edit')}
-            </button>
-          </Show>
-        </div>
-      </div>
-      </Show>
+      {designBreadcrumb(designBreadcrumbDeps)}
 
-      {/* Sync status banner */}
-      <Show when={props.syncStatus === 'queued' || props.syncStatus === 'syncing' || props.syncStatus === 'updated' || props.syncStatus === 'error'}>
-        <div style={{
-          background: props.syncStatus === 'error' ? 'rgba(239,68,68,0.1)' : props.syncStatus === 'updated' ? 'rgba(34,197,94,0.1)' : 'rgba(69,123,157,0.1)',
-          'border-bottom': `1px solid ${props.syncStatus === 'error' ? 'rgba(239,68,68,0.3)' : props.syncStatus === 'updated' ? 'rgba(34,197,94,0.3)' : 'rgba(69,123,157,0.3)'}`,
-          padding: '10px 36px', display: 'flex', 'align-items': 'center', gap: '10px'
-        }}>
-          <Show when={props.syncStatus === 'queued' || props.syncStatus === 'syncing'}>
-            <div style={{ width: '14px', height: '14px', 'flex-shrink': '0', border: '2px solid var(--accent)', 'border-top-color': 'transparent', 'border-radius': '50%', animation: 'spin 0.7s linear infinite' }} />
-          </Show>
-          <Show when={props.syncStatus === 'updated'}>
-            <div style={{ width: '14px', height: '14px', 'flex-shrink': '0', background: '#22c55e', 'border-radius': '50%', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'font-size': '9px', color: '#fff' }}>✓</div>
-          </Show>
-          <Show when={props.syncStatus === 'error'}>
-            <div style={{ width: '14px', height: '14px', 'flex-shrink': '0', background: '#ef4444', 'border-radius': '50%', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'font-size': '9px', color: '#fff' }}>✕</div>
-          </Show>
-          <span style={{ ...sansFont, 'font-size': '13px', color: 'var(--text)', 'font-weight': '500' }}>
-            {props.syncStatus === 'queued'  && translate('sync_status_queued')}
-            {props.syncStatus === 'syncing' && (
-              props.syncStep?.step
-                ? (props.syncStep.tot > 0
-                    ? `${translate(`sync_step_${props.syncStep.step}` as any)} (${props.syncStep.cur}/${props.syncStep.tot})`
-                    : translate(`sync_step_${props.syncStep.step}` as any))
-                : (props.syncProgress && props.syncProgress > 0
-                    ? `${translate('sync_status_syncing')} ${props.syncProgress}%`
-                    : translate('sync_status_syncing'))
-            )}
-            {props.syncStatus === 'updated' && translate('sync_status_updated')}
-            {props.syncStatus === 'error'   && translate('sync_status_error')}
-          </span>
-        </div>
-      </Show>
+      {designSyncBanner(designSyncBannerDeps)}
 
       <Show when={isLoading()} fallback={
         <Show when={design()} fallback={
@@ -1217,10 +901,10 @@ export function DesignPage(props: DesignPageProps) {
           <div style={{ padding: '32px 36px', 'max-width': '1500px', margin: '0 auto' }}>
             <ErrorBox message={errorMessage()} />
 
-            {/* ── Main 2-column layout ── */}
+            {/* - Main 2-column layout - */}
             <div class="stlv-detail-grid" style={{ display: 'grid', 'grid-template-columns': '420px 1fr', gap: '32px', 'margin-bottom': '32px' }}>
 
-              {/* ─── LEFT: Image gallery ─── */}
+              {/* -- LEFT: Image gallery -- */}
               <div>
                 {/* Main image */}
                 <div style={{ 'border-radius': '18px', overflow: 'hidden', height: '400px', background: currentImageUrl() ? 'var(--bg2)' : GRADIENT_FALLBACK, position: 'relative', border: '1px solid var(--border)' }}>
@@ -1341,7 +1025,7 @@ export function DesignPage(props: DesignPageProps) {
                 </Show>
               </div>
 
-              {/* ─── RIGHT: Metadata panel ─── */}
+              {/* -- RIGHT: Metadata panel -- */}
               <div style={{ display: 'flex', 'flex-direction': 'column', gap: '22px' }}>
 
                 {/* Name + platform */}
@@ -1442,7 +1126,7 @@ export function DesignPage(props: DesignPageProps) {
               </div>
             </div>
 
-            {/* ── Edit form ── */}
+            {/* - Edit form - */}
             <Show when={isEditing() && !props.isReadOnly}>
               <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', 'border-radius': '18px', padding: '26px', 'margin-bottom': '30px' }}
                 onInput={markDirty} onChange={markDirty}>
@@ -1591,7 +1275,7 @@ export function DesignPage(props: DesignPageProps) {
               </div>
             </Show>
 
-            {/* ── Tab bar ── */}
+            {/* - Tab bar - */}
             <div style={{ display: 'flex', 'border-bottom': '1px solid var(--border)', 'margin-bottom': '26px' }}>
               {(['details', 'files', ...(currentPrintEntries().length ? ['gcode'] : []), 'notes', 'share'] as ('details' | 'files' | 'gcode' | 'notes' | 'share')[]).map(tab => (
                 <button onClick={() => setActiveTab(tab)}
@@ -1608,7 +1292,7 @@ export function DesignPage(props: DesignPageProps) {
               ))}
             </div>
 
-            {/* ── Details tab ── */}
+            {/* - Details tab - */}
             <Show when={activeTab() === 'details'}>
               <Show when={shownDescription()} fallback={
                 <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--muted)', 'font-style': 'italic' }}>{translate('label_no_description')}</div>
@@ -1622,194 +1306,9 @@ export function DesignPage(props: DesignPageProps) {
               </Show>
             </Show>
 
-            {/* ── Files tab ── */}
-            <Show when={activeTab() === 'files'}>
-              <div style={{ display: 'flex', 'flex-direction': 'column', gap: '18px' }}>
-                <Show when={isLoadingFiles()}>
-                  <div style={{ color: 'var(--muted)', ...sansFont }}>{translate('label_loading')}</div>
-                </Show>
-                <For each={fileVersions()}>{fileVersion => (
-                  <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', 'border-radius': '16px', overflow: 'hidden' }}>
-                    {/* Version header (click to expand/collapse) */}
-                    <div
-                      onClick={() => setExpandedVersionIds(currentSet => {
-                        const nextSet = new Set(currentSet)
-                        if (nextSet.has(fileVersion.id)) nextSet.delete(fileVersion.id); else nextSet.add(fileVersion.id)
-                        return nextSet
-                      })}
-                      style={{ padding: '15px 20px', background: 'var(--bg3)', 'border-bottom': expandedVersionIds().has(fileVersion.id) ? '1px solid var(--border)' : 'none', display: 'flex', 'align-items': 'center', gap: '11px', cursor: 'pointer', 'user-select': 'none' }}>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.5"
-                        style={{ transform: expandedVersionIds().has(fileVersion.id) ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s', 'flex-shrink': '0' }}>
-                        <polyline points="6 9 12 15 18 9"/>
-                      </svg>
-                      <span style={{ ...monoFont, 'font-size': '14px', 'font-weight': '700', color: 'var(--accent)' }}>v{fileVersion.version}</span>
-                      <Show when={fileVersion.is_current}>
-                        <span style={{ ...monoFont, 'font-size': '10px', 'font-weight': '700', background: 'var(--accent)', color: '#fff', 'border-radius': '5px', padding: '2px 7px' }}>{translate('label_current')}</span>
-                      </Show>
-                      <Show when={fileVersion.notes}>
-                        <span style={{ ...sansFont, 'font-size': '13px', color: 'var(--muted)', 'font-style': 'italic' }}>
-                          {fileVersion.notes === 'Downloaded' ? translate('file_version_note_downloaded') : fileVersion.notes}
-                        </span>
-                      </Show>
-                      <div onClick={e => e.stopPropagation()} style={{ 'margin-left': 'auto', display: 'flex', gap: '9px', 'align-items': 'center' }}>
-                        <span style={{ ...monoFont, 'font-size': '12px', color: 'var(--muted)' }}>
-                          {formatDate(fileVersion.created_at, lang())}
-                        </span>
-                        {(() => {
-                          const totalBytes = (fileVersion.entries || []).reduce((sum, entry) => sum + (entry.size_bytes || 0), 0) || fileVersion.size_bytes || 0
-                          return totalBytes > 0 ? (
-                            <span style={{ ...monoFont, 'font-size': '12px', color: 'var(--muted)' }}>
-                              {formatBytes(totalBytes)}
-                            </span>
-                          ) : null
-                        })()}
-                        <a href={api.downloadUrl(props.designId, fileVersion.id)} title={translate('btn_download')}
-                          style={{ padding: '6px 14px', background: 'var(--bg4)', border: '1px solid var(--border2)', 'border-radius': '8px', color: 'var(--text)', 'font-size': '12px', ...monoFont, 'text-decoration': 'none', display: 'flex', 'align-items': 'center', gap: '6px' }}>
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                            <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-                          </svg>
-                          ZIP
-                        </a>
-                        <Show when={!props.isReadOnly}>
-                          <label title={translate('btn_add_files_title')} onClick={e => e.stopPropagation()}
-                            style={{ padding: '6px 12px', background: 'var(--bg4)', border: '1px solid var(--border2)', 'border-radius': '8px', color: 'var(--text)', 'font-size': '12px', cursor: 'pointer', ...monoFont, display: 'flex', 'align-items': 'center', gap: '5px' }}>
-                            <input type="file" multiple style={{ display: 'none' }}
-                              onChange={e => { addFilesToVersion(fileVersion.id, e.currentTarget.files); e.currentTarget.value = '' }} />
-                            ＋ {translate('btn_add_files')}
-                          </label>
-                          <button onClick={() => setConfirmDeleteFileId(fileVersion.id)}
-                            style={{ padding: '6px 11px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '8px', color: 'var(--danger)', 'font-size': '12px', cursor: 'pointer', ...monoFont }}>✕</button>
-                        </Show>
-                      </div>
-                    </div>
+            {designFilesTab(designFilesTabDeps)}
 
-                    {/* File entries with folder structure */}
-                    <Show when={expandedVersionIds().has(fileVersion.id)}>
-                    <div style={{ padding: '9px' }}>
-                      <Show when={!fileVersion.entries || fileVersion.entries.length === 0}>
-                        <div style={{ ...sansFont, 'font-size': '13px', color: 'var(--muted)', padding: '11px', 'text-align': 'center' }}>{translate('label_no_files_recorded')}</div>
-                      </Show>
-                      {(() => {
-                        const entries = fileVersion.entries || []
-                        // Group by folder (from relative_path)
-                        const folders: Record<string, typeof entries> = {}
-                        for (const entry of entries) {
-                          const rel = (entry as any).relative_path || entry.filename
-                          const directory = rel.includes('/') ? rel.substring(0, rel.lastIndexOf('/')) : ''
-                          if (!folders[directory]) folders[directory] = []
-                          folders[directory].push(entry)
-                        }
-                        const folderKeys = Object.keys(folders).sort()
-                        return (
-                          <For each={folderKeys}>{folderKey => (
-                            <div>
-                              <Show when={folderKey !== ''}>
-                                <div
-                                  onClick={() => setCollapsedFolders(currentSet => {
-                                    const key = fileVersion.id + ':' + folderKey
-                                    const nextSet = new Set(currentSet)
-                                    if (nextSet.has(key)) nextSet.delete(key); else nextSet.add(key)
-                                    return nextSet
-                                  })}
-                                  style={{ display: 'flex', 'align-items': 'center', gap: '7px', padding: '6px 11px 4px', color: 'var(--muted)', ...monoFont, 'font-size': '12px', cursor: 'pointer', 'user-select': 'none' }}>
-                                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-                                    style={{ transform: collapsedFolders().has(fileVersion.id + ':' + folderKey) ? 'rotate(-90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}>
-                                    <polyline points="6 9 12 15 18 9"/>
-                                  </svg>
-                                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                                  {folderKey}
-                                </div>
-                              </Show>
-                              <Show when={folderKey === '' || !collapsedFolders().has(fileVersion.id + ':' + folderKey)}>
-                              <For each={folders[folderKey]}>{entry => (
-                                <div style={{ display: 'flex', 'align-items': 'center', gap: '11px', padding: '8px 11px 8px ' + (folderKey !== '' ? '28px' : '11px'), 'border-radius': '9px', background: 'transparent', 'transition': 'background 0.1s' }}
-                                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface)')}
-                                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="1.8">
-                                    <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
-                                    <polyline points="13 2 13 9 20 9"/>
-                                  </svg>
-                                  <div style={{ flex: '1', 'min-width': '0', display: 'flex', 'flex-direction': 'column', gap: '2px' }}>
-                                    <span style={{ ...sansFont, 'font-size': '13px', color: 'var(--text)', overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap' }}>{entry.filename}</span>
-                                    <Show when={entry.gcode_meta && gcodeSummary(entry.gcode_meta)}>
-                                      <span style={{ ...monoFont, 'font-size': '11px', color: 'var(--accent-light)', overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap' }}>{gcodeSummary(entry.gcode_meta!)}</span>
-                                    </Show>
-                                    <Show when={isResinFile(entry.filename)}>
-                                      <span style={{ ...monoFont, 'font-size': '10px', 'font-weight': '700', color: '#fff', background: 'rgba(124,58,237,0.85)', 'border-radius': '4px', padding: '1px 6px', 'align-self': 'flex-start' }}>{translate('label_resin')}</span>
-                                    </Show>
-                                  </div>
-                                  <span style={{ ...monoFont, 'font-size': '12px', color: 'var(--muted)', 'flex-shrink': '0' }}>{formatBytes(entry.size_bytes)}</span>
-                                  <div style={{ display: 'flex', gap: '6px', 'flex-shrink': '0' }}>
-                                    <Show when={is3dFile(entry.filename) || isGcodeFile(entry.filename) || isResinViewable(entry.filename)}>
-                                      <button title={isGcodeFile(entry.filename) ? translate('btn_view_gcode') : translate('btn_view_3d')}
-                                        onClick={() => showEntryInViewer(fileVersion.id, entry)}
-                                        onMouseDown={e => { if (e.button === 1) e.preventDefault() }}
-                                        onAuxClick={e => { if (e.button === 1) { e.preventDefault(); window.open(`${window.location.pathname}?design=${props.designId}&viewer=${fileVersion.id}-${entry.id}`, '_blank', 'noopener') } }}
-                                        style={{ padding: '5px 11px', background: 'var(--accent)', border: 'none', 'border-radius': '7px', color: '#fff', 'font-size': '11px', cursor: 'pointer', ...monoFont, 'font-weight': '600' }}>
-                                        {isGcodeFile(entry.filename) ? 'GCODE' : '3D'}
-                                      </button>
-                                    </Show>
-                                    <a href={api.entryUrl(props.designId, fileVersion.id, entry.id)} download={entry.filename} title={translate('btn_download')}
-                                      style={{ padding: '5px 9px', background: 'var(--bg4)', border: '1px solid var(--border2)', 'border-radius': '7px', color: 'var(--text)', 'font-size': '11px', ...monoFont, 'text-decoration': 'none', display: 'flex', 'align-items': 'center' }}>↓</a>
-                                    {/* Every file of an own design is deletable. Restricting this to
-                                        printer formats left models (stl, 3mf, obj) in place with no way
-                                        to remove them. */}
-                                    <Show when={!props.isReadOnly}>
-                                      <button onClick={() => deleteFileEntry(fileVersion.id, entry)} title={translate('btn_delete')}
-                                        style={{ padding: '5px 9px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '7px', color: 'var(--danger)', 'font-size': '11px', cursor: 'pointer', ...monoFont, display: 'flex', 'align-items': 'center' }}>✕</button>
-                                    </Show>
-                                  </div>
-                                </div>
-                              )}</For>
-                              </Show>
-                            </div>
-                          )}</For>
-                        )
-                      })()}
-                    </div>
-                    </Show>
-                  </div>
-                )}</For>
-
-                {/* Upload new version */}
-                <Show when={!props.isReadOnly}>
-                  <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', 'border-radius': '16px', padding: '22px' }}>
-                    <div style={{ ...monoFont, 'font-size': '11px', color: 'var(--muted)', 'text-transform': 'uppercase', 'letter-spacing': '0.08em', 'margin-bottom': '16px' }}>{translate('label_upload_new_version')}</div>
-                    <ErrorBox message={uploadError()} />
-                    <div style={{ display: 'flex', 'flex-direction': 'column', gap: '13px' }}>
-                      <div onClick={() => fileInputRef?.click()}
-                        style={{ border: `2px dashed ${uploadFileObject().length ? 'var(--accent)' : 'var(--border2)'}`, 'border-radius': '11px', padding: '22px', 'text-align': 'center', cursor: 'pointer', background: uploadFileObject().length ? 'rgba(69,123,157,0.05)' : 'transparent' }}>
-                        <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }}
-                          onChange={e => setUploadFileObject(Array.from(e.currentTarget.files ?? []))} />
-                        <Show when={uploadFileObject().length} fallback={
-                          <div style={{ ...monoFont, 'font-size': '13px', color: 'var(--muted)', display: 'flex', 'align-items': 'center', gap: '7px', 'justify-content': 'center' }}>
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                            {translate('upload_file_label')}
-                          </div>
-                        }>
-                          <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--accent)', 'font-weight': '600' }}>
-                            ✓ {uploadFileObject().length === 1
-                                ? `${uploadFileObject()[0].name} (${formatBytes(uploadFileObject()[0].size)})`
-                                : translate('label_files_selected').replace('{count}', String(uploadFileObject().length))}
-                          </div>
-                        </Show>
-                      </div>
-                      <div style={{ display: 'grid', 'grid-template-columns': '1fr 2fr', gap: '11px' }}>
-                        <div><label style={labelStyle}>{translate('field_version')} *</label><input style={inputStyle} value={uploadVersion()} onInput={e => setUploadVersion(e.currentTarget.value)} placeholder={nextVersion()} /></div>
-                        <div><label style={labelStyle}>{translate('field_notes')}</label><input style={inputStyle} value={uploadNotes()} onInput={e => setUploadNotes(e.currentTarget.value)} placeholder="optional" /></div>
-                      </div>
-                      <button onClick={uploadDesignFile} disabled={isUploading() || !uploadFileObject().length}
-                        style={{ padding: '11px', background: (isUploading() || !uploadFileObject().length) ? 'var(--bg4)' : 'var(--accent)', border: (isUploading() || !uploadFileObject().length) ? '1px solid var(--border2)' : 'none', 'border-radius': '10px', color: (isUploading() || !uploadFileObject().length) ? 'var(--muted)' : '#fff', ...sansFont, 'font-size': '14px', 'font-weight': '700', cursor: (isUploading() || !uploadFileObject().length) ? 'not-allowed' : 'pointer' }}>
-                        {isUploading() ? translate('btn_uploading') : translate('btn_upload')}
-                      </button>
-                    </div>
-                  </div>
-                </Show>
-              </div>
-            </Show>
-
-            {/* ── Print settings tab - one section per sliced file of the current version ── */}
+            {/* - Print settings tab - one section per sliced file of the current version - */}
             <Show when={activeTab() === 'gcode'}>
               <div style={{ display: 'flex', 'flex-direction': 'column', gap: '18px' }}>
                 <For each={currentPrintEntries()}>
@@ -1841,7 +1340,7 @@ export function DesignPage(props: DesignPageProps) {
               </div>
             </Show>
 
-            {/* ── Notes tab ── */}
+            {/* - Notes tab - */}
             <Show when={activeTab() === 'notes'}>
               <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', 'border-radius': '16px', padding: '22px' }}>
                 <Show when={!props.isReadOnly} fallback={
@@ -1868,98 +1367,7 @@ export function DesignPage(props: DesignPageProps) {
               </div>
             </Show>
 
-            {/* ── Share tab ── */}
-            <Show when={activeTab() === 'share'}>
-              <div style={{ display: 'flex', 'flex-direction': 'column', gap: '18px' }}>
-                <Show when={props.isReadOnly}>
-                  <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--muted)', padding: '22px' }}>{translate('share_readonly_hint')}</div>
-                </Show>
-                <Show when={!props.isReadOnly}>
-                  <div style={{ ...sansFont, 'font-size': '13px', color: 'var(--muted)' }}>{translate('share_readonly_hint')}</div>
-                  {/* Recipient picker: suggestions are selected into chips, and one
-                      share request goes out for all of them at once. Typing a name
-                      and pressing the button used to send whatever stood there,
-                      which answered a stray "a" with a success toast. */}
-                  <div style={{ position: 'relative' }}>
-                    <div style={{ display: 'flex', gap: '11px', 'align-items': 'flex-start' }}>
-                      <div onClick={() => { setShareOpen(true); loadShareUserSuggestions(shareEmailInput()) }}
-                        style={{ flex: '1', display: 'flex', 'flex-wrap': 'wrap', 'align-items': 'center', gap: '7px', ...inputStyle, height: 'auto', 'min-height': '42px', padding: '7px 11px', cursor: 'text' }}>
-                        <For each={sharePicked()}>{picked => (
-                          <span style={{ display: 'inline-flex', 'align-items': 'center', gap: '7px', background: 'var(--surface)', border: '1px solid var(--border2)', 'border-radius': '8px', padding: '4px 9px', ...sansFont, 'font-size': '13px', color: 'var(--text)' }}>
-                            {picked.name || picked.email}
-                            <button onClick={() => setSharePicked(current => current.filter(entry => entry.id !== picked.id))}
-                              style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', padding: '0', 'font-size': '13px', 'line-height': '1' }}>✕</button>
-                          </span>
-                        )}</For>
-                        <input value={shareEmailInput()} onInput={e => { setShareEmailInput(e.currentTarget.value); setShareOpen(true); loadShareUserSuggestions(e.currentTarget.value) }}
-                          placeholder={sharePicked().length === 0 ? translate('share_search_placeholder') : ''}
-                          onFocus={() => { setShareOpen(true); loadShareUserSuggestions(shareEmailInput()) }}
-                          onBlur={() => setTimeout(() => setShareOpen(false), 150)}
-                          onKeyDown={(e: KeyboardEvent) => {
-                            if (e.key === 'Enter' && shareUserSuggestions().length > 0) { e.preventDefault(); pickShareUser(shareUserSuggestions()[0]) }
-                            else if (e.key === 'Escape') setShareOpen(false)
-                            else if (e.key === 'Backspace' && !shareEmailInput()) setSharePicked(current => current.slice(0, -1))
-                          }}
-                          style={{ flex: '1', 'min-width': '140px', background: 'none', border: 'none', outline: 'none', color: 'var(--text)', ...sansFont, 'font-size': '14px' }} />
-                      </div>
-                      <button onClick={shareWithUsers} disabled={isSharing() || sharePicked().length === 0}
-                        style={{ padding: '10px 20px', background: 'var(--accent)', border: 'none', 'border-radius': '10px', color: '#fff', ...sansFont, 'font-size': '14px', 'font-weight': '600', cursor: 'pointer', opacity: (sharePicked().length === 0 || isSharing()) ? '0.5' : '1', 'flex-shrink': '0' }}>
-                        {isSharing() ? '…' : translate('share_add_btn')}
-                      </button>
-                    </div>
-                    <Show when={shareOpen() && shareUserSuggestions().length > 0}>
-                      <div style={{ position: 'absolute', top: 'calc(100% + 6px)', left: '0', right: '0', background: 'var(--bg2)', 'border-radius': '12px', border: '1px solid var(--border)', 'box-shadow': '0 8px 24px rgba(0,0,0,0.3)', 'z-index': '50', padding: '6px', 'max-height': '200px', 'overflow-y': 'auto' }}>
-                        <For each={shareUserSuggestions()}>{u => (
-                          <button onMouseDown={e => e.preventDefault()} onClick={() => pickShareUser(u)}
-                            style={{ width: '100%', padding: '9px 13px', background: 'none', border: 'none', 'border-radius': '8px', color: 'var(--text)', ...sansFont, 'font-size': '13px', cursor: 'pointer', 'text-align': 'left', display: 'flex', 'align-items': 'center', gap: '10px' }}
-                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface)')}
-                            onMouseLeave={e => (e.currentTarget.style.background = 'none')}>
-                            <div style={{ width: '32px', height: '32px', 'border-radius': '50%', background: 'var(--accent)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'font-size': '13px', 'font-weight': '700', color: '#fff', 'flex-shrink': '0' }}>
-                              {(u.name || u.email)[0].toUpperCase()}
-                            </div>
-                            <div>
-                              <div style={{ 'font-weight': '600', color: 'var(--text)' }}>{u.name}</div>
-                              <div style={{ 'font-size': '12px', color: 'var(--muted)', ...monoFont }}>{u.email}</div>
-                            </div>
-                          </button>
-                        )}</For>
-                      </div>
-                    </Show>
-                  </div>
-                  <Show when={!design()?.shares || design()!.shares!.length === 0}>
-                    <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--muted)', 'text-align': 'center', padding: '22px' }}>{translate('share_empty')}</div>
-                  </Show>
-                  <ShareLinkSection
-                    links={shareLinks()}
-                    days={linkDays()}
-                    onDays={setLinkDays}
-                    creating={creatingLink()}
-                    copiedToken={copiedToken()}
-                    onCreate={createShareLink}
-                    onCopy={copyShareLink}
-                    onDelete={deleteShareLink}
-                    translate={translate}
-                    formatDate={stamp => formatDate(stamp, lang())}
-                  />
-
-                  <For each={design()!.shares || []}>{shareEntry => (
-                    <div style={{ display: 'flex', 'align-items': 'center', gap: '13px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '11px', padding: '11px 15px' }}>
-                      <div style={{ width: '40px', height: '40px', 'border-radius': '50%', background: 'var(--accent)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'font-size': '16px', 'font-weight': '700', color: '#fff', 'flex-shrink': '0' }}>
-                        {shareEntry.shared_with_name?.[0]?.toUpperCase() || '?'}
-                      </div>
-                      <div style={{ flex: '1' }}>
-                        <div style={{ ...sansFont, 'font-size': '14px', 'font-weight': '600', color: 'var(--text)' }}>{shareEntry.shared_with_name}</div>
-                        <div style={{ ...monoFont, 'font-size': '12px', color: 'var(--muted)' }}>{shareEntry.shared_with_email}</div>
-                      </div>
-                      <button onClick={() => unshareUser(shareEntry.id)}
-                        style={{ padding: '6px 13px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '8px', color: 'var(--danger)', 'font-size': '12px', cursor: 'pointer', ...sansFont }}>
-                        {translate('btn_remove')}
-                      </button>
-                    </div>
-                  )}</For>
-                </Show>
-              </div>
-            </Show>
+            {designShareTab(designShareTabDeps)}
           </div>
         </Show>
       }>

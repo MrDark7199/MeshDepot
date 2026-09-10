@@ -1,12 +1,10 @@
-// Package translate is a translation service based on the unofficial Google
-// Translate endpoint
+// Package translate uses the unofficial Google Translate endpoint
 // (translate.googleapis.com, client=gtx) - free, without an API key.
 //
-// It translates design texts (name/description) into canonical English (in the
-// designs row) plus display variants per language in design_translations. HTML
-// descriptions are translated text node by text node so the markup stays
-// unchanged. Every failure returns false/nil instead of throwing - translation
-// must never interrupt download/sync/save.
+// It translates design texts into canonical English in the designs row plus
+// display variants in design_translations. HTML descriptions are translated text
+// node by text node so the markup stays unchanged. Every failure returns
+// false/nil: translation must never interrupt a download or save.
 package translate
 
 import (
@@ -29,18 +27,16 @@ const (
 	requestTimeout      = 20 * time.Second
 	batchCharLimit      = 4000
 	defaultRequestPause = 200 * time.Millisecond
-	// maxTranslateResponseBytes bounds the reply. Requests are capped at
-	// batchCharLimit, so anything larger is not a translation.
+	// Requests are capped at batchCharLimit, so anything larger is not a translation.
 	maxTranslateResponseBytes = 8 << 20
 )
 
-// displayTargets are the display languages additionally stored in
-// design_translations (Google code => enum value).
+// displayTargets are the display languages stored in design_translations
+// (Google code => enum value).
 var displayTargets = []struct{ google, language string }{{"de", "de"}}
 
-// Service wraps the translation service. Endpoint, client and pause are fields
-// rather than constants so the request path can be exercised against a local
-// test server instead of the live Google endpoint.
+// Service wraps the translation service. Endpoint, client and pause are fields so
+// the request path can be exercised against a local test server.
 type Service struct {
 	DB           *sql.DB
 	endpoint     string
@@ -57,7 +53,6 @@ func New(db *sql.DB) *Service {
 	}
 }
 
-// Enabled reports whether automatic translation is active in app_settings.
 func (service *Service) Enabled() bool {
 	var value string
 	if failure := service.DB.QueryRow("SELECT value FROM app_settings WHERE key='translation_enabled'").Scan(&value); failure != nil {
@@ -66,7 +61,7 @@ func (service *Service) Enabled() bool {
 	return value == "1"
 }
 
-// requestBatch translates plaintext strings in input order (a single batch).
+// requestBatch translates plaintext strings in input order, as one batch.
 func (service *Service) requestBatch(texts []string, targetLanguage string) ([]string, bool) {
 	if len(texts) == 0 {
 		return []string{}, true
@@ -117,8 +112,8 @@ func (service *Service) requestBatch(texts []string, targetLanguage string) ([]s
 	return outputs, true
 }
 
-// splitLongText breaks a long text into pieces below batchCharLimit (preferably
-// at line breaks, then sentence ends, otherwise a hard UTF-8-safe cut).
+// splitLongText breaks a text into pieces below batchCharLimit, preferably at
+// line breaks, then sentence ends, otherwise a UTF-8-safe hard cut.
 func splitLongText(text string) []string {
 	if len(text) <= batchCharLimit {
 		return []string{text}
@@ -152,7 +147,7 @@ func splitLongText(text string) []string {
 	return chunks
 }
 
-// translateTextList translates plaintext strings in size-limited batches.
+// translateTextList translates in size-limited batches.
 func (service *Service) translateTextList(texts []string, targetLanguage string) ([]string, bool) {
 	var chunks []string
 	var owners []int
@@ -184,8 +179,7 @@ func (service *Service) translateTextList(texts []string, targetLanguage string)
 	return results, true
 }
 
-// translate translates a list into a target language. HTML inputs keep their
-// markup (node by node), plaintext is translated directly.
+// translate keeps the markup of HTML inputs, node by node.
 func (service *Service) translate(texts []string, targetLanguage string) ([]string, bool) {
 	if len(texts) == 0 {
 		return []string{}, true
@@ -209,7 +203,6 @@ func (service *Service) translate(texts []string, targetLanguage string) ([]stri
 	return outputs, true
 }
 
-// looksLikeHTML roughly detects whether a text contains HTML markup.
 func looksLikeHTML(text string) bool {
 	for index := 0; index+1 < len(text); index++ {
 		if text[index] == '<' {
@@ -222,8 +215,7 @@ func looksLikeHTML(text string) bool {
 	return false
 }
 
-// translateHTML translates only the text nodes of an HTML fragment and keeps the
-// markup (x/net/html instead of DOMDocument).
+// translateHTML translates only the text nodes and keeps the markup.
 func (service *Service) translateHTML(htmlFragment, targetLanguage string) (string, bool) {
 	document, failure := nethtml.Parse(strings.NewReader(`<html><body><div id="__wrap__">` + htmlFragment + `</div></body></html>`))
 	if failure != nil {
@@ -276,7 +268,6 @@ func (service *Service) translateHTML(htmlFragment, targetLanguage string) (stri
 	return builder.String(), true
 }
 
-// findByID searches the tree for the element with the given id.
 func findByID(node *nethtml.Node, id string) *nethtml.Node {
 	if node.Type == nethtml.ElementNode {
 		for _, attribute := range node.Attr {
@@ -293,7 +284,6 @@ func findByID(node *nethtml.Node, id string) *nethtml.Node {
 	return nil
 }
 
-// upsertRow writes a design_translations row (unique per design/field/language).
 func (service *Service) upsertRow(designID int, field, language, content string) {
 	dbutil.ExecLogged(service.DB,
 		`INSERT INTO design_translations (design_id, field, lang, content) VALUES (?,?,?,?)
@@ -301,10 +291,8 @@ func (service *Service) upsertRow(designID int, field, language, content string)
 		designID, field, language, content)
 }
 
-// OriginalOf returns the stored original text (lang='original') of a design
-// field, or "" if none exists. Counterpart to GoogleTranslator::originalOf -
-// used during sync to detect whether the source text changed and needs
-// re-translation.
+// OriginalOf returns the stored original text of a design field, or "". The sync
+// uses it to detect whether the source text changed.
 func (service *Service) OriginalOf(designID int, field string) string {
 	var value string
 	if failure := service.DB.QueryRow(
@@ -316,16 +304,14 @@ func (service *Service) OriginalOf(designID int, field string) string {
 	return value
 }
 
-// deleteDisplayRows removes the display-language rows of a design.
 func (service *Service) deleteDisplayRows(designID int) {
 	for _, target := range displayTargets {
 		dbutil.ExecLogged(service.DB, "DELETE FROM design_translations WHERE design_id=? AND lang=?", designID, target.language)
 	}
 }
 
-// ApplyToDesign is the complete translation pipeline for a design.
-// storeOriginal=true persists the inputs as 'original' rows (platform
-// downloads/syncs), false for edits.
+// ApplyToDesign is the complete translation pipeline. storeOriginal=true persists
+// the inputs as 'original' rows, which is what downloads and syncs want.
 func (service *Service) ApplyToDesign(designID int, name string, description *string, storeOriginal bool) bool {
 	if !service.Enabled() {
 		return false
@@ -370,7 +356,6 @@ func (service *Service) ApplyToDesign(designID int, name string, description *st
 	return true
 }
 
-// truncateRunes shortens a string to at most maxRunes runes.
 func truncateRunes(value string, maxRunes int) string {
 	if utf8.RuneCountInString(value) <= maxRunes {
 		return value

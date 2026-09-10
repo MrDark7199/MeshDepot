@@ -23,25 +23,20 @@ import (
 	"meshdepot/internal/translate"
 )
 
-// Translation fragments: expose the German display translations as
-// name_de/description_de next to the canonical fields (designs alias d).
+// Translation fragments: the German display translations as name_de and
+// description_de next to the canonical fields (designs alias d).
 const translationSelect = `, tr_name_de.content AS name_de, tr_desc_de.content AS description_de`
 
 const translationJoin = `
 	LEFT JOIN design_translations tr_name_de ON tr_name_de.design_id = d.id AND tr_name_de.field = 'name' AND tr_name_de.lang = 'de'
 	LEFT JOIN design_translations tr_desc_de ON tr_desc_de.design_id = d.id AND tr_desc_de.field = 'description' AND tr_desc_de.lang = 'de'`
 
-// maxTagFilters caps how many tag ids the filter accepts - each one adds a
-// self-join to the query.
+// maxTagFilters caps the tag ids the filter accepts - each adds a self-join.
 const maxTagFilters = 20
 
-// designID resolves the design path parameter - the outward public id - to the
-// internal designs.id. ok=false => a response (404 or 500) was written.
-//
-// Nothing outside the process knows the rowid. It is sequential, so a link to
-// design 70 told its reader that 1..69 exist and invited them to walk the
-// neighbours; every one of those tries was answered with a 404, but the shape
-// of the library leaked all the same.
+// designID resolves the outward public id to designs.id; ok=false means a 404 or
+// 500 was written. The rowid never leaves the process: it is sequential, so a
+// link to design 70 told its reader that 1..69 exist.
 func (server *Server) designID(responseWriter http.ResponseWriter, request *http.Request, name string) (int, bool) {
 	id, found, failure := publicid.ResolveIn(server.DB, "designs", request.PathValue(name))
 	if failure != nil {
@@ -55,11 +50,9 @@ func (server *Server) designID(responseWriter http.ResponseWriter, request *http
 	return id, true
 }
 
-// requireOwnership loads a design and checks ownership. ok=false => a
-// response (500 or 404) was written.
-//
-// A design that exists but belongs to someone else is answered with 404, not
-// 403: a 403 would confirm the id exists.
+// requireOwnership loads a design and checks ownership; ok=false means a
+// response was written. A design belonging to someone else is answered with 404
+// rather than 403, which would confirm the id exists.
 func (server *Server) requireOwnership(responseWriter http.ResponseWriter, designID, currentUserID int) (designRow, bool) {
 	design, found, failure := loadDesign(server.DB, designID)
 	if failure != nil {
@@ -73,7 +66,7 @@ func (server *Server) requireOwnership(responseWriter http.ResponseWriter, desig
 	return design, true
 }
 
-// DesignsIndex returns visible designs (own + shared) with filters, pagination
+// DesignsIndex returns visible designs (own and shared) with filters, pagination
 // and attached tags.
 func (server *Server) DesignsIndex(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
@@ -88,8 +81,8 @@ func (server *Server) DesignsIndex(responseWriter http.ResponseWriter, request *
 	page := max(1, queryInt(request, "page", 1))
 	perPage := min(1000, max(1, queryInt(request, "per_page", 50)))
 	offset := (page - 1) * perPage
-	// Sorting is applied globally (before the pagination), otherwise each page
-	// would be an independently sorted updated_at window.
+	// Applied globally, before the pagination, or each page would be an
+	// independently sorted updated_at window.
 	sortField := queryStr(request, "sort", "updated_at")
 	if sortField != "name" && sortField != "platform" && sortField != "updated_at" {
 		sortField = "updated_at"
@@ -106,9 +99,8 @@ func (server *Server) DesignsIndex(responseWriter http.ResponseWriter, request *
 		JOIN users u ON u.id = ds.owner_user_id
 		LEFT JOIN design_files df ON df.design_id = d.id AND df.is_current = 1` + translationJoin
 
-	// Sorting and pagination happen in SQL. Loading every visible design into
-	// memory to sort and slice it there meant 10.000 rows were materialized to
-	// serve a page of 50.
+	// Sorting and pagination happen in SQL: doing it in memory materialized 10.000
+	// rows to serve a page of 50.
 	orderClause := " ORDER BY " + sortColumn(sortField) + " " + strings.ToUpper(sortDir) + ", id DESC"
 
 	if sharedOnly {
@@ -144,9 +136,8 @@ func (server *Server) DesignsIndex(responseWriter http.ResponseWriter, request *
 		args = append(args, platform)
 	}
 	// Every tag id becomes its own JOIN (AND semantics). Only validated ints are
-	// interpolated, and the count is capped: an unparsable id used to silently
-	// become tag_id = 0 (empty result instead of a 422), and ?tag_ids=1,1,1,…
-	// built an arbitrarily large self-join.
+	// interpolated and the count is capped: an unparsable id silently became
+	// tag_id = 0, and ?tag_ids=1,1,1,… built an arbitrarily large self-join.
 	tagJoin := ""
 	if tagIDsParam != "" {
 		rawIDs := strings.Split(tagIDsParam, ",")
@@ -170,13 +161,11 @@ func (server *Server) DesignsIndex(responseWriter http.ResponseWriter, request *
 		LEFT JOIN design_files df ON df.design_id = d.id AND df.is_current = 1` + translationJoin + tagJoin +
 		" WHERE " + whereClause
 
-	// since_id is gone with the numeric ids: it filtered by rowid, and no client
-	// is told a rowid any more, so nothing could supply a meaningful value. The
-	// frontend already reloads the page it is on instead.
+	// since_id is gone with the numeric ids: it filtered by rowid, which no client
+	// is told any more.
 	sharedWhere := "ds.shared_with_user_id = ?"
 	sharedArgs := []any{currentUserID}
-	// Own and shared designs as one result set, so the database can sort and
-	// paginate across both.
+	// One result set, so the database can sort and paginate across both.
 	unionQuery := ownQuery + " UNION ALL " + sharedSelect + " WHERE " + sharedWhere
 	unionArgs := append(append([]any{}, args...), sharedArgs...)
 
@@ -196,8 +185,8 @@ func (server *Server) DesignsIndex(responseWriter http.ResponseWriter, request *
 	httpx.Success(responseWriter, map[string]any{"items": pagedDesigns, "total": total})
 }
 
-// sortColumn maps the sort parameter to the column of the result set. Names are
-// compared case-insensitively, as the previous in-memory sort did.
+// sortColumn maps the sort parameter to a column, comparing names
+// case-insensitively as the previous in-memory sort did.
 func sortColumn(sortField string) string {
 	switch sortField {
 	case "name":
@@ -209,7 +198,6 @@ func sortColumn(sortField string) string {
 	}
 }
 
-// DesignsShow returns a design with tags, images and (for the owner) shares.
 func (server *Server) DesignsShow(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "id")
@@ -236,6 +224,12 @@ func (server *Server) DesignsShow(responseWriter http.ResponseWriter, request *h
 	design["tags"] = tags
 	images, _ := dbutil.QueryMaps(server.DB, "SELECT * FROM design_images WHERE design_id = ? ORDER BY sort_order ASC, created_at ASC", designID)
 	design["images"] = images
+	design["sync_blocked_reason"] = ""
+	if coerce.StringOr(design["source_url"], "") != "" && coerce.Int(design["user_id"]) == currentUserID {
+		if ok, reason := server.platformCredsOK(coerce.StringOr(design["source_platform"], ""), currentUserID); !ok {
+			design["sync_blocked_reason"] = reason
+		}
+	}
 	if coerce.Int(design["user_id"]) == currentUserID {
 		shares, _ := dbutil.QueryMaps(server.DB, `
 			SELECT ds.id, ds.shared_with_user_id, u.name AS shared_with_name,
@@ -257,7 +251,7 @@ func (server *Server) DesignsStore(responseWriter http.ResponseWriter, request *
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.name_required")
 		return
 	}
-	// Checked on the way in as well as on update - a design created with a dead
+	// Checked on the way in as well as on update: a design created with a dead
 	// source url is one the sync can never resolve.
 	sourceURL, ok := normalizeSourceURL(coerce.StringOr(body["source_url"], ""))
 	if !ok {
@@ -283,7 +277,6 @@ func (server *Server) DesignsStore(responseWriter http.ResponseWriter, request *
 	httpx.SuccessStatus(responseWriter, http.StatusCreated, row, "Design created")
 }
 
-// designUpdatable are the fields changeable via update.
 var designUpdatable = []string{"name", "description", "source_url", "source_platform", "source_id", "category", "license", "author", "rating", "print_time_minutes", "notes", "is_hidden"}
 var designIntFields = map[string]bool{"rating": true, "print_time_minutes": true, "is_hidden": true}
 
@@ -291,18 +284,11 @@ var designIntFields = map[string]bool{"rating": true, "print_time_minutes": true
 // hyphen at either end.
 var hostLabel = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
 
-// normalizeSourceURL validates the source url and returns what should be
-// stored. An empty value is kept (the field is optional).
-//
-// The column feeds the link in the UI and the sync, so the value has to be a
-// reachable address rather than merely something url.Parse accepts: "http://a"
-// parses fine and has a host, but there is no such site, and the design it
-// belongs to can never be resolved. A registrable name is therefore required -
-// at least two labels with a letters-only tld, or a literal IP.
-//
-// The scheme may be left out. Nobody types "https://" in front of an address
-// they copied, and refusing "printables.com/model/1" for that reason is a rule
-// the user has to learn from an error message; it is prefixed instead.
+// normalizeSourceURL validates the source url and returns what should be stored;
+// an empty value is kept. The column feeds the link in the UI and the sync, so
+// merely parsing is not enough - "http://a" has a host and no such site exists.
+// A registrable name is required: two labels with a letters-only tld, or an IP.
+// The scheme may be left out and is prefixed rather than refused.
 func normalizeSourceURL(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -321,7 +307,6 @@ func normalizeSourceURL(raw string) (string, bool) {
 	return parsed.String(), true
 }
 
-// validHostname reports whether the host part is one a browser could resolve.
 func validHostname(host string) bool {
 	if host == "" {
 		return false
@@ -338,8 +323,8 @@ func validHostname(host string) bool {
 			return false
 		}
 	}
-	// The tld carries no digits or hyphens, which is what separates a real
-	// address from a typo like "http://afeefafefefaffefef".
+	// The tld carries no digits or hyphens, which is what separates a real address
+	// from a typo like "http://afeefafefefaffefef".
 	tld := labels[len(labels)-1]
 	if len(tld) < 2 {
 		return false
@@ -354,8 +339,7 @@ func validHostname(host string) bool {
 	return true
 }
 
-// DesignsUpdate changes existing fields of a design. Note: the re-translation
-// (GoogleTranslator) is carried over in the service port.
+// DesignsUpdate changes existing fields of a design.
 func (server *Server) DesignsUpdate(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "id")
@@ -399,9 +383,9 @@ func (server *Server) DesignsUpdate(responseWriter http.ResponseWriter, request 
 		}
 	}
 
-	// Changed name/description: re-translate into canonical EN + display languages
-	// (storeOriginal=false so platform originals stay preserved for the sync).
-	// Fail-safe: endpoint down → input stays saved.
+	// Re-translate into canonical EN plus the display languages; storeOriginal=false
+	// keeps the platform originals for the sync. A dead endpoint leaves the input
+	// saved rather than failing the update.
 	if _, hasName := body["name"]; hasName || hasKey(body, "description") {
 		var name string
 		var description sql.NullString
@@ -416,13 +400,11 @@ func (server *Server) DesignsUpdate(responseWriter http.ResponseWriter, request 
 	httpx.SuccessMessage(responseWriter, nil, "Updated")
 }
 
-// hasKey checks whether a key is present in the JSON body.
 func hasKey(body map[string]any, key string) bool {
 	_, ok := body[key]
 	return ok
 }
 
-// DesignsDestroy deletes a design incl. its STL directory.
 func (server *Server) DesignsDestroy(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "id")
@@ -436,15 +418,14 @@ func (server *Server) DesignsDestroy(responseWriter http.ResponseWriter, request
 	// design, and nothing would connect it to its blobs afterwards.
 	released := entriesToRelease(server.DB, "df.design_id = ?", designID)
 
-	// Remember the source before the row is gone, so the library sync does not
-	// hand the design straight back on its next run.
+	// Remembered before the row is gone, so the library sync does not hand the
+	// design straight back on its next run.
 	if request.URL.Query().Get("exclude_from_sync") == "1" {
 		server.excludeDesignFromSync(designID, currentUserID)
 	}
 
 	// The row first, the files after: a directory removed up front would be gone
-	// even if the delete failed, leaving a design that lists files it no longer
-	// has.
+	// even if the delete failed.
 	if _, failure := server.DB.Exec("DELETE FROM designs WHERE id = ?", designID); failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 		return
@@ -455,9 +436,8 @@ func (server *Server) DesignsDestroy(responseWriter http.ResponseWriter, request
 	httpx.SuccessMessage(responseWriter, nil, "Deleted")
 }
 
-// excludeDesignFromSync notes the platform origin of a design so the library
-// sync skips it from now on. A design without an origin (uploaded by hand) has
-// nothing the sync could bring back, so there is nothing to note.
+// excludeDesignFromSync notes a design's platform origin so the library sync
+// skips it. A design uploaded by hand has no origin and nothing to note.
 func (server *Server) excludeDesignFromSync(designID, currentUserID int) {
 	row, found, failure := dbutil.QueryMap(server.DB,
 		"SELECT source_platform, source_id, source_url FROM designs WHERE id = ? AND user_id = ?",
@@ -476,7 +456,6 @@ func (server *Server) excludeDesignFromSync(designID, currentUserID int) {
 		currentUserID, platform, sourceID, sourceURL)
 }
 
-// DesignsSync puts a design into the sync_queue.
 func (server *Server) DesignsSync(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "id")
@@ -491,7 +470,12 @@ func (server *Server) DesignsSync(responseWriter http.ResponseWriter, request *h
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.no_source_url")
 		return
 	}
-	// A failed probe is reported instead of enqueueing a second job for the same
+	// The same check the download queue makes, before anything is queued.
+	if ok, reason := server.platformCredsOK(design.SourcePlatform, currentUserID); !ok {
+		httpx.Error(responseWriter, http.StatusUnprocessableEntity, reason)
+		return
+	}
+	// A failed probe is reported rather than enqueueing a second job for the same
 	// design: sync_queue has no unique constraint.
 	_, alreadyQueued, failure := dbutil.QueryMap(server.DB, "SELECT id FROM sync_queue WHERE design_id = ? AND status IN ('pending','running') LIMIT 1", designID)
 	if failure != nil {
@@ -509,8 +493,8 @@ func (server *Server) DesignsSync(responseWriter http.ResponseWriter, request *h
 	httpx.SuccessMessage(responseWriter, map[string]any{"design_id": request.PathValue("id"), "status": "queued"}, "Sync queued")
 }
 
-// DesignsDuplicates finds possible duplicates via source_url and name similarity.
-// Note: SQLite has no SOUNDEX - therefore only a LIKE prefix match (instead of SOUNDEX).
+// DesignsDuplicates finds possible duplicates by source_url and name. SQLite has
+// no SOUNDEX, so the name match is a LIKE prefix.
 func (server *Server) DesignsDuplicates(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "id")
@@ -522,9 +506,8 @@ func (server *Server) DesignsDuplicates(responseWriter http.ResponseWriter, requ
 		return
 	}
 	duplicates := []map[string]any{}
-	// Keyed by the public id the rows now carry. The design itself is already
-	// excluded by both queries; what this guards is a candidate that matches on
-	// the url as well as on the name.
+	// Keyed by public id. The design itself is excluded by both queries; this guards
+	// a candidate matching on the url as well as on the name.
 	seen := map[string]bool{}
 	collect := func(rows []map[string]any) {
 		for _, candidate := range rows {
@@ -547,16 +530,14 @@ func (server *Server) DesignsDuplicates(responseWriter http.ResponseWriter, requ
 	httpx.Success(responseWriter, duplicates)
 }
 
-// DesignCollections returns the collections a design belongs to.
 func (server *Server) DesignCollections(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "id")
 	if !ok {
 		return
 	}
-	// The read-only view on a design hides hidden collections; the edit form asks
-	// for them with include_hidden so a design already in a hidden collection can
-	// still be seen and removed there.
+	// The read-only view hides hidden collections; the edit form asks with
+	// include_hidden, so a design already in one can still be removed from it.
 	hiddenClause := "AND c.is_hidden = 0"
 	if request.URL.Query().Get("include_hidden") == "1" {
 		hiddenClause = ""
@@ -569,7 +550,6 @@ func (server *Server) DesignCollections(responseWriter http.ResponseWriter, requ
 	httpx.Success(responseWriter, rows)
 }
 
-// platformPatterns maps platform -> source-ID regex.
 var platformPatterns = map[string]*regexp.Regexp{
 	"thingiverse": regexp.MustCompile(`(?i)(?:thing[:\-/])(\d+)`),
 	"printables":  regexp.MustCompile(`model/(\d+)`),
@@ -577,7 +557,6 @@ var platformPatterns = map[string]*regexp.Regexp{
 	"thangs":      regexp.MustCompile(`(?i)(?:model|3dmodel)/(\d+)`),
 }
 
-// DesignsCheckUrl checks whether a design already exists for a platform URL.
 func (server *Server) DesignsCheckUrl(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	sourceURL := strings.TrimSpace(queryStr(request, "url", ""))
@@ -604,9 +583,8 @@ func (server *Server) DesignsCheckUrl(responseWriter http.ResponseWriter, reques
 	httpx.Success(responseWriter, map[string]any{"exists": found, "design": design})
 }
 
-// detectPlatform recognizes the platform from the URL's hostname. Delegates to
-// platforms.DetectPlatform so both layers share the same host-anchored logic
-// (a substring match would be an SSRF vector - see the note there).
+// detectPlatform delegates to platforms.DetectPlatform, so both layers share the
+// same host-anchored logic - a substring match would be an SSRF vector.
 func detectPlatform(url string) string {
 	return platforms.DetectPlatform(url)
 }
@@ -616,7 +594,6 @@ var cults3dIDPattern = regexp.MustCompile(`/3d-model/.*?-(\d+)(?:[/?#]|$)`)
 var myMiniFactoryObjectPattern = regexp.MustCompile(`(?i)myminifactory\.com/object/([^/?#]+)`)
 var trailingIDPattern = regexp.MustCompile(`-(\d+)$`)
 
-// extractSourceID extracts the source ID per platform.
 func extractSourceID(platform, url string) string {
 	switch platform {
 	case "cults3d":
@@ -645,7 +622,6 @@ func extractSourceID(platform, url string) string {
 	}
 }
 
-// attachTags attaches a tags array to each design.
 func (server *Server) attachTags(designs []map[string]any, currentUserID int) {
 	if len(designs) == 0 {
 		return
@@ -678,7 +654,6 @@ func (server *Server) attachTags(designs []map[string]any, currentUserID int) {
 	}
 }
 
-// DesignsFetchCover loads a cover image from the source platform and stores it locally.
 func (server *Server) DesignsFetchCover(responseWriter http.ResponseWriter, request *http.Request) {
 	currentUserID := userID(request)
 	designID, ok := server.designID(responseWriter, request, "id")
@@ -705,7 +680,7 @@ func (server *Server) DesignsFetchCover(responseWriter http.ResponseWriter, requ
 	httpx.Success(responseWriter, map[string]any{"cover_path": coverPath})
 }
 
-// downloadCover fetches the cover (Thingiverse REST / Printables GraphQL) and
+// downloadCover fetches the cover (Thingiverse REST, Printables GraphQL) and
 // stores it as the design's cover.{ext}.
 func (server *Server) downloadCover(url, platform string, owner platforms.Owner, designID int) string {
 	imageURL := ""
@@ -739,7 +714,6 @@ func (server *Server) downloadCover(url, platform string, owner platforms.Owner,
 	return owner.Layout.Rel(destination)
 }
 
-// httpGet reads a URL (with headers) as a string.
 func httpGet(url string, headers map[string]string) string {
 	return string(httpDo(url, "GET", "", headers))
 }
@@ -750,12 +724,11 @@ func httpPostJSON(url, body string) string {
 	return string(httpDo(url, "POST", body, map[string]string{"Content-Type": "application/json"}))
 }
 
-// outboundClient is used for the metadata/cover fetches below. These run
-// synchronously inside HTTP handlers, so they need a deadline: a platform server
-// that accepts the connection and then stalls would otherwise block the handler
-// goroutine forever (io.LimitReader bounds the size, not the time). It is a
-// dedicated client on purpose - setting a Timeout on http.DefaultClient would
-// silently change the behaviour of every other user of the process-wide default.
+// outboundClient serves the metadata and cover fetches below. They run inside
+// HTTP handlers, so they need a deadline: a platform that accepts the connection
+// and then stalls would block the handler goroutine forever, and io.LimitReader
+// bounds the size rather than the time. A dedicated client, because a Timeout on
+// http.DefaultClient would change every other user of the process-wide default.
 var outboundClient = &http.Client{Timeout: 30 * time.Second}
 
 func httpDo(url, method, body string, headers map[string]string) []byte {

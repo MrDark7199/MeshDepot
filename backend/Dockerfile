@@ -8,7 +8,7 @@
 # Chromium can break downloads that used to work).
 # Refresh a digest with:  docker manifest inspect -v <image>:<tag> | grep -m1 digest
 #
-# ── 1. Build the frontend (Solid.js + Vite) ──────────────────────────────────
+# - 1. Build the frontend (Solid.js + Vite) -----------------
 FROM node:20-alpine@sha256:afdf98210b07b586eb71fa22ba2e432e058e4cd1304d31ed60888755b8c865fb AS frontend
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
@@ -19,7 +19,7 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-# ── 2. Build the Go binary (frontend is embedded via go:embed) ───────────────
+# - 2. Build the Go binary (frontend is embedded via go:embed) --------
 FROM golang:1.23-alpine@sha256:a7ecaac5efda22510d8c903bdc6b19026543f1eac3317d47363680df22161bd8 AS gobuild
 WORKDIR /src
 COPY backend/go.mod backend/go.sum ./
@@ -29,7 +29,7 @@ COPY backend/ ./
 COPY --from=frontend /app/dist ./internal/webui/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /meshdepot ./cmd/app
 
-# ── 3. Runtime: Playwright/Ubuntu + Firefox (resolver) + Chromium (rod) + Tor ─
+# - 3. Runtime: Playwright/Ubuntu + Firefox (resolver) + Chromium (rod) + Tor -
 #
 # The base is deliberately the Playwright image and no longer Alpine: the
 # Firefox resolver (stage 4 below) needs Playwright's *patched* Firefox build,
@@ -52,7 +52,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update \
  && useradd -u 10001 -r -g meshdepot -m -d /home/meshdepot meshdepot \
  && mkdir -p /data \
  && chown -R meshdepot:meshdepot /data /home/meshdepot
-# ── Fonts ───────────────────────────────────────────────────────────────────
+# - Fonts ----------------------------------
 # The base image ships Liberation, which fontconfig already aliases for Arial,
 # Times New Roman and Courier New - those three resolve correctly and are
 # metric-compatible. Everything else a Windows UA implies did NOT resolve:
@@ -103,7 +103,7 @@ RUN cd /tmp/msttcorefonts \
 RUN ln -s "$(ls -d /ms-playwright/chromium-*/chrome-linux/chrome | head -1)" /usr/local/bin/chromium \
  && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 
-# ── 4. Firefox resolver (formerly its own sidecar container) ─────────────────
+# - 4. Firefox resolver (formerly its own sidecar container) ---------
 # Node service that resolves the Cloudflare-gated MyMiniFactory download URLs
 # with Firefox. Formerly a separate container; now part of this image, and the
 # app no longer starts without it (health check in cmd/app/main.go).
