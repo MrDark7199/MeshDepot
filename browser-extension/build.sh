@@ -15,6 +15,8 @@ for target in firefox chrome; do
     rm -rf "$target"
     mkdir -p "$target"
     cp shared/*.js shared/*.html "$target"/
+    mkdir -p "$target/icons"
+    cp shared/icons/*.png "$target/icons"/
     cp "manifest.$target.json" "$target/manifest.json"
 done
 

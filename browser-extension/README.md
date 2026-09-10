@@ -347,3 +347,30 @@ The payload reports the split as `captured_count` and `requested_count`.
   for that reason.
 - A design imported this way has no platform account behind it, so the nightly
   library sync cannot check it for updates.
+
+## Publishing
+
+`./package.sh` assembles both directories and writes `dist/meshdepot-importer-firefox.zip`
+and `dist/meshdepot-importer-chrome.zip`. The manifest sits at the root of each
+archive, which is what both stores expect.
+
+Firefox goes to addons.mozilla.org, listed channel. Since November 2025 a new
+add-on is refused at upload unless `browser_specific_settings.gecko.data_collection_permissions`
+is declared; ours says `websiteContent`, because the page's title, description,
+pictures and tags do leave the browser. `strict_min_version` is 128 rather than
+115: `optional_host_permissions`, the way the extension reaches a self-hosted
+address, exists from that version on. Reviewers cannot test anything without a
+MeshDepot instance, so the submission needs an address and an API key in the
+notes, or the review stalls.
+
+Chrome goes to the Web Store developer dashboard, which costs a one-time five
+dollars per account. Two things differ from Mozilla: the privacy policy has to
+be reachable at a URL rather than pasted in, so [PRIVACY.md](PRIVACY.md) needs a
+public address, and every permission is justified in its own field under
+*Privacy practices*. The 440x280 tile the listing asks for is in
+[store/](store/). Chromium has no store of its own - builds that talk to the
+Chrome Web Store install the same item, the others load `chrome/` unpacked.
+
+The extension ID is fixed at `importer@meshdepot` for Firefox and cannot be
+changed after the first upload; Chrome assigns its own. Neither store accepts
+the same version number twice.

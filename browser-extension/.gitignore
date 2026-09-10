@@ -3,3 +3,6 @@
 # a merge deciding which copy is the real one.
 /firefox/
 /chrome/
+
+# Built by package.sh for the two stores.
+/dist/
