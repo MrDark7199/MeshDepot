@@ -37,6 +37,7 @@
        button and the message under it stay on screen together. */
     #settingsView label { margin: 12px 0 4px; }
     #settingsView .hint { margin-top: 4px; }
+    #extensionVersion { text-align: right; }
     #settingsView .toggle-row { margin-top: 14px; }
     #settingsView .actions { margin-top: 16px; }
     body.in-tab .page { max-width: 520px; margin: 0 auto; padding: 24px; }
@@ -183,9 +184,11 @@
       <button class="primary" id="save">Save</button>
     </div>
     <div id="status"></div>
+    <div class="hint" id="extensionVersion"></div>
   </section>
 
 </div>
+<script src="compat.js"></script>
 <script src="platforms.js"></script>
 <script src="options.js"></script>
 </body>

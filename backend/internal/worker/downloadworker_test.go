@@ -35,7 +35,7 @@ func TestIsSoftRateLimitCoversEverySignature(t *testing.T) {
 }
 
 // A captcha is "try again later", not a failure: the job stays pending and
-// retry_count is untouched, so it is never burned after maxRetries.
+// retry_count is untouched, so it is never burned after MaxRetries.
 func TestSoftRateLimitKeepsJobPendingWithoutBurningRetries(t *testing.T) {
 	database := newTestDB(t)
 	id := enqueue(t, database, "makerworld")
@@ -44,7 +44,7 @@ func TestSoftRateLimitKeepsJobPendingWithoutBurningRetries(t *testing.T) {
 		return 0, errors.New("error.makerworld_captcha")
 	}, func(string) int { return 0 })
 
-	for round := 0; round < maxRetries+2; round++ {
+	for round := 0; round < MaxRetries+2; round++ {
 		downloadWorker.RunOnce()
 		status, retry, _ := statusOf(t, database, id)
 		if status != "pending" {

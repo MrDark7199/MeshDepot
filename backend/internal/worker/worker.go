@@ -23,7 +23,9 @@ import (
 
 const tickInterval = 2 * time.Second
 
-const maxRetries = 3
+// MaxRetries is how often a job is tried before it counts as failed. Exported
+// because the queue display names the attempt.
+const MaxRetries = 3
 
 const stuckTimeout = 15 * time.Minute
 
@@ -70,7 +72,7 @@ func isPermanent(message string) bool {
 }
 
 // softRateLimitErrors are temporary rate limits and captchas - "try again
-// later" rather than a failure. Such jobs are never burned after maxRetries;
+// later" rather than a failure. Such jobs are never burned after MaxRetries;
 // they stay pending and are retried, spaced out, until they succeed.
 var softRateLimitErrors = []string{
 	"error.makerworld_captcha",
@@ -255,14 +257,14 @@ func (downloadWorker *DownloadWorker) process(job Job) {
 		designID, failure = result.designID, result.failure
 	case <-time.After(procTimeout):
 		downloadWorker.markCooldown(job.Platform) // block the platform from now on (hang = overload/block)
-		final := job.RetryCount+1 >= maxRetries
+		final := job.RetryCount+1 >= MaxRetries
 		suffix := "will be retried"
 		if final {
 			suffix = "marked as permanently failed"
 		}
 		logx.Errorf("[worker] Job #%d (%s): download TIMEOUT after %s - aborted so the "+
 			"queue keeps running (hanging browser/network?). URL=%s attempt %d/%d, %s.",
-			job.ID, job.Platform, procTimeout, job.SourceURL, job.RetryCount+1, maxRetries, suffix)
+			job.ID, job.Platform, procTimeout, job.SourceURL, job.RetryCount+1, MaxRetries, suffix)
 		if final {
 			dbutil.ExecLogged(downloadWorker.DB, "UPDATE download_queue SET status='failed', error_msg='error.timeout', done_at=CURRENT_TIMESTAMP WHERE id=?", job.ID)
 			downloadWorker.notifyFailed(job, "error.timeout")
@@ -288,7 +290,7 @@ func (downloadWorker *DownloadWorker) process(job Job) {
 			dbutil.ExecLogged(downloadWorker.DB, "UPDATE download_queue SET status='pending', started_at=NULL, error_msg=? WHERE id=?", failure.Error(), job.ID)
 			return
 		}
-		final := isPermanent(failure.Error()) || job.RetryCount+1 >= maxRetries
+		final := isPermanent(failure.Error()) || job.RetryCount+1 >= MaxRetries
 		downloadWorker.logFailure(job, failure, final)
 		if final {
 			dbutil.ExecLogged(downloadWorker.DB, "UPDATE download_queue SET status='failed', error_msg=?, done_at=CURRENT_TIMESTAMP WHERE id=?", failure.Error(), job.ID)
@@ -391,14 +393,14 @@ func (downloadWorker *DownloadWorker) logFailure(job Job, failure error, final b
 	case errors.As(failure, &downloadError) && downloadError.Stage == platforms.StageMetadata:
 		logx.Errorf("[worker] Job #%d (%s): model metadata could NOT be loaded "+
 			"- no info (name etc.) was found at all. URL=%s attempt %d/%d, %s. Detail: %v",
-			job.ID, job.Platform, job.SourceURL, attempt, maxRetries, suffix, failure)
+			job.ID, job.Platform, job.SourceURL, attempt, MaxRetries, suffix, failure)
 	case errors.As(failure, &downloadError) && downloadError.Stage == platforms.StageFiles:
 		logx.Errorf("[worker] Job #%d (%s): model found, but the FILES could NOT "+
 			"be downloaded. URL=%s attempt %d/%d, %s. Detail: %v",
-			job.ID, job.Platform, job.SourceURL, attempt, maxRetries, suffix, failure)
+			job.ID, job.Platform, job.SourceURL, attempt, MaxRetries, suffix, failure)
 	default:
 		logx.Errorf("[worker] Job #%d (%s): download failed. URL=%s attempt %d/%d, %s. Detail: %v",
-			job.ID, job.Platform, job.SourceURL, attempt, maxRetries, suffix, failure)
+			job.ID, job.Platform, job.SourceURL, attempt, MaxRetries, suffix, failure)
 	}
 }
 
@@ -406,9 +408,9 @@ func (downloadWorker *DownloadWorker) logFailure(job Job, failure error, final b
 func (downloadWorker *DownloadWorker) ResetStuck() {
 	cutoff := time.Now().Add(-stuckTimeout).UTC().Format("2006-01-02 15:04:05")
 	dbutil.ExecLogged(downloadWorker.DB, `UPDATE download_queue SET status='pending', retry_count=retry_count+1
-		WHERE status='downloading' AND (started_at IS NULL OR started_at < ?) AND retry_count < ?`, cutoff, maxRetries)
+		WHERE status='downloading' AND (started_at IS NULL OR started_at < ?) AND retry_count < ?`, cutoff, MaxRetries)
 	dbutil.ExecLogged(downloadWorker.DB, `UPDATE download_queue SET status='failed', error_msg='error.timeout', done_at=CURRENT_TIMESTAMP
-		WHERE status='downloading' AND (started_at IS NULL OR started_at < ?) AND retry_count >= ?`, cutoff, maxRetries)
+		WHERE status='downloading' AND (started_at IS NULL OR started_at < ?) AND retry_count >= ?`, cutoff, MaxRetries)
 }
 
 // claimNext claims the next processable job atomically, respecting cooldown.

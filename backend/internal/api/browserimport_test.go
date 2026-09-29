@@ -90,7 +90,10 @@ func TestBrowserImportRefusesAnUnsupportedURL(t *testing.T) {
 	}
 }
 
-func TestBrowserImportReportsADuplicate(t *testing.T) {
+// A model already in the library is no longer refused: its files are offered to
+// the newest version. A dead link still fails, which is what this asserts - the
+// point is that it is not turned away as a duplicate before anything is tried.
+func TestBrowserImportOffersFilesToAnExistingDesign(t *testing.T) {
 	testHarness := newHarness(t)
 	key := testHarness.withKey()
 	const sourceURL = "https://makerworld.com/en/models/4242"
@@ -102,8 +105,8 @@ func TestBrowserImportReportsADuplicate(t *testing.T) {
 		"source_url": sourceURL,
 		"files":      []map[string]any{{"url": "https://example.invalid/a.3mf"}},
 	})
-	if answer.status != http.StatusConflict {
-		t.Fatalf("a duplicate answered %d: %s", answer.status, answer.rawBody)
+	if answer.status == http.StatusConflict {
+		t.Fatalf("the model was turned away as a duplicate: %s", answer.rawBody)
 	}
 }
 

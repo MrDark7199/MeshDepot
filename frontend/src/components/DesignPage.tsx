@@ -8,9 +8,11 @@ import { is3dFile } from '../utils/meshTools'
 import { displayName, displayDescription } from '../utils/designText'
 import { formatDate, formatDateTime } from '../utils/datetime'
 import { ToggleSwitch } from './ToggleSwitch'
+import { UploadFilesModal } from './design/UploadFilesModal'
 import { escapeHtml } from '../utils/sanitizeHtml'
+import { parseChoices, serialiseChoices } from '../utils/customFieldValue'
 import { errorKey } from '../utils/errorMessage'
-import type { Design, DesignFile, DesignFileEntry, DesignID, DesignImage, Tag, Collection, DesignShare, GcodeMeta, ShareLink } from '../types'
+import type { CustomField, Design, DesignFile, DesignFileEntry, DesignID, DesignImage, Tag, Collection, DesignShare, GcodeMeta, ShareLink } from '../types'
 import { PLATFORM_COLORS, platformLabel } from '../constants/platforms'
 import { buildDescriptionFragment, descriptionCss } from '../utils/description'
 import { browserHandlesClick, gridHref } from '../utils/navlink'
@@ -168,7 +170,12 @@ export function DesignPage(props: DesignPageProps) {
 
   const editState = () => JSON.stringify({ form: editForm(), tags: selectedTagIds(), cols: designCollectionIds(), cover: pendingCoverId(), del: pendingDeleteImageIds() })
 
+  const customFields = () => (design()?.custom_fields ?? []) as CustomField[]
+
   const enterEditMode = () => {
+    setCustomValues(Object.fromEntries(customFields()
+      .filter(field => field.present)
+      .map(field => [String(field.id), field.value ?? ''])))
     setPendingCoverId(null)
     setPendingDeleteImageIds([])
     editSnapshot = editState()
@@ -199,6 +206,14 @@ export function DesignPage(props: DesignPageProps) {
   })
 
   const [confirmDeleteFileId, setConfirmDeleteFileId] = createSignal<number | null>(null)
+  const [uploadVersionOpen, setUploadVersionOpen] = createSignal(false)
+  // The fields this design carries while editing, keyed by field id as a string -
+  // which is how they travel to the server as well. A field missing from here is
+  // taken off the design; that is why it is the complete set rather than a patch.
+  const [customValues, setCustomValues] = createSignal<Record<string, string>>({})
+  const [addFilesToVersionId, setAddFilesToVersionId] = createSignal<number | null>(null)
+  const [pendingFileEntryDelete, setPendingFileEntryDelete] =
+    createSignal<{ fileVersionId: number; entry: DesignFileEntry } | null>(null)
 
   const [collapsedFolders, setCollapsedFolders] = createSignal<Set<string>>(new Set())
   // Which file-version cards are expanded. Newest (current) is expanded by default.
@@ -622,7 +637,7 @@ export function DesignPage(props: DesignPageProps) {
     if (sourceUrl === null) { setErrorMessage(translate('error.invalid_url')); return }
     setIsSaving(true); setErrorMessage('')
     try {
-      await api.updateDesign(props.designId, { ...editForm(), source_url: sourceUrl })
+      await api.updateDesign(props.designId, { ...editForm(), source_url: sourceUrl, custom_values: customValues() })
       await api.setDesignTags(props.designId, selectedTagIds())
       // Staged image deletions (Galerie) - only now removed on the server.
       const toDelete = pendingDeleteImageIds()
@@ -700,7 +715,8 @@ export function DesignPage(props: DesignPageProps) {
   }
 
   /** Uploads the selected archive file as a new file version. */
-  const uploadDesignFile = async () => {
+  const uploadDesignFile = async (files?: File[]) => {
+    if (files) setUploadFileObject(files)
     if (uploadFileObject().length === 0) { setUploadError(translate('validation.file_required')); return }
     const version = uploadVersion().trim()
     // Numbers only (a decimal is fine), and not a version that already exists.
@@ -716,6 +732,7 @@ export function DesignPage(props: DesignPageProps) {
       props.showToast(translate('toast_file_uploaded'))
       setUploadFileObject([]); setUploadVersion(''); setUploadNotes('')
       if (fileInputRef) fileInputRef.value = ''
+      setUploadVersionOpen(false)
       loadFiles() // belegt uploadVersion neu mit nextVersion()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'error.internal'
@@ -724,13 +741,14 @@ export function DesignPage(props: DesignPageProps) {
   }
 
   /** Appends one or more files to an existing version. */
-  const addFilesToVersion = async (fileVersionId: number, files: FileList | null) => {
-    if (!files || files.length === 0) return
+  const addFilesToVersion = async (fileVersionId: number, files: File[]) => {
+    if (files.length === 0) return
     try {
       const formData = new FormData()
-      for (const f of Array.from(files)) formData.append('file', f)
+      for (const f of files) formData.append('file', f)
       await api.addEntries(props.designId, fileVersionId, formData)
       props.showToast(translate('toast_file_uploaded'))
+      setAddFilesToVersionId(null)
       loadFiles()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'error.internal'
@@ -738,9 +756,13 @@ export function DesignPage(props: DesignPageProps) {
     }
   }
 
-  /** Deletes a single file from a version, after asking. */
-  const deleteFileEntry = async (fileVersionId: number, entry: DesignFileEntry) => {
-    if (!confirm(translate('confirm_delete_file').replace('{name}', entry.filename))) return
+  /** Asks first: the modal calls performFileEntryDelete once it is confirmed. */
+  const deleteFileEntry = (fileVersionId: number, entry: DesignFileEntry) => {
+    setPendingFileEntryDelete({ fileVersionId, entry })
+  }
+
+  const performFileEntryDelete = async (fileVersionId: number, entry: DesignFileEntry) => {
+    setPendingFileEntryDelete(null)
     try {
       await api.deleteFileEntry(props.designId, fileVersionId, entry.id)
       props.showToast(translate('toast_file_deleted'))
@@ -849,6 +871,7 @@ export function DesignPage(props: DesignPageProps) {
 
   const designBreadcrumbDeps: DesignBreadcrumbDeps = {
     props, translate, user, design, shownName, isLoading, isEditing, enterEditMode, exitEditMode,
+    openUploadVersion: () => { setUploadError(''); setUploadVersionOpen(true) },
     guardClose, setConfirmDelete, startSyncStream,
   }
 
@@ -856,11 +879,9 @@ export function DesignPage(props: DesignPageProps) {
 
   const designFilesTabDeps: DesignFilesTabDeps = {
     props, translate, lang, user, design, activeTab, fileVersions, isLoadingFiles, expandedVersionIds,
-    setExpandedVersionIds, collapsedFolders, setCollapsedFolders, nextVersion, uploadVersion,
-    setUploadVersion, uploadNotes, setUploadNotes, uploadFileObject, setUploadFileObject, uploadError,
-    isUploading, uploadDesignFile, addFilesToVersion, deleteFileEntry, setConfirmDeleteFileId,
-    showEntryInViewer, isGcodeFile, isResinFile, isResinViewable, gcodeSummary, setFileInputRef,
-    fileInputRef: () => fileInputRef,
+    setExpandedVersionIds, collapsedFolders, setCollapsedFolders, deleteFileEntry, setConfirmDeleteFileId,
+    openAddFiles: (fileVersionId: number) => setAddFilesToVersionId(fileVersionId),
+    showEntryInViewer, isGcodeFile, isResinFile, isResinViewable, gcodeSummary,
   }
 
   const designShareTabDeps: DesignShareTabDeps = {
@@ -1072,21 +1093,6 @@ export function DesignPage(props: DesignPageProps) {
                   ))}
                 </div>
 
-                {/* Tags (read-only display when not editing) */}
-                <div>
-                  <div style={labelStyle}>{translate('label_tags')}</div>
-                  <div style={{ display: 'flex', 'flex-wrap': 'wrap', gap: '7px' }}>
-                    <Show when={(!design()?.tags || design()!.tags!.length === 0)}>
-                      <span style={{ 'font-size': '13px', color: 'var(--muted)', 'font-style': 'italic' }}>{translate('label_no_tags')}</span>
-                    </Show>
-                    <For each={design()!.tags || []}>{tag => (
-                      <span style={{ 'font-size': '12px', padding: '4px 11px', 'border-radius': '7px', background: tag.color + '33', color: tag.color, ...sansFont, 'font-weight': '600' }}>
-                        {tag.name}
-                      </span>
-                    )}</For>
-                  </div>
-                </div>
-
                 {/* Collections - read-only display only. Edit via the edit form. */}
                 <div>
                   <div style={labelStyle}>{translate('collection_title')}</div>
@@ -1123,6 +1129,45 @@ export function DesignPage(props: DesignPageProps) {
                     </a>
                   </div>
                 </Show>
+
+                {/* Tags (read-only display when not editing) */}
+                <div>
+                  <div style={labelStyle}>{translate('label_tags')}</div>
+                  <div style={{ display: 'flex', 'flex-wrap': 'wrap', gap: '7px' }}>
+                    <Show when={(!design()?.tags || design()!.tags!.length === 0)}>
+                      <span style={{ 'font-size': '13px', color: 'var(--muted)', 'font-style': 'italic' }}>{translate('label_no_tags')}</span>
+                    </Show>
+                    <For each={design()!.tags || []}>{tag => (
+                      <span style={{ 'font-size': '12px', padding: '4px 11px', 'border-radius': '7px', background: tag.color + '33', color: tag.color, ...sansFont, 'font-weight': '600' }}>
+                        {tag.name}
+                      </span>
+                    )}</For>
+                  </div>
+                </div>
+                {/* Fields of the reader's own, at the end of the panel. Hidden when
+                    none has a value, so a design without them looks as before. */}
+                <Show when={customFields().some(field => field.present)}>
+                  <div style={{ 'border-top': '1px solid var(--border)', 'padding-top': '16px' }}>
+                    <div style={{ ...monoFont, 'font-size': '11px', color: 'var(--muted)', 'text-transform': 'uppercase', 'letter-spacing': '0.08em', 'margin-bottom': '12px' }}>
+                      {translate('section_custom_fields')}
+                    </div>
+                    <div style={{ display: 'grid', 'grid-template-columns': '1fr 1fr', gap: '12px' }}>
+                      <For each={customFields().filter(field => field.present)}>{field => (
+                        <div style={{ 'grid-column': (field.value ?? '').length > 28 ? '1 / -1' : 'auto' }}>
+                          <div style={labelStyle}>{field.name}</div>
+                          <div style={{ ...sansFont, 'font-size': '13px', color: 'var(--text2)', 'word-break': 'break-word' }}>
+                            {field.field_type === 'boolean'
+                              ? translate(field.value === '1' || field.value === 'true' ? 'label_yes' : 'label_no')
+                              : field.field_type === 'multiselect'
+                                ? (parseChoices(field.value).join(', ') || '-')
+                                : (field.value || '-')}
+                          </div>
+                        </div>
+                      )}</For>
+                    </div>
+                  </div>
+                </Show>
+
               </div>
             </div>
 
@@ -1261,6 +1306,103 @@ export function DesignPage(props: DesignPageProps) {
                   </div>
                 </div>
 
+                {/* The user's own fields, and only the ones put on this design: a field
+                    that is not here is not on the design at all, so a yes/no does not
+                    read as "no" on everything ever defined. */}
+                <Show when={customFields().length > 0}>
+                  <div style={{ 'grid-column': '1 / -1', 'border-top': '1px solid var(--border)', 'padding-top': '18px', 'margin-top': '20px' }}>
+                    <div style={{ ...monoFont, 'font-size': '11px', color: 'var(--muted)', 'text-transform': 'uppercase', 'letter-spacing': '0.08em', 'margin-bottom': '14px' }}>
+                      {translate('section_custom_fields')}
+                    </div>
+                    <div style={{ display: 'flex', 'flex-direction': 'column', gap: '14px' }}>
+                      <For each={customFields().filter(field => String(field.id) in customValues())}>{field => {
+                        const value = () => customValues()[String(field.id)] ?? ''
+                        const set = (next: string) =>
+                          setCustomValues(current => ({ ...current, [String(field.id)]: next }))
+                        const drop = () => setCustomValues(current => {
+                          const { [String(field.id)]: _removed, ...rest } = current
+                          return rest
+                        })
+                        return (
+                          <div>
+                            <div style={{ display: 'flex', 'align-items': 'center', 'justify-content': 'space-between', gap: '10px' }}>
+                              <label style={labelStyle}>{field.name}</label>
+                              <button onClick={drop} title={translate('custom_field_remove_hint')}
+                                style={{ padding: '3px 10px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '7px', color: 'var(--danger)', 'font-size': '11px', cursor: 'pointer', ...sansFont, 'margin-bottom': '6px' }}>
+                                {translate('btn_delete')}
+                              </button>
+                            </div>
+                            <Show when={field.field_type === 'multiselect'}>
+                              <div style={{ display: 'flex', 'flex-wrap': 'wrap', gap: '8px' }}>
+                                <For each={field.options ?? []}>{choice => {
+                                  const picked = () => parseChoices(value()).includes(choice)
+                                  return (
+                                    <button onClick={() => {
+                                      const current = parseChoices(value())
+                                      set(serialiseChoices(picked()
+                                        ? current.filter(entry => entry !== choice)
+                                        : [...current, choice]))
+                                    }}
+                                      style={{ padding: '5px 12px', 'border-radius': '8px', border: `1px solid ${picked() ? 'var(--accent)' : 'var(--border2)'}`, background: picked() ? 'rgba(69,123,157,0.18)' : 'var(--surface)', color: picked() ? 'var(--accent-light)' : 'var(--muted)', 'font-size': '12px', cursor: 'pointer', ...sansFont, 'font-weight': picked() ? '600' : '400' }}>
+                                      {choice}
+                                    </button>
+                                  )
+                                }}</For>
+                              </div>
+                            </Show>
+                            <Show when={field.field_type !== 'multiselect'}>
+                            <Show when={field.field_type === 'select'} fallback={
+                              <Show when={field.field_type === 'boolean'} fallback={
+                                <input style={inputStyle}
+                                  type={field.field_type === 'int' || field.field_type === 'float' ? 'number' : 'text'}
+                                  step={field.field_type === 'float' ? 'any' : '1'}
+                                  placeholder={translate(`custom_field_type_${field.field_type}` as any)}
+                                  value={value()} onInput={event => set(event.currentTarget.value)} />
+                              }>
+                                <div style={{ display: 'flex', 'align-items': 'center', gap: '10px', 'padding-top': '2px' }}>
+                                  <ToggleSwitch checked={value() === '1'} onChange={on => set(on ? '1' : '0')} />
+                                  <span style={{ ...sansFont, 'font-size': '13px', color: 'var(--text2)' }}>
+                                    {translate(value() === '1' ? 'label_yes' : 'label_no')}
+                                  </span>
+                                </div>
+                              </Show>
+                            }>
+                              <select style={inputStyle} value={value()} onChange={event => set(event.currentTarget.value)}>
+                                <option value="">-</option>
+                                <For each={field.options ?? []}>{choice => (
+                                  <option value={choice}>{choice}</option>
+                                )}</For>
+                              </select>
+                            </Show>
+                            </Show>
+                          </div>
+                        )
+                      }}</For>
+
+                      <Show when={customFields().some(field => !(String(field.id) in customValues()))}>
+                        <select style={{ ...inputStyle, 'align-self': 'flex-start', width: 'auto', 'min-width': '220px' }}
+                          value=""
+                          onChange={event => {
+                            const chosen = customFields().find(field => String(field.id) === event.currentTarget.value)
+                            event.currentTarget.value = ''
+                            if (!chosen) return
+                            // A yes/no starts at no, which is a value like any other now that
+                            // the field is deliberately on this design.
+                            setCustomValues(current => ({
+                              ...current,
+                              [String(chosen.id)]: chosen.field_type === 'boolean' ? '0' : '',
+                            }))
+                          }}>
+                          <option value="">＋ {translate('custom_field_add_to_design')}</option>
+                          <For each={customFields().filter(field => !(String(field.id) in customValues()))}>{field => (
+                            <option value={String(field.id)}>{field.name}</option>
+                          )}</For>
+                        </select>
+                      </Show>
+                    </div>
+                  </div>
+                </Show>
+
                 {/* Edit actions */}
                 <div style={{ display: 'flex', gap: '11px', 'margin-top': '20px', 'justify-content': 'flex-end', 'align-items': 'center' }}>
                   <button onClick={() => guardClose(exitEditMode)}
@@ -1271,6 +1413,27 @@ export function DesignPage(props: DesignPageProps) {
                     style={{ padding: '9px 26px', background: isSaving() ? 'var(--bg4)' : 'var(--accent)', border: 'none', 'border-radius': '10px', color: '#fff', ...sansFont, 'font-size': '14px', 'font-weight': '700', cursor: isSaving() ? 'not-allowed' : 'pointer' }}>
                     {isSaving() ? translate('btn_saving') : translate('btn_save')}
                   </button>
+                </div>
+              </div>
+            </Show>
+
+            {/* A note is written to be seen again; behind a tab it was not. */}
+            <Show when={design()?.notes?.trim()}>
+              <div onClick={() => setActiveTab('notes')}
+                style={{ display: 'flex', gap: '11px', 'align-items': 'flex-start', padding: '13px 16px', 'margin-bottom': '20px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-left': '3px solid var(--accent)', 'border-radius': '10px', cursor: 'pointer' }}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round" style={{ 'flex-shrink': '0', 'margin-top': '2px' }}>
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/>
+                  <line x1="8" y1="17" x2="13" y2="17"/>
+                </svg>
+                <div style={{ 'min-width': '0' }}>
+                  <div style={{ ...sansFont, 'font-size': '11px', 'font-weight': '700', color: 'var(--muted)', 'letter-spacing': '0.04em', 'text-transform': 'uppercase', 'margin-bottom': '3px' }}>
+                    {translate('tab_notes')}
+                  </div>
+                  <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--text2)', 'line-height': '1.6', 'white-space': 'pre-wrap', display: '-webkit-box', '-webkit-line-clamp': '3', '-webkit-box-orient': 'vertical', overflow: 'hidden' }}>
+                    {design()!.notes}
+                  </div>
                 </div>
               </div>
             </Show>
@@ -1487,6 +1650,55 @@ export function DesignPage(props: DesignPageProps) {
       </Show>
 
       {/* Gallery image delete confirmation modal (staged - applied on Save) */}
+      <Show when={pendingFileEntryDelete()}>
+        {pending => (
+          <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.65)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'z-index': '600', 'backdrop-filter': 'blur(5px)' }}
+            onClick={() => setPendingFileEntryDelete(null)}>
+            <div onClick={e => e.stopPropagation()}
+              style={{ background: 'var(--bg2)', 'border-radius': '18px', padding: '28px 32px', width: '420px', border: '1px solid var(--border)', 'box-shadow': '0 24px 64px rgba(0,0,0,0.5)' }}>
+              <div style={{ ...sansFont, 'font-size': '18px', 'font-weight': '700', color: 'var(--text)', 'margin-bottom': '10px' }}>{translate('btn_delete')}</div>
+              <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--text2)', 'margin-bottom': '24px', 'line-height': '1.6', 'word-break': 'break-word' }}>
+                {translate('confirm_delete_file').replace('{name}', pending().entry.filename)}
+              </div>
+              <div style={{ display: 'flex', gap: '11px', 'justify-content': 'flex-end' }}>
+                <button onClick={() => setPendingFileEntryDelete(null)}
+                  style={{ padding: '9px 20px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '10px', color: 'var(--muted)', 'font-size': '14px', cursor: 'pointer', ...sansFont }}>
+                  {translate('btn_cancel')}
+                </button>
+                <button onClick={() => performFileEntryDelete(pending().fileVersionId, pending().entry)}
+                  style={{ padding: '9px 20px', background: 'var(--danger-bg)', border: '1px solid var(--danger)', 'border-radius': '10px', color: 'var(--danger)', 'font-size': '14px', 'font-weight': '700', cursor: 'pointer', ...sansFont }}>
+                  {translate('btn_confirm_delete')}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={uploadVersionOpen()}>
+        <UploadFilesModal
+          title={translate('label_upload_new_version')}
+          withVersionFields
+          version={uploadVersion()}
+          onVersionInput={setUploadVersion}
+          versionPlaceholder={nextVersion()}
+          notes={uploadNotes()}
+          onNotesInput={setUploadNotes}
+          error={uploadError()}
+          busy={isUploading()}
+          onClose={() => setUploadVersionOpen(false)}
+          onSubmit={files => uploadDesignFile(files)} />
+      </Show>
+
+      <Show when={addFilesToVersionId() !== null}>
+        <UploadFilesModal
+          title={translate('title_add_files_to_version')}
+          takenNames={(fileVersions().find(version => version.id === addFilesToVersionId())?.entries ?? [])
+            .map(entry => entry.filename)}
+          onClose={() => setAddFilesToVersionId(null)}
+          onSubmit={files => addFilesToVersion(addFilesToVersionId()!, files)} />
+      </Show>
+
       <Show when={confirmDeleteImageId() !== null}>
         <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.65)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'z-index': '600', 'backdrop-filter': 'blur(5px)' }}
           onClick={() => setConfirmDeleteImageId(null)}>

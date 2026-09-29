@@ -75,7 +75,7 @@ func TestTransientRetry(t *testing.T) {
 	if status != "pending" || retry != 1 {
 		t.Fatalf("expected pending/retry=1, got %s/%d", status, retry)
 	}
-	// After maxRetries-1 more failed attempts -> failed.
+	// After MaxRetries-1 more failed attempts -> failed.
 	downloadWorker.RunOnce() // retry 1->2 (pending)
 	downloadWorker.RunOnce() // retry 2 -> failed (2+1>=3)
 	status, _, _ = statusOf(t, database, id)

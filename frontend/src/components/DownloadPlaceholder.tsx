@@ -4,6 +4,7 @@ import { PLATFORM_COLORS, PLATFORM_LABELS } from '../constants/platforms'
 import { useI18n } from '../i18n/index'
 import { Show, on } from 'solid-js'
 import type { DownloadJob } from '../types'
+import { queueLabel } from '../utils/queueStatus'
 import { isAuthErrorMessage, makeTranslateError } from '../utils/authError'
 import { GRADIENTS } from '../utils/designDisplay'
 
@@ -16,7 +17,7 @@ export function DownloadPlaceholderCard(props: { job: DownloadJob; onCancel: () 
   const isFailed = () => props.job.status === 'failed'
   const isActive = () => props.job.status === 'downloading'
   const stepLabel = () => {
-    if (!isActive()) return translate('download_status_queued')
+    if (!isActive()) return queueLabel(props.job, translate)
     const step = props.job.current_step as string | null | undefined
     if (!step) return translate('download_status_downloading')
     const label = translate(`download_step_${step}` as any)
@@ -46,7 +47,7 @@ export function DownloadPlaceholderCard(props: { job: DownloadJob; onCancel: () 
       </div>
       <div style={{ padding:'14px 16px 16px' }}>
         <div style={{ 'font-family':"'DM Sans',sans-serif", 'font-size':'13px', 'font-weight':'600', color: isFailed() ? 'var(--danger)' : 'var(--muted)', 'margin-bottom':'5px' }}>
-          {isFailed() ? translate('download_status_failed') : isActive() ? translate('download_status_downloading') : translate('download_status_queued')}
+          {isFailed() ? translate('download_status_failed') : isActive() ? translate('download_status_downloading') : queueLabel(props.job, translate)}
         </div>
         <div style={{ 'font-family':"'DM Mono',monospace", 'font-size':'10px', color:'var(--muted)', 'white-space':'nowrap', overflow:'hidden', 'text-overflow':'ellipsis', 'margin-bottom': isFailed() ? '10px' : '0' }}>
           <Show when={props.job.source_url} fallback={<span>-</span>}>
@@ -91,7 +92,7 @@ export function DownloadPlaceholderRow(props: { job: DownloadJob; onCancel: () =
   const isFailed = () => props.job.status === 'failed'
   const isActive = () => props.job.status === 'downloading'
   const stepLabel = () => {
-    if (!isActive()) return translate('download_status_queued')
+    if (!isActive()) return queueLabel(props.job, translate)
     const step = props.job.current_step as string | null | undefined
     if (!step) return translate('download_status_downloading')
     const label = translate(`download_step_${step}` as any)
@@ -126,7 +127,7 @@ export function DownloadPlaceholderRow(props: { job: DownloadJob; onCancel: () =
           </span>
           <span style={{ 'font-family':"'DM Sans',sans-serif", 'font-size':'12px', 'font-weight':'600',
             color: isFailed() ? 'var(--danger)' : 'var(--muted)' }}>
-            {isFailed() ? translate('download_status_failed') : isActive() ? stepLabel() : translate('download_status_queued')}
+            {isFailed() ? translate('download_status_failed') : isActive() ? stepLabel() : queueLabel(props.job, translate)}
           </span>
         </div>
         <div style={{ 'font-family':"'DM Mono',monospace", 'font-size':'11px', color:'var(--muted)', overflow:'hidden', 'text-overflow':'ellipsis', 'white-space':'nowrap' }}>

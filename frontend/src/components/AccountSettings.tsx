@@ -6,6 +6,7 @@ import type { User } from '../types'
 import { useUnsavedChanges, markDirty } from '../utils/unsavedChanges'
 import { TabAccount } from './account/TabAccount'
 import { TabApiKeys } from './account/TabApiKeys'
+import { TabCustomFields } from './account/TabCustomFields'
 import { TabPassword } from './account/TabPassword'
 import { TabAppearance } from './account/TabAppearance'
 import { TabStats } from './account/TabStats'
@@ -44,6 +45,7 @@ export function AccountSettingsModal(props: AccountSettingsModalProps) {
     { key: 'notifications', label: translate('section_notifications') },
     { key: 'sync',          label: translate('section_sync') },
     { key: 'sharelinks',    label: translate('section_share_links') },
+    { key: 'customfields',  label: translate('section_custom_fields') },
     { key: 'apikeys',       label: translate('section_api_keys') },
   ])
 
@@ -82,6 +84,7 @@ export function AccountSettingsModal(props: AccountSettingsModalProps) {
           <Show when={tab() === 'notifications'}> <TabNotifications user={props.user} translate={translate} /></Show>
           <Show when={tab() === 'sync'}>          <TabSync user={props.user} translate={translate} showToast={props.showToast} /></Show>
           <Show when={tab() === 'sharelinks'}>    <TabShareLinks user={props.user} translate={translate} showToast={props.showToast} /></Show>
+          <Show when={tab() === 'customfields'}>  <TabCustomFields translate={translate} showToast={props.showToast} /></Show>
           <Show when={tab() === 'apikeys'}>       <TabApiKeys translate={translate} showToast={props.showToast} /></Show>
         </div>
         </div>

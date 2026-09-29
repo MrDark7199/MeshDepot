@@ -48,6 +48,11 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("GET /api/v1/designs/{id}/collections", server.Auth.Require(http.HandlerFunc(server.DesignCollections)))
 
 	// - Collections (session-protected) -
+	mux.Handle("GET /api/v1/custom-fields", server.Auth.Require(http.HandlerFunc(server.CustomFieldsList)))
+	mux.Handle("POST /api/v1/custom-fields", server.Auth.Require(http.HandlerFunc(server.CustomFieldsCreate)))
+	mux.Handle("PUT /api/v1/custom-fields/{id}", server.Auth.Require(http.HandlerFunc(server.CustomFieldsUpdate)))
+	mux.Handle("DELETE /api/v1/custom-fields/{id}", server.Auth.Require(http.HandlerFunc(server.CustomFieldsDelete)))
+
 	mux.Handle("GET /api/v1/collections", server.Auth.Require(http.HandlerFunc(server.CollectionsIndex)))
 	mux.Handle("POST /api/v1/collections", server.Auth.Require(http.HandlerFunc(server.CollectionsStore)))
 	mux.Handle("PUT /api/v1/collections/{id}", server.Auth.Require(http.HandlerFunc(server.CollectionsUpdate)))

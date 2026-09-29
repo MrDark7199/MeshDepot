@@ -61,6 +61,10 @@ type BrowserImportRequest struct {
 	ImageURLs []string
 	Tags      []string
 	Files     []BrowserImportFile
+	// AttachToDesignID adds the files to that design's newest version instead of
+	// creating a design. Set when the model is already in the library - see
+	// AddFilesToCurrentVersion.
+	AttachToDesignID int
 }
 
 // BrowserImportOutcome is what the caller reports back to the extension.
@@ -233,6 +237,19 @@ func finishBrowserImport(database *sql.DB, owner Owner, request BrowserImportReq
 		return BrowserImportOutcome{SkippedURL: skipped}, errors.New(
 			"error.browser_import_no_files:None of the files could be downloaded. " +
 				"The links may have expired, or the platform may only hand them to the browser that asked.")
+	}
+
+	// The model is in the library already: its files join the newest version, and
+	// nothing below applies - name, pictures and tags belong to the design and are
+	// stored. Creating a design is untouched by this.
+	if request.AttachToDesignID > 0 {
+		added, failure := AddFilesToCurrentVersion(database, owner, request.AttachToDesignID, files)
+		if failure != nil {
+			return BrowserImportOutcome{SkippedURL: skipped}, failure
+		}
+		return BrowserImportOutcome{
+			DesignID: request.AttachToDesignID, FileCount: added, SkippedURL: skipped,
+		}, nil
 	}
 
 	enrichFromPlatform(&request)

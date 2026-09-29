@@ -1,4 +1,4 @@
-import { For, Show } from 'solid-js'
+import { For, Show, createEffect } from 'solid-js'
 import type { Setter } from 'solid-js'
 import type { StlViewerModalProps } from '../components/StlViewer'
 
@@ -14,6 +14,8 @@ export interface SplitPanelDeps {
   splitChosen: () => boolean[]
   splitAdded: () => boolean[]
   splitFlash: () => number | null
+  splitHidden: () => boolean[]
+  toggleSplitVisible: (index: number) => void
   splitPlate: () => number | 'all'
   setSplitPlate: Setter<number | 'all'>
   splitSaving: () => boolean
@@ -38,9 +40,16 @@ export interface SplitPanelDeps {
  */
 export function splitPanel(deps: SplitPanelDeps) {
   const { props, translate, builtPlates, platesUI, splitPhase, splitProgress, splitNames, splitChosen,
-    splitAdded, splitFlash, splitPlate, setSplitPlate, splitSaving, splitError, splitAddError, splitPos,
+    splitAdded, splitFlash, splitHidden, toggleSplitVisible, splitPlate, setSplitPlate, splitSaving, splitError, splitAddError, splitPos,
     chosenIndices, pendingIndices, toggleSplitChoice, setAllSplitChoices, flashSplitPart, runSplit,
     closeSplit, downloadSplit, addSplitToDesign, startSplitDrag } = deps
+
+  // The model can point at a row, so that row has to be in view when it does.
+  const rowElements: HTMLDivElement[] = []
+  createEffect(() => {
+    const index = splitFlash()
+    if (index !== null) rowElements[index]?.scrollIntoView({ block: 'nearest' })
+  })
   return (
     <>
         {/* Split tool. One panel across all steps: explanation, progress, result.
@@ -148,8 +157,9 @@ export function splitPanel(deps: SplitPanelDeps) {
                         guess which of the two the user meant. */}
                     <For each={splitNames()}>{(name, index) => (
                       <div onClick={() => toggleSplitChoice(index())}
+                        ref={element => (rowElements[index()] = element)}
                         title={translate('viewer_split_box_hint')}
-                        style={{ display: 'flex', 'align-items': 'center', gap: '8px', background: splitFlash() === index() ? 'rgba(255,210,63,0.16)' : 'transparent', 'border-radius': '6px', padding: '5px 7px', color: 'rgba(255,255,255,0.8)', 'font-size': '12px', cursor: 'pointer', 'font-family': "'DM Mono',monospace", width: '100%', 'box-sizing': 'border-box' }}>
+                        style={{ display: 'flex', 'align-items': 'center', gap: '8px', background: splitFlash() === index() ? 'rgba(255,210,63,0.16)' : 'transparent', 'border-radius': '6px', padding: '5px 7px', color: splitHidden()[index()] ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.8)', 'font-size': '12px', cursor: 'pointer', 'font-family': "'DM Mono',monospace", width: '100%', 'box-sizing': 'border-box' }}>
                         <button onClick={event => { event.stopPropagation(); flashSplitPart(index()) }}
                           title={translate('viewer_split_row_hint')}
                           style={{ background: 'none', border: 'none', padding: '2px', cursor: 'pointer', display: 'flex', 'align-items': 'center', color: splitFlash() === index() ? '#ffd23f' : 'rgba(255,255,255,0.45)', 'flex-shrink': '0' }}>
@@ -163,6 +173,20 @@ export function splitPanel(deps: SplitPanelDeps) {
                           </Show>
                         </span>
                         <span style={{ overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap', flex: '1' }}>{name}</span>
+                        <button onClick={event => { event.stopPropagation(); toggleSplitVisible(index()) }}
+                          title={translate(splitHidden()[index()] ? 'viewer_split_show_part' : 'viewer_split_hide_part')}
+                          style={{ background: 'none', border: 'none', padding: '2px', cursor: 'pointer', display: 'flex', 'align-items': 'center', color: splitHidden()[index()] ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.65)', 'flex-shrink': '0' }}>
+                          <Show when={!splitHidden()[index()]} fallback={
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                              <line x1="1" y1="1" x2="23" y2="23" />
+                            </svg>
+                          }>
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" />
+                            </svg>
+                          </Show>
+                        </button>
                         <Show when={splitAdded()[index()]}>
                           <span title={translate('viewer_split_added')} style={{ color: '#7fd18b', 'flex-shrink': '0', display: 'flex', 'align-items': 'center' }}>
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12" /></svg>
@@ -175,7 +199,9 @@ export function splitPanel(deps: SplitPanelDeps) {
                   <div style={{ display: 'flex', gap: '8px', 'flex-wrap': 'wrap' }}>
                     <button onClick={downloadSplit} disabled={chosenIndices().length === 0}
                       style={{ background: 'rgba(74,144,217,0.28)', border: '1px solid rgba(74,144,217,0.65)', 'border-radius': '8px', padding: '8px 13px', color: '#fff', 'font-size': '12px', cursor: chosenIndices().length === 0 ? 'default' : 'pointer', opacity: chosenIndices().length === 0 ? '0.45' : '1', 'font-family': "'DM Sans',sans-serif" }}>
-                      ⭳ {translate('viewer_split_download')}
+                      ⭳ {chosenIndices().length === 1
+                        ? translate('viewer_split_download_one')
+                        : translate('viewer_split_download')}
                     </button>
                     <Show when={props.onSaveFiles}>
                       {/* Offers only what is not in the design yet, so a second click

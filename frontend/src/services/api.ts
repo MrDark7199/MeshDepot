@@ -1,6 +1,7 @@
 import type {
-  Collection, Design, DesignFile, DesignShare, Filters, PlatformAccount, QueueItem,
-  QueueBlock, DesignID, ShareLink, SyncJob, SyncState, Tag, UrlCheckResult, User, UserShareLink,
+  Collection, CustomField, CustomFieldInput, Design, DesignFile, DesignShare, Filters,
+  PlatformAccount, QueueItem, QueueBlock, DesignID, ShareLink, SyncJob, SyncState, Tag,
+  UrlCheckResult, User, UserShareLink,
 } from '../types'
 
 const BASE = '/api/v1'
@@ -91,6 +92,9 @@ export const api = {
     if (filters.source_platform) params.set('source_platform', filters.source_platform)
     if (filters.tag_ids?.length)  params.set('tag_ids', filters.tag_ids.join(','))
     if (filters.shared_only)      params.set('shared_only', '1')
+    for (const [fieldId, value] of Object.entries(filters.custom ?? {})) {
+      if (value) params.set(`cf_${fieldId}`, value)
+    }
     if (filters.show_hidden)      params.set('show_hidden', '1')
     if (sort)                   { params.set('sort', sort.field); params.set('dir', sort.dir) }
     params.set('page', String(page))
@@ -178,6 +182,10 @@ export const api = {
   // API keys: how a client that cannot hold a session cookie authenticates. The
   // browser extension is the reason they exist - its requests are cross-site and
   // the session cookie is SameSite=Strict.
+  customFields:        () => request<CustomField[]>('GET', '/custom-fields'),
+  createCustomField:   (field: CustomFieldInput) => request<any>('POST', '/custom-fields', field),
+  updateCustomField:   (id: number, field: CustomFieldInput) => request<any>('PUT', `/custom-fields/${id}`, field),
+  deleteCustomField:   (id: number) => request<any>('DELETE', `/custom-fields/${id}`),
   apiKeys:             () => request<any[]>('GET', '/api-keys'),
   createApiKey:        (name: string, expiresInDays: number) => request<any>('POST', '/api-keys', { name, expires_in_days: expiresInDays }),
   revokeApiKey:        (id: number) => request('DELETE', `/api-keys/${id}`),

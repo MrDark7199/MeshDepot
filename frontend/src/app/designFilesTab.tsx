@@ -1,8 +1,6 @@
 import { api } from '../services/api'
 import { formatDate } from '../utils/datetime'
 import { is3dFile } from '../utils/meshTools'
-import { ErrorBox } from '../components/ErrorBox'
-import { labelStyle, inputStyle } from '../styles/formStyles'
 import { sansFont, monoFont } from '../styles/formStyles'
 import { formatBytes } from '../utils/format'
 import { formatDateTime } from '../utils/datetime'
@@ -25,17 +23,7 @@ export interface DesignFilesTabDeps {
   setExpandedVersionIds: Setter<Set<number>>
   collapsedFolders: () => Set<string>
   setCollapsedFolders: Setter<Set<string>>
-  nextVersion: () => string
-  uploadVersion: () => string
-  setUploadVersion: Setter<string>
-  uploadNotes: () => string
-  setUploadNotes: Setter<string>
-  uploadFileObject: () => File[]
-  setUploadFileObject: Setter<File[]>
-  uploadError: () => string
-  isUploading: () => boolean
-  uploadDesignFile: () => void
-  addFilesToVersion: (fileVersionId: number, files: FileList | null) => void
+  openAddFiles: (fileVersionId: number) => void
   deleteFileEntry: (fileVersionId: number, entry: DesignFileEntry) => void
   setConfirmDeleteFileId: Setter<number | null>
   showEntryInViewer: (fileVersionId: number, entry: DesignFileEntry) => void
@@ -43,20 +31,15 @@ export interface DesignFilesTabDeps {
   isResinFile: (name: string) => boolean
   isResinViewable: (name: string) => boolean
   gcodeSummary: (meta: GcodeMeta) => string
-  /** The upload input is a plain element reference, so it is handed over as a callback. */
-  setFileInputRef: (element: HTMLInputElement) => void
-  /** Read through a function: the element only exists once the tab is on screen. */
-  fileInputRef: () => HTMLInputElement | undefined
 }
 
 /** The files tab: every version with its entries, plus the upload form. */
 export function designFilesTab(deps: DesignFilesTabDeps) {
   const { props, translate, lang, user, design, activeTab, fileVersions, isLoadingFiles,
-    expandedVersionIds, setExpandedVersionIds, collapsedFolders, setCollapsedFolders, nextVersion,
-    uploadVersion, setUploadVersion, uploadNotes, setUploadNotes, uploadFileObject, setUploadFileObject,
-    uploadError, isUploading, uploadDesignFile, addFilesToVersion, deleteFileEntry,
+    expandedVersionIds, setExpandedVersionIds, collapsedFolders, setCollapsedFolders,
+    openAddFiles, deleteFileEntry,
     setConfirmDeleteFileId, showEntryInViewer, isGcodeFile, isResinFile, isResinViewable,
-    gcodeSummary, setFileInputRef, fileInputRef } = deps
+    gcodeSummary } = deps
   return (
     <>
             {/* - Files tab - */}
@@ -109,12 +92,11 @@ export function designFilesTab(deps: DesignFilesTabDeps) {
                           ZIP
                         </a>
                         <Show when={!props.isReadOnly}>
-                          <label title={translate('btn_add_files_title')} onClick={e => e.stopPropagation()}
+                          <button title={translate('btn_add_files_title')}
+                            onClick={e => { e.stopPropagation(); openAddFiles(fileVersion.id) }}
                             style={{ padding: '6px 12px', background: 'var(--bg4)', border: '1px solid var(--border2)', 'border-radius': '8px', color: 'var(--text)', 'font-size': '12px', cursor: 'pointer', ...monoFont, display: 'flex', 'align-items': 'center', gap: '5px' }}>
-                            <input type="file" multiple style={{ display: 'none' }}
-                              onChange={e => { addFilesToVersion(fileVersion.id, e.currentTarget.files); e.currentTarget.value = '' }} />
                             ＋ {translate('btn_add_files')}
-                          </label>
+                          </button>
                           <button onClick={() => setConfirmDeleteFileId(fileVersion.id)}
                             style={{ padding: '6px 11px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '8px', color: 'var(--danger)', 'font-size': '12px', cursor: 'pointer', ...monoFont }}>✕</button>
                         </Show>
@@ -209,40 +191,6 @@ export function designFilesTab(deps: DesignFilesTabDeps) {
                   </div>
                 )}</For>
 
-                {/* Upload new version */}
-                <Show when={!props.isReadOnly}>
-                  <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', 'border-radius': '16px', padding: '22px' }}>
-                    <div style={{ ...monoFont, 'font-size': '11px', color: 'var(--muted)', 'text-transform': 'uppercase', 'letter-spacing': '0.08em', 'margin-bottom': '16px' }}>{translate('label_upload_new_version')}</div>
-                    <ErrorBox message={uploadError()} />
-                    <div style={{ display: 'flex', 'flex-direction': 'column', gap: '13px' }}>
-                      <div onClick={() => fileInputRef()?.click()}
-                        style={{ border: `2px dashed ${uploadFileObject().length ? 'var(--accent)' : 'var(--border2)'}`, 'border-radius': '11px', padding: '22px', 'text-align': 'center', cursor: 'pointer', background: uploadFileObject().length ? 'rgba(69,123,157,0.05)' : 'transparent' }}>
-                        <input ref={setFileInputRef} type="file" multiple style={{ display: 'none' }}
-                          onChange={e => setUploadFileObject(Array.from(e.currentTarget.files ?? []))} />
-                        <Show when={uploadFileObject().length} fallback={
-                          <div style={{ ...monoFont, 'font-size': '13px', color: 'var(--muted)', display: 'flex', 'align-items': 'center', gap: '7px', 'justify-content': 'center' }}>
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                            {translate('upload_file_label')}
-                          </div>
-                        }>
-                          <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--accent)', 'font-weight': '600' }}>
-                            ✓ {uploadFileObject().length === 1
-                                ? `${uploadFileObject()[0].name} (${formatBytes(uploadFileObject()[0].size)})`
-                                : translate('label_files_selected').replace('{count}', String(uploadFileObject().length))}
-                          </div>
-                        </Show>
-                      </div>
-                      <div style={{ display: 'grid', 'grid-template-columns': '1fr 2fr', gap: '11px' }}>
-                        <div><label style={labelStyle}>{translate('field_version')} *</label><input style={inputStyle} value={uploadVersion()} onInput={e => setUploadVersion(e.currentTarget.value)} placeholder={nextVersion()} /></div>
-                        <div><label style={labelStyle}>{translate('field_notes')}</label><input style={inputStyle} value={uploadNotes()} onInput={e => setUploadNotes(e.currentTarget.value)} placeholder="optional" /></div>
-                      </div>
-                      <button onClick={uploadDesignFile} disabled={isUploading() || !uploadFileObject().length}
-                        style={{ padding: '11px', background: (isUploading() || !uploadFileObject().length) ? 'var(--bg4)' : 'var(--accent)', border: (isUploading() || !uploadFileObject().length) ? '1px solid var(--border2)' : 'none', 'border-radius': '10px', color: (isUploading() || !uploadFileObject().length) ? 'var(--muted)' : '#fff', ...sansFont, 'font-size': '14px', 'font-weight': '700', cursor: (isUploading() || !uploadFileObject().length) ? 'not-allowed' : 'pointer' }}>
-                        {isUploading() ? translate('btn_uploading') : translate('btn_upload')}
-                      </button>
-                    </div>
-                  </div>
-                </Show>
               </div>
             </Show>
     </>

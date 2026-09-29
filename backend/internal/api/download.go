@@ -1,15 +1,18 @@
 package api
 
 import (
-	"meshdepot/internal/coerce"
+	"database/sql"
 	"net/http"
 	"strings"
+	"time"
 
+	"meshdepot/internal/coerce"
 	"meshdepot/internal/dbutil"
 	"meshdepot/internal/httpx"
-	"meshdepot/internal/platforms"
-
 	"meshdepot/internal/logx"
+	"meshdepot/internal/platforms"
+	"meshdepot/internal/queuestate"
+	"meshdepot/internal/worker"
 )
 
 // How long a finished queue entry stays in the list the frontend polls. A failed
@@ -120,7 +123,30 @@ func (server *Server) DownloadList(responseWriter http.ResponseWriter, request *
 			OR (dq.status = 'failed' AND dq.done_at > datetime('now', ?))
 			OR (dq.status = 'done'   AND dq.done_at > datetime('now', ?))
 		) ORDER BY dq.created_at DESC`, userID(request), failedJobVisible, doneJobVisible)
+	annotateQueueRows(server.DB, rows)
 	httpx.Success(responseWriter, rows)
+}
+
+// annotateQueueRows adds what the queue display needs beyond the row itself:
+// how many attempts a job gets, and whether its platform is resting. A job then
+// carries the reason it is not moving, rather than looking stuck.
+func annotateQueueRows(database *sql.DB, rows []map[string]any) {
+	now := time.Now()
+	states := map[string]queuestate.State{}
+	for _, row := range rows {
+		platform := coerce.StringOr(row["platform"], "")
+		if platform == "" {
+			continue
+		}
+		state, known := states[platform]
+		if !known {
+			state = queuestate.Get(database, platform, now)
+			states[platform] = state
+		}
+		row["max_retries"] = worker.MaxRetries
+		row["queue_blocked"] = state.Blocked
+		row["queue_paused"] = state.Paused
+	}
 }
 
 func (server *Server) DownloadStatus(responseWriter http.ResponseWriter, request *http.Request) {
@@ -138,6 +164,7 @@ func (server *Server) DownloadStatus(responseWriter http.ResponseWriter, request
 	if !ok {
 		return
 	}
+	annotateQueueRows(server.DB, []map[string]any{row})
 	httpx.Success(responseWriter, row)
 }
 

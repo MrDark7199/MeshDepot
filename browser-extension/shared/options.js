@@ -96,23 +96,36 @@ async function checkConnection(options) {
   }
 }
 
+function showExtensionVersion() {
+  const target = document.getElementById('extensionVersion')
+  if (!target) return
+  target.textContent = 'Version: ' + browser.runtime.getManifest().version
+}
+
 /**
  * Tried in the toolbar panel first, because one click is the right number. When
  * the panel closes under the prompt the request comes back as an error or a
  * plain false, and only then is the tab offered.
  */
-async function requestOrigins(origins, what) {
+/**
+ * Firefox shows the prompt only while the click is still the reason for it, and
+ * the first await in the handler spends that. So the request goes first and
+ * everything else waits - reporting is fine, it touches only the DOM.
+ */
+function requestOrigins(origins, what) {
+  const asked = (async () => {
+    try {
+      return { granted: await browser.permissions.request({ origins: origins }) }
+    } catch (failure) {
+      return { granted: false, failed: true }
+    }
+  })()
   if (!runningInTab) {
     report('info', 'Firefox is asking whether this extension may ' + what
       + '. The prompt appears at the top of the window - choose Allow. '
       + 'If you cannot see it, use the button below.')
-    await new Promise(resolve => window.setTimeout(resolve, 50))
   }
-  try {
-    return { granted: await browser.permissions.request({ origins: origins }) }
-  } catch (failure) {
-    return { granted: false, failed: true }
-  }
+  return asked
 }
 
 /** Opens the page in a tab so a prompt the panel could not show has room. */
@@ -215,9 +228,8 @@ async function ensurePermission(instanceUrl) {
   const address = new URL(instanceUrl)
   const origin = address.protocol + '//' + address.hostname + '/*'
 
-  if (await browser.permissions.contains({ origins: [origin] })) {
-    return { granted: true, origin: origin }
-  }
+  // No "do we have it already?" first: that answer costs an await, and with it
+  // the right to ask. A permission already held resolves true with no prompt.
   const outcome = await requestOrigins([origin], 'contact ' + address.hostname)
   return { granted: outcome.granted, failed: outcome.failed, origin: origin }
 }
@@ -247,8 +259,10 @@ document.getElementById('save').addEventListener('click', async () => {
     addToCollection: addToCollectionField.checked,
   })
 
-  if (!outcome.granted && outcome.failed && !runningInTab) {
-    report('bad', 'Saved, but Firefox could not show the permission prompt in this panel. '
+  // Not only when the request threw: a panel that closes under the prompt answers
+  // "declined" without anyone declining, and pressing Save again here repeats it.
+  if (!outcome.granted && !runningInTab) {
+    report('bad', 'Saved, but the prompt could not be answered in this panel. '
       + 'Press Save again in the tab that opens.')
     await openGrantTab('grant')
     return
@@ -297,6 +311,7 @@ if (new URLSearchParams(window.location.search).get('grant') === '1') {
 checkSiteAccess()
 checkConnection()
 showDiagnostics()
+showExtensionVersion()
 window.setInterval(() => {
   // Only while the main view shows: re-checking would move the state under
   // someone editing the form.

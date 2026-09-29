@@ -42,6 +42,45 @@ type storedEntry struct {
 	size                  int64
 }
 
+// storeFilesInVersion moves downloaded files into a version directory and
+// describes what landed. Shared by the first version of a design and by files
+// added to one that already exists, so both record the same kind of hash.
+func storeFilesInVersion(owner Owner, versionDir string, files []DownloadedFile) ([]storedEntry, int64) {
+	var entries []storedEntry
+	var totalBytes int64
+	for _, file := range files {
+		fileInfo, failure := os.Stat(file.TempPath)
+		if failure != nil || fileInfo.Size() == 0 {
+			continue
+		}
+		relativePath := sanitizeRel(file.Name)
+		destination := filepath.Join(versionDir, relativePath)
+		if relativePath == "" || !withinBase(versionDir, destination) {
+			continue
+		}
+		if _, failure := os.Stat(destination); failure == nil {
+			extension := filepath.Ext(relativePath)
+			relativePath = strings.TrimSuffix(relativePath, extension) + "_" + strconv.FormatInt(time.Now().Unix(), 10) + extension
+			destination = filepath.Join(versionDir, relativePath)
+		}
+		blob, failure := storeAndLink(owner.Layout, file.TempPath, destination)
+		if failure != nil || blob.SizeBytes == 0 {
+			continue
+		}
+		// Read before the temp file goes: the first version has to record the same kind
+		// of hash the sync later compares against, or the next update check publishes a
+		// version holding nothing new.
+		stableHash := ContentHash(file.TempPath, blob.Hash)
+		_ = os.Remove(file.TempPath)
+		totalBytes += blob.SizeBytes
+		entries = append(entries, storedEntry{
+			filename: filepath.Base(destination), path: destination,
+			blobHash: blob.Hash, contentHash: stableHash, relativePath: relativePath, size: blob.SizeBytes,
+		})
+	}
+	return entries, totalBytes
+}
+
 // SaveDownload writes a download result into the library and returns the
 // design_id: the design row, the files under {root}/{uid}/stl/{designId}/1.0,
 // the design_files entries, tags and images.
@@ -110,38 +149,7 @@ func SaveDownload(db *sql.DB, owner Owner, platform, sourceURL string, result Re
 	versionDir = owner.Layout.Version(designID, "1.0")
 	_ = storage.MkdirAll(versionDir)
 
-	var entries []storedEntry
-	var totalBytes int64
-	for _, file := range result.Files {
-		fileInfo, failure := os.Stat(file.TempPath)
-		if failure != nil || fileInfo.Size() == 0 {
-			continue
-		}
-		relativePath := sanitizeRel(file.Name)
-		destination := filepath.Join(versionDir, relativePath)
-		if relativePath == "" || !withinBase(versionDir, destination) {
-			continue
-		}
-		if _, failure := os.Stat(destination); failure == nil {
-			extension := filepath.Ext(relativePath)
-			relativePath = strings.TrimSuffix(relativePath, extension) + "_" + strconv.FormatInt(time.Now().Unix(), 10) + extension
-			destination = filepath.Join(versionDir, relativePath)
-		}
-		blob, failure := storeAndLink(owner.Layout, file.TempPath, destination)
-		if failure != nil || blob.SizeBytes == 0 {
-			continue
-		}
-		// Read before the temp file goes: the first version has to record the same kind
-		// of hash the sync later compares against, or the next update check publishes a
-		// version holding nothing new.
-		stableHash := ContentHash(file.TempPath, blob.Hash)
-		_ = os.Remove(file.TempPath)
-		totalBytes += blob.SizeBytes
-		entries = append(entries, storedEntry{
-			filename: filepath.Base(destination), path: destination,
-			blobHash: blob.Hash, contentHash: stableHash, relativePath: relativePath, size: blob.SizeBytes,
-		})
-	}
+	entries, totalBytes := storeFilesInVersion(owner, versionDir, result.Files)
 	if len(entries) == 0 {
 		return 0, errors.New("error.no_files")
 	}
@@ -547,4 +555,88 @@ func publishCover(user storage.UserLayout, designID int, staged string, gallery 
 		return user.Rel(source), fromGallery
 	}
 	return user.Rel(destination), fromGallery
+}
+
+// AddFilesToCurrentVersion puts files into the newest version of a design that
+// is already in the library, instead of starting a second design for the same
+// model. MakerWorld prints one model as several print profiles, each its own
+// download behind the same model address.
+//
+// A name the version already holds is refused rather than added twice, which is
+// the rule FilesAddEntries follows for an upload by hand: case-insensitive, on
+// the filename, and the whole batch is refused rather than half of it stored.
+func AddFilesToCurrentVersion(db *sql.DB, owner Owner, designID int, files []DownloadedFile) (int, error) {
+	var versionID int
+	var version string
+	if failure := db.QueryRow(
+		`SELECT id, COALESCE(version, '1.0') FROM design_files
+		 WHERE design_id = ? ORDER BY is_current DESC, id DESC LIMIT 1`,
+		designID).Scan(&versionID, &version); failure != nil {
+		return 0, fmt.Errorf("no version to add to: %w", failure)
+	}
+
+	taken := map[string]bool{}
+	rows, failure := db.Query("SELECT filename FROM design_file_entries WHERE design_file_id = ?", versionID)
+	if failure != nil {
+		return 0, failure
+	}
+	for rows.Next() {
+		var filename string
+		if rows.Scan(&filename) == nil {
+			taken[strings.ToLower(filename)] = true
+		}
+	}
+	rows.Close()
+
+	// Judged before anything is stored: storeFilesInVersion steps around a name
+	// that is taken by adding a timestamp, which would let the same file in again
+	// and again under ever new names.
+	for _, file := range files {
+		name := filepath.Base(sanitizeRel(file.Name))
+		if taken[strings.ToLower(name)] {
+			// The key carries a sentence, because the extension shows what follows the
+			// colon while the web interface keeps translating the key before it.
+			return 0, fmt.Errorf("error.filename_exists:%q is already in this design - "+
+				"nothing was added.", name)
+		}
+	}
+
+	versionDir := owner.Layout.Version(designID, version)
+	_ = storage.MkdirAll(versionDir)
+	entries, addedBytes := storeFilesInVersion(owner, versionDir, files)
+	if len(entries) == 0 {
+		return 0, errors.New("error.no_files")
+	}
+
+	transaction, failure := db.Begin()
+	if failure != nil {
+		return 0, failure
+	}
+	defer transaction.Rollback()
+
+	for _, entry := range entries {
+		if _, failure := transaction.Exec(
+			`INSERT INTO design_file_entries (design_file_id, filename, path, size_bytes, file_hash, relative_path, blob_hash, gcode_meta)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			versionID, entry.filename, owner.Layout.Rel(entry.path), entry.size, entry.contentHash,
+			entry.relativePath, entry.blobHash,
+			nullIfEmpty(printmeta.ExtractFileJSON(entry.filename, entry.path))); failure != nil {
+			return 0, failure
+		}
+	}
+	// Counters and entries land together, or the version reports a wrong file count
+	// and size for good - nothing recomputes them.
+	if _, failure := transaction.Exec(
+		"UPDATE design_files SET size_bytes = size_bytes + ?, file_count = file_count + ? WHERE id = ?",
+		addedBytes, len(entries), versionID); failure != nil {
+		return 0, failure
+	}
+	if _, failure := transaction.Exec(
+		"UPDATE designs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", designID); failure != nil {
+		return 0, failure
+	}
+	if failure := transaction.Commit(); failure != nil {
+		return 0, failure
+	}
+	return len(entries), nil
 }

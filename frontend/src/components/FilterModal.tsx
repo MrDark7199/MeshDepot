@@ -1,13 +1,25 @@
 import { PLATFORM_LABELS, platformLabel } from '../constants/platforms'
 import { useI18n } from '../i18n/index'
 import { api } from '../services/api'
-import { For, Show, createSignal, on } from 'solid-js'
-import type { Filters, Tag } from '../types'
+import { For, Show, createSignal, onMount, on } from 'solid-js'
+import type { CustomField, Filters, Tag } from '../types'
 
 export function FilterModal(props: {filters: Filters; setFilters: (f: Filters) => void; allTags: Tag[]; onClose: () => void; perPage?: number; onPerPageChange?: (pp: number) => void}) {
   const { translate } = useI18n()
   const [local, setLocal] = createSignal({...props.filters})
   const [localPerPage, setLocalPerPage] = createSignal(props.perPage ?? 50)
+  // Only the reader's own fields, and only shown when there are any - a library
+  // without custom fields keeps the filter as it was.
+  const [customFields, setCustomFields] = createSignal<CustomField[]>([])
+  onMount(async () => {
+    try {
+      const answer = await api.customFields() as any
+      setCustomFields(answer?.data ?? [])
+    } catch (_) { setCustomFields([]) }
+  })
+  const customValue = (fieldId: number) => local().custom?.[String(fieldId)] ?? ''
+  const setCustomValue = (fieldId: number, value: string) =>
+    setLocal(current => ({ ...current, custom: { ...(current.custom ?? {}), [String(fieldId)]: value } }))
   const lbl: any = { display:'block', 'font-family':"'DM Mono',monospace", 'font-size':'12px', color:'var(--muted)', 'text-transform':'uppercase', 'letter-spacing':'0.05em', 'margin-bottom':'8px' }
   const inp: any = { width:'100%', background:'var(--input-bg)', border:'1px solid var(--border2)', 'border-radius':'10px', padding:'10px 14px', color:'var(--text)', 'font-family':"'DM Sans',sans-serif", 'font-size':'14px', outline:'none' }
   // Tag filter as a select2-style combobox: matches are searched on the server
@@ -106,8 +118,39 @@ export function FilterModal(props: {filters: Filters; setFilters: (f: Filters) =
             </div>
           </div>
         </div>
+        <Show when={customFields().length > 0}>
+          <div style={{ 'margin-top':'20px', 'border-top':'1px solid var(--border)', 'padding-top':'18px' }}>
+            <label style={lbl}>{translate('section_custom_fields')}</label>
+            <div style={{ display:'grid', 'grid-template-columns':'1fr 1fr', gap:'12px' }}>
+              <For each={customFields()}>{field => (
+                <div>
+                  <label style={{ ...lbl, 'font-size':'11px', 'margin-bottom':'5px' }}>{field.name}</label>
+                  {/* A multiple choice filters on one of its entries, so it offers the
+                      same list as a single choice does. A free field says what it
+                      expects instead of standing there blank. */}
+                  <Show when={field.field_type === 'select' || field.field_type === 'multiselect' || field.field_type === 'boolean'} fallback={
+                    <input style={inp} value={customValue(field.id)}
+                      placeholder={translate(`custom_field_type_${field.field_type}` as any)}
+                      onInput={event => setCustomValue(field.id, event.currentTarget.value)} />
+                  }>
+                    <select style={inp} value={customValue(field.id)}
+                      onChange={event => setCustomValue(field.id, event.currentTarget.value)}>
+                      <option value="">{translate('filter_all')}</option>
+                      <Show when={field.field_type === 'boolean'} fallback={
+                        <For each={field.options ?? []}>{choice => <option value={choice}>{choice}</option>}</For>
+                      }>
+                        <option value="1">{translate('label_yes')}</option>
+                        <option value="0">{translate('label_no')}</option>
+                      </Show>
+                    </select>
+                  </Show>
+                </div>
+              )}</For>
+            </div>
+          </div>
+        </Show>
         <div style={{ display:'flex', gap:'11px', 'margin-top':'24px' }}>
-          <button onClick={() => { props.setFilters({source_platform:'',tag_ids:[],shared_only:false,show_hidden:false}); setLocal({source_platform:'',tag_ids:[],shared_only:false,show_hidden:false}); setSelectedTags([]); props.onPerPageChange?.(50); setLocalPerPage(50); props.onClose() }}
+          <button onClick={() => { props.setFilters({source_platform:'',tag_ids:[],shared_only:false,show_hidden:false,custom:{}}); setLocal({source_platform:'',tag_ids:[],shared_only:false,show_hidden:false,custom:{}}); setSelectedTags([]); props.onPerPageChange?.(50); setLocalPerPage(50); props.onClose() }}
             style={{ flex:'1', padding:'11px', background:'var(--surface)', border:'1px solid var(--border)', 'border-radius':'10px', color:'var(--muted)', cursor:'pointer', 'font-family':"'DM Sans',sans-serif", 'font-size':'14px' }}>
             {translate('filter_clear')}
           </button>

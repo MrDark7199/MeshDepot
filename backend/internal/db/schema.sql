@@ -441,3 +441,32 @@ CREATE TABLE IF NOT EXISTS api_keys (
     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id);
+
+-- Fields a user defines for themselves. The definition belongs to the user, the
+-- value to a design - which is also what keeps them private: a design shared
+-- with somebody else is read with that person's own fields, and there are no
+-- values under those, so nothing of the owner's shows through.
+CREATE TABLE IF NOT EXISTS custom_fields (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    name       TEXT    NOT NULL,
+    -- text, int, float, boolean or select. Decides the input, how the value is
+    -- rendered, and how it is filtered.
+    field_type TEXT    NOT NULL DEFAULT 'text',
+    -- The choices of a select, as a JSON array. Empty for every other type.
+    options    TEXT    NOT NULL DEFAULT '',
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, name),
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_custom_fields_user ON custom_fields (user_id);
+
+CREATE TABLE IF NOT EXISTS design_custom_values (
+    design_id INTEGER NOT NULL,
+    field_id  INTEGER NOT NULL,
+    value     TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (design_id, field_id),
+    FOREIGN KEY (design_id) REFERENCES designs (id) ON DELETE CASCADE,
+    FOREIGN KEY (field_id) REFERENCES custom_fields (id) ON DELETE CASCADE
+);

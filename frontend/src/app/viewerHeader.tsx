@@ -16,12 +16,14 @@ export interface ViewerHeaderDeps {
   setToolsOpen: Setter<boolean>
   measureActive: () => boolean
   resetView: () => void
+  downloadFile: () => void
 }
 
 /** The viewer's title bar. A plain function, so it stays in the viewer's own owner. */
 export function viewerHeader(deps: ViewerHeaderDeps) {
   const { props, translate, isLoading, formatLabel, colorGroups, colorsOpen, setColorsOpen,
-    settingsOpen, setSettingsOpen, toolsOpen, setToolsOpen, measureActive, resetView } = deps
+    settingsOpen, setSettingsOpen, toolsOpen, setToolsOpen, measureActive, resetView,
+    downloadFile } = deps
   return (
     <>
       {/* Header */}
@@ -37,6 +39,15 @@ export function viewerHeader(deps: ViewerHeaderDeps) {
         <span style={{ 'font-family': "'DM Mono',monospace", 'font-size': '11px', color: 'rgba(255,255,255,0.4)', 'flex-shrink': '0' }}>
           {translate('viewer_controls_hint')}
         </span>
+        {/* Saving the file is not a tool - it does nothing to the model - so it sits
+            in the bar rather than in the menu of things that do. */}
+        <button onClick={downloadFile} title={translate('viewer_btn_download')}
+          style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', 'border-radius': '8px', padding: '6px 12px', color: '#fff', cursor: 'pointer', 'flex-shrink': '0', display: 'flex', 'align-items': 'center' }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+        </button>
         {/* Werkzeuge: für alle Typen sichtbar (Foto funktioniert überall). "Messen" ist im Menü
             weiterhin nur für nicht-generierte Meshes (STL/OBJ/3MF) - bei G-code fehlt der Punkt. */}
         {/* Unavailable until the model is there. Every tool behind it works on the

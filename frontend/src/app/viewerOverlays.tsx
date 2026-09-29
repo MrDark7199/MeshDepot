@@ -121,7 +121,13 @@ export function viewerOverlays(deps: ViewerOverlaysDeps) {
             <Show when={!isGcode()}>
               <button onClick={() => setMeasure(!measureActive())}
                 style={{ display: 'flex', 'align-items': 'center', 'justify-content': 'space-between', gap: '10px', background: measureActive() ? 'rgba(74,144,217,0.22)' : 'rgba(255,255,255,0.05)', border: `1px solid ${measureActive() ? 'rgba(74,144,217,0.6)' : 'rgba(255,255,255,0.12)'}`, 'border-radius': '8px', padding: '8px 10px', color: '#fff', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif", 'font-size': '12px' }}>
-                <span>📏 {translate('viewer_tool_measure')}</span>
+                <span style={{ display: 'flex', 'align-items': 'center', gap: '8px' }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ 'flex-shrink': '0' }}>
+                    <line x1="4" y1="20" x2="20" y2="4" />
+                    <circle cx="4.5" cy="19.5" r="2" /><circle cx="19.5" cy="4.5" r="2" />
+                  </svg>
+                  {translate('viewer_tool_measure')}
+                </span>
                 <span style={{ 'font-size': '10px', color: measureActive() ? '#9ec5ff' : 'rgba(255,255,255,0.4)', 'font-family': "'DM Mono',monospace" }}>
                   {measureActive() ? translate('viewer_tool_on') : translate('viewer_tool_off')}
                 </span>
@@ -131,13 +137,27 @@ export function viewerOverlays(deps: ViewerOverlaysDeps) {
             <Show when={!isGcode()}>
               <button onClick={openSplitIntro}
                 style={{ display: 'flex', 'align-items': 'center', gap: '10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.12)', 'border-radius': '8px', padding: '8px 10px', color: '#fff', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif", 'font-size': '12px' }}>
-                <span>✂️ {translate('viewer_tool_split')}</span>
+                <span style={{ display: 'flex', 'align-items': 'center', gap: '8px' }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ 'flex-shrink': '0' }}>
+                    <circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" />
+                    <line x1="20" y1="4" x2="8.12" y2="15.88" />
+                    <line x1="14.47" y1="14.48" x2="20" y2="20" />
+                    <line x1="8.12" y1="8.12" x2="12" y2="12" />
+                  </svg>
+                  {translate('viewer_tool_split')}
+                </span>
               </button>
             </Show>
             {/* Foto erstellen: für alle Typen (STL/OBJ/3MF + G-code) – arbeitet auf dem Framebuffer. */}
             <button onClick={startPhoto}
               style={{ display: 'flex', 'align-items': 'center', gap: '10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.12)', 'border-radius': '8px', padding: '8px 10px', color: '#fff', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif", 'font-size': '12px' }}>
-              <span>📷 {translate('viewer_tool_photo')}</span>
+              <span style={{ display: 'flex', 'align-items': 'center', gap: '8px' }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ 'flex-shrink': '0' }}>
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                  <circle cx="12" cy="13" r="4" />
+                </svg>
+                {translate('viewer_tool_photo')}
+              </span>
             </button>
           </div>
         </Show>

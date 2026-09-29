@@ -192,6 +192,8 @@ export interface Design {
   images?: DesignImage[]
   collections?: Collection[]
   shares?: DesignShare[]
+  /** The reader's own fields with this design's values; never another user's. */
+  custom_fields?: CustomField[]
 }
 
 export interface QueueItem {
@@ -206,6 +208,12 @@ export interface QueueItem {
   current_step?: string | null
   step_current?: number | null
   step_total?: number | null
+  /** How many attempts a job gets, so the display can say "2 of 3". */
+  max_retries?: number
+  /** The platform is resting after repeated anti-bot blocks. */
+  queue_blocked?: boolean
+  /** The platform was paused by hand. */
+  queue_paused?: boolean
 }
 
 /**
@@ -304,4 +312,24 @@ export interface Filters {
   tag_ids: number[]
   shared_only: boolean
   show_hidden: boolean
+  /** Values on the user's own fields, keyed by field id. */
+  custom?: Record<string, string>
 }
+
+/** A field a user defined for themselves; the same on every one of their designs. */
+export interface CustomField {
+  id: number
+  name: string
+  field_type: 'text' | 'int' | 'float' | 'boolean' | 'select' | 'multiselect'
+  /** The choices of a select; empty for every other type. */
+  options: string[]
+  position?: number
+  /** Only present when read through a design. */
+  value?: string
+  /** 1 when the field was added to the design being read, 0 when it was not. */
+  present?: number
+  /** How many designs carry this field; only sent when listing the definitions. */
+  usage_count?: number
+}
+
+export type CustomFieldInput = Pick<CustomField, 'name' | 'field_type' | 'options'>

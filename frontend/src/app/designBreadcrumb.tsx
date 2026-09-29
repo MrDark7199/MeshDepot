@@ -15,6 +15,7 @@ export interface DesignBreadcrumbDeps {
   isLoading: () => boolean
   isEditing: () => boolean
   enterEditMode: () => void
+  openUploadVersion: () => void
   exitEditMode: () => void
   guardClose: (action: () => void) => void
   setConfirmDelete: Setter<boolean>
@@ -23,7 +24,7 @@ export interface DesignBreadcrumbDeps {
 
 /** The bar above the design: back link, name, and the actions on the design. */
 export function designBreadcrumb(deps: DesignBreadcrumbDeps) {
-  const { props, translate, user, design, shownName, isLoading, isEditing, enterEditMode,
+  const { props, translate, user, design, shownName, isLoading, isEditing, enterEditMode, openUploadVersion,
     exitEditMode, guardClose, setConfirmDelete, startSyncStream } = deps
   const translateSyncBlock = makeTranslateError(translate)
   return (
@@ -80,9 +81,9 @@ export function designBreadcrumb(deps: DesignBreadcrumbDeps) {
             })()}
           </Show>
           <Show when={!props.isReadOnly && design()}>
-            <button onClick={() => setConfirmDelete(true)}
-              style={{ padding: '7px 13px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '9px', color: 'var(--danger)', 'font-size': '13px', cursor: 'pointer', ...sansFont }}>
-              {translate('btn_delete_design')}
+            <button onClick={openUploadVersion}
+              style={{ padding: '7px 15px', background: 'var(--success-bg)', border: '1px solid var(--success-border)', 'border-radius': '9px', color: 'var(--success)', 'font-size': '13px', cursor: 'pointer', ...sansFont, 'font-weight': '600' }}>
+              {translate('btn_upload_version')}
             </button>
             <button onClick={() => {
               if (!isEditing()) { enterEditMode() }
@@ -90,6 +91,10 @@ export function designBreadcrumb(deps: DesignBreadcrumbDeps) {
             }}
               style={{ padding: '7px 15px', background: isEditing() ? 'var(--surface)' : 'var(--accent)', border: `1px solid ${isEditing() ? 'var(--border)' : 'var(--accent)'}`, 'border-radius': '9px', color: isEditing() ? 'var(--muted)' : '#fff', 'font-size': '13px', cursor: 'pointer', ...sansFont, 'font-weight': '600' }}>
               {isEditing() ? translate('btn_cancel') : translate('btn_edit')}
+            </button>
+            <button onClick={() => setConfirmDelete(true)}
+              style={{ padding: '7px 13px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '9px', color: 'var(--danger)', 'font-size': '13px', cursor: 'pointer', ...sansFont }}>
+              {translate('btn_delete_design')}
             </button>
           </Show>
         </div>

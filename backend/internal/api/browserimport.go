@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 
+	"meshdepot/internal/coerce"
 	"meshdepot/internal/dbutil"
 	"meshdepot/internal/httpx"
 	"meshdepot/internal/notify"
@@ -126,15 +127,19 @@ func (server *Server) BrowserImport(responseWriter http.ResponseWriter, request 
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 		return
 	}
+	// A model already in the library does not make this a duplicate any more: the
+	// files are offered to its newest version, which refuses a name that version
+	// already holds. A model not there yet takes the unchanged path below.
+	attachTo := 0
 	if isDuplicate {
-		httpx.Error(responseWriter, http.StatusConflict, "error.duplicate_design:"+coerceName(duplicate["name"]))
-		return
+		attachTo = coerce.Int(duplicate["id"])
 	}
 
 	// Asking for this design by hand outranks an earlier "delete and keep it gone".
 	platforms.LiftSyncExclusion(server.DB, currentUserID, platform, "", sourceURL)
 
 	importRequest := browserImportRequestFrom(body, platform, sourceURL)
+	importRequest.AttachToDesignID = attachTo
 	for _, file := range body.Files {
 		importRequest.Files = append(importRequest.Files, platforms.BrowserImportFile{
 			Name: file.Name, URL: file.URL,
@@ -167,13 +172,6 @@ func (server *Server) BrowserImport(responseWriter http.ResponseWriter, request 
 		// So the extension can say where the design went.
 		"collection": outcome.Collection,
 	}, "Design imported")
-}
-
-func coerceName(value any) string {
-	if text, ok := value.(string); ok && text != "" {
-		return text
-	}
-	return "Unknown"
 }
 
 // BrowserImportUpload takes a design whose files the extension carries itself,
@@ -226,9 +224,11 @@ func (server *Server) BrowserImportUpload(responseWriter http.ResponseWriter, re
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 		return
 	}
+	// Same rule as the link import above: an existing design takes the files into
+	// its newest version rather than refusing them.
+	uploadAttachTo := 0
 	if isDuplicate {
-		httpx.Error(responseWriter, http.StatusConflict, "error.duplicate_design:"+coerceName(duplicate["name"]))
-		return
+		uploadAttachTo = coerce.Int(duplicate["id"])
 	}
 	platforms.LiftSyncExclusion(server.DB, currentUserID, platform, "", sourceURL)
 
@@ -242,8 +242,9 @@ func (server *Server) BrowserImportUpload(responseWriter http.ResponseWriter, re
 		})
 	}
 
-	outcome, failure := platforms.ImportUploadsFromBrowser(
-		server.DB, server.owner(request), browserImportRequestFrom(body, platform, sourceURL), uploads)
+	uploadRequest := browserImportRequestFrom(body, platform, sourceURL)
+	uploadRequest.AttachToDesignID = uploadAttachTo
+	outcome, failure := platforms.ImportUploadsFromBrowser(server.DB, server.owner(request), uploadRequest, uploads)
 	if failure != nil {
 		logx.Errorf("[browser-import] upload for user %d, %s: %v", currentUserID, sourceURL, failure)
 		key := failure.Error()

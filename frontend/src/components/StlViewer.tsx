@@ -117,6 +117,7 @@ export function StlViewerModal(props: StlViewerModalProps) {
   const [splitChosen, setSplitChosen] = createSignal<boolean[]>([])
   const [splitFlash, setSplitFlash] = createSignal<number | null>(null)
   const [splitPlate, setSplitPlate] = createSignal<number | 'all'>('all')
+  const [splitHidden, setSplitHidden] = createSignal<boolean[]>([])
   const [splitSaving, setSplitSaving] = createSignal(false)
   /**
    * Which parts are already in the design. The selection is cumulative, so a second
@@ -648,35 +649,55 @@ export function StlViewerModal(props: StlViewerModalProps) {
    * the way it is drawn, while modelRoot is undone again: that node only carries
    * the viewer's Z-up correction, and baking it in would rotate the parts.
    */
-  const collectTriangleSoup = (onlyPlate: number | 'all'): Float32Array => {
+  const sourceMeshesFor = (onlyPlate: number | 'all'): Mesh[] => {
     const wanted = onlyPlate === 'all' || builtPlates.length === 0
       ? null
       : new Set<Mesh>(builtPlates[onlyPlate]?.meshes ?? [])
-    const chunks: number[] = []
-    const undoRoot = modelRoot ? Matrix.Invert(modelRoot.getWorldMatrix()) : null
+    const meshes: Mesh[] = []
     for (const group of builtGroups) {
       for (const mesh of group.meshes) {
         if (wanted && !wanted.has(mesh)) continue
-        const positions = mesh.getVerticesData(VertexBuffer.PositionKind)
-        if (!positions) continue
-        mesh.computeWorldMatrix(true)
-        const toSource = undoRoot ? mesh.getWorldMatrix().multiply(undoRoot) : mesh.getWorldMatrix()
-        // A mesh without an index buffer is already a triangle soup.
-        const indices = mesh.getIndices() ?? Array.from({ length: positions.length / 3 }, (_, i) => i)
-        const point = new Vector3()
-        for (const index of indices) {
-          point.set(positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2])
-          const world = Vector3.TransformCoordinates(point, toSource)
-          chunks.push(world.x, world.y, world.z)
-        }
+        meshes.push(mesh)
+      }
+    }
+    return meshes
+  }
+
+  const collectTriangleSoup = (onlyPlate: number | 'all'): Float32Array => {
+    const chunks: number[] = []
+    const undoRoot = modelRoot ? Matrix.Invert(modelRoot.getWorldMatrix()) : null
+    for (const mesh of sourceMeshesFor(onlyPlate)) {
+      const positions = mesh.getVerticesData(VertexBuffer.PositionKind)
+      if (!positions) continue
+      mesh.computeWorldMatrix(true)
+      const toSource = undoRoot ? mesh.getWorldMatrix().multiply(undoRoot) : mesh.getWorldMatrix()
+      // A mesh without an index buffer is already a triangle soup.
+      const indices = mesh.getIndices() ?? Array.from({ length: positions.length / 3 }, (_, i) => i)
+      const point = new Vector3()
+      for (const index of indices) {
+        point.set(positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2])
+        const world = Vector3.TransformCoordinates(point, toSource)
+        chunks.push(world.x, world.y, world.z)
       }
     }
     return new Float32Array(chunks)
   }
 
+  // The file as it is stored, straight from the viewer - otherwise the way to it
+  // is back out to the design and down into the file list.
+  const downloadFile = () => {
+    setToolsOpen(false)
+    const anchor = document.createElement('a')
+    anchor.href = props.url
+    anchor.download = props.filename || 'model'
+    anchor.click()
+  }
+
   const openSplitIntro = () => {
     setToolsOpen(false)
-    setSplitPlate('all')
+    // The plate on screen is the one being looked at, so it is the one offered.
+    // With a single plate the chooser stays hidden and "all" means the same thing.
+    setSplitPlate(builtPlates.length > 1 ? activePlate() : 'all')
     setSplitError(false)
     setSplitAddError('')
     setSplitPos(null)
@@ -685,6 +706,7 @@ export function StlViewerModal(props: StlViewerModalProps) {
 
   const runSplit = async () => {
     if (splitPhase() === 'busy') return
+    disposeSplitPartMeshes()
     setSplitPhase('busy')
     setSplitProgress(0)
     setSplitError(false)
@@ -695,6 +717,7 @@ export function StlViewerModal(props: StlViewerModalProps) {
       // Everything is chosen to begin with: the common case is wanting all of it.
       setSplitChosen(splitParts.map(() => true))
       setSplitAdded(splitParts.map(() => false))
+      buildSplitPartMeshes()
       placeSplitPanelRight()
       setSplitPhase('done')
     } catch {
@@ -710,6 +733,58 @@ export function StlViewerModal(props: StlViewerModalProps) {
     const width = 420
     const height = Math.min(520, window.innerHeight - 80)
     setSplitPos({ x: Math.max(16, window.innerWidth - width - 32), y: Math.max(16, (window.innerHeight - height) / 2) })
+  }
+
+  let splitPartMeshes: Mesh[] = []
+  let splitHiddenSources: Mesh[] = []
+
+  /**
+   * One mesh per part, standing in for the meshes they came from. The model is
+   * built per colour group and knows nothing of parts, so hiding one is only
+   * possible once every part is its own mesh. The colour groups do not survive
+   * this: while the panel is open the plate wears one material.
+   */
+  const buildSplitPartMeshes = () => {
+    disposeSplitPartMeshes()
+    if (!scene || splitParts.length === 0) return
+    const sources = sourceMeshesFor(splitPlate())
+    const material = sources[0]?.material ?? null
+
+    splitPartMeshes = splitParts.map((part, index) => {
+      const mesh = new Mesh(`splitPart${index}`, scene!)
+      const data = new VertexData()
+      data.positions = Array.from(part.positions)
+      data.indices = Array.from({ length: part.positions.length / 3 }, (_, i) => i)
+      const normals: number[] = []
+      VertexData.ComputeNormals(data.positions, data.indices, normals)
+      data.normals = normals
+      data.applyToMesh(mesh)
+      if (material) mesh.material = material
+      mesh.metadata = { splitIndex: index }
+      if (modelRoot) mesh.parent = modelRoot
+      return mesh
+    })
+
+    for (const mesh of sources) {
+      if (!mesh.isVisible) continue
+      mesh.isVisible = false
+      splitHiddenSources.push(mesh)
+    }
+    setSplitHidden(splitParts.map(() => false))
+  }
+
+  const disposeSplitPartMeshes = () => {
+    for (const mesh of splitPartMeshes) mesh.dispose()
+    splitPartMeshes = []
+    for (const mesh of splitHiddenSources) mesh.isVisible = true
+    splitHiddenSources = []
+    setSplitHidden([])
+  }
+
+  const toggleSplitVisible = (index: number) => {
+    setSplitHidden(prev => prev.map((hidden, position) => (position === index ? !hidden : hidden)))
+    const mesh = splitPartMeshes[index]
+    if (mesh) mesh.isVisible = !splitHidden()[index]
   }
 
   const clearSplitHighlight = () => {
@@ -782,6 +857,7 @@ export function StlViewerModal(props: StlViewerModalProps) {
 
   const closeSplit = () => {
     clearSplitHighlight()
+    disposeSplitPartMeshes()
     splitParts = []
     setSplitNames([])
     setSplitChosen([])
@@ -797,14 +873,19 @@ export function StlViewerModal(props: StlViewerModalProps) {
 
   const splitFileName = (index: number) => `${splitBaseName()}-part-${String(index + 1).padStart(2, '0')}.stl`
 
+  // A single part is handed over as the STL itself: an archive holding one file
+  // only asks the person to unpack it again.
   const downloadSplit = () => {
     const indices = chosenIndices()
     if (indices.length === 0) return
-    const zip = buildZip(indices.map(index => ({ name: splitFileName(index), data: writeBinaryStl(splitParts[index]) })))
-    const url = URL.createObjectURL(zip)
+    const single = indices.length === 1
+    const blob = single
+      ? new Blob([writeBinaryStl(splitParts[indices[0]])], { type: 'model/stl' })
+      : buildZip(indices.map(index => ({ name: splitFileName(index), data: writeBinaryStl(splitParts[index]) })))
+    const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `${splitBaseName()}-parts.zip`
+    anchor.download = single ? splitFileName(indices[0]) : `${splitBaseName()}-parts.zip`
     anchor.click()
     // Revoked on a later tick: revoking at once cancels the download in some browsers
     // before it has read the blob.
@@ -1083,6 +1164,13 @@ export function StlViewerModal(props: StlViewerModalProps) {
         // made rotating stutter. Hover resumes as soon as the button is released.
         if (!pointerDown) updateMeasureHover()
         return
+      }
+      // A tap on a part while the list is open points that row out, so the model
+      // answers the same question the magnifier in the list does.
+      if (info.type === PointerEventTypes.POINTERTAP && !measureActive() && splitPhase() === 'done') {
+        const pick = scene.pick(scene.pointerX, scene.pointerY)
+        const index = pick?.pickedMesh?.metadata?.splitIndex
+        if (typeof index === 'number') { flashSplitPart(index); return }
       }
       // Measure tool: each single tap on the surface drops a point (third tap starts over).
       if (info.type === PointerEventTypes.POINTERTAP && measureActive()) {
@@ -1735,7 +1823,7 @@ export function StlViewerModal(props: StlViewerModalProps) {
 
   const splitPanelDeps: SplitPanelDeps = {
     props, translate, builtPlates: () => builtPlates, platesUI, splitPhase, splitProgress, splitNames,
-    splitChosen, splitAdded, splitFlash, splitPlate, setSplitPlate, splitSaving, splitError, splitAddError,
+    splitChosen, splitAdded, splitFlash, splitHidden, toggleSplitVisible, splitPlate, setSplitPlate, splitSaving, splitError, splitAddError,
     splitPos, chosenIndices, pendingIndices, toggleSplitChoice, setAllSplitChoices, flashSplitPart,
     runSplit, closeSplit, downloadSplit, addSplitToDesign, startSplitDrag,
   }
@@ -1751,7 +1839,7 @@ export function StlViewerModal(props: StlViewerModalProps) {
 
   const viewerHeaderDeps: ViewerHeaderDeps = {
     props, translate, isLoading, formatLabel, colorGroups, colorsOpen, setColorsOpen,
-    settingsOpen, setSettingsOpen, toolsOpen, setToolsOpen, measureActive, resetView,
+    settingsOpen, setSettingsOpen, toolsOpen, setToolsOpen, measureActive, resetView, downloadFile,
   }
 
   const viewerOverlaysDeps: ViewerOverlaysDeps = {

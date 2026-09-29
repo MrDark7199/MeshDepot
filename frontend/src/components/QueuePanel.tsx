@@ -1,6 +1,7 @@
 import { useI18n } from '../i18n/index'
 import { For, Show } from 'solid-js'
 import type { QueueItem } from '../types'
+import { queueLabel } from '../utils/queueStatus'
 import { isAuthErrorMessage, makeTranslateError } from '../utils/authError'
 
 export function QueuePanel(props: {queue: QueueItem[]; onClose: () => void; onCancel: (id: number) => void; onRetry: (id: number) => void; onRetryAll: () => void; onDismiss: (id: number) => void; onOpenSettings?: () => void}) {
@@ -46,7 +47,7 @@ export function QueuePanel(props: {queue: QueueItem[]; onClose: () => void; onCa
                               ? `${label} (${item.step_current}/${item.step_total})`
                               : label
                           })()
-                        : translate('download_status_queued')}
+                        : queueLabel(item, translate)}
                   </div>
                 </div>
                 <Show when={item.status === 'pending' || item.status === 'downloading'}>

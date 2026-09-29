@@ -34,6 +34,10 @@ const translationJoin = `
 // maxTagFilters caps the tag ids the filter accepts - each adds a self-join.
 const maxTagFilters = 20
 
+// maxCustomFieldFilters caps the custom-field conditions one request may carry;
+// each adds a subquery.
+const maxCustomFieldFilters = 10
+
 // designID resolves the outward public id to designs.id; ok=false means a 404 or
 // 500 was written. The rowid never leaves the process: it is sequential, so a
 // link to design 70 told its reader that 1..69 exist.
@@ -135,6 +139,58 @@ func (server *Server) DesignsIndex(responseWriter http.ResponseWriter, request *
 		whereClause += " AND d.source_platform = ?"
 		args = append(args, platform)
 	}
+	// Filters on the user's own fields, sent as cf_<field id>=<value>. The field is
+	// required to belong to the reader, so a borrowed id matches nothing rather
+	// than reaching into somebody else's fields.
+	customFilters := 0
+	for parameter, values := range request.URL.Query() {
+		if !strings.HasPrefix(parameter, "cf_") || len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+			continue
+		}
+		fieldID, failure := strconv.Atoi(strings.TrimPrefix(parameter, "cf_"))
+		if failure != nil || fieldID <= 0 {
+			httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.invalid_input")
+			return
+		}
+		customFilters++
+		if customFilters > maxCustomFieldFilters {
+			httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.too_many_filters")
+			return
+		}
+		wanted := strings.TrimSpace(values[0])
+
+		// "No" on a yes/no field means everything that is not a yes - a stored no as
+		// well as a design nobody ever set it on. Matching "0" alone would find only
+		// the first, and the difference is not one a reader has in mind.
+		var fieldType string
+		_ = server.DB.QueryRow("SELECT field_type FROM custom_fields WHERE id = ? AND user_id = ?",
+			fieldID, currentUserID).Scan(&fieldType)
+		if fieldType == "boolean" && wanted == "0" {
+			whereClause += ` AND EXISTS (SELECT 1 FROM custom_fields f WHERE f.id = ? AND f.user_id = ?)
+				AND NOT EXISTS (SELECT 1 FROM design_custom_values v
+					WHERE v.design_id = d.id AND v.field_id = ? AND v.value = '1')`
+			args = append(args, fieldID, currentUserID, fieldID)
+			continue
+		}
+
+		// A multiselect holds its values as a JSON array, so the match runs over the
+		// entries rather than over the text - "A1" must not match "A1 mini".
+		if fieldType == "multiselect" {
+			whereClause += ` AND EXISTS (SELECT 1 FROM design_custom_values v
+				JOIN custom_fields f ON f.id = v.field_id
+				JOIN json_each(v.value) choice
+				WHERE v.design_id = d.id AND f.user_id = ? AND f.id = ?
+				  AND json_valid(v.value) AND choice.value = ?)`
+			args = append(args, currentUserID, fieldID, wanted)
+			continue
+		}
+
+		whereClause += ` AND EXISTS (SELECT 1 FROM design_custom_values v
+			JOIN custom_fields f ON f.id = v.field_id
+			WHERE v.design_id = d.id AND f.user_id = ? AND f.id = ? AND v.value = ?)`
+		args = append(args, currentUserID, fieldID, wanted)
+	}
+
 	// Every tag id becomes its own JOIN (AND semantics). Only validated ints are
 	// interpolated and the count is capped: an unparsable id silently became
 	// tag_id = 0, and ?tag_ids=1,1,1,… built an arbitrarily large self-join.
@@ -224,6 +280,9 @@ func (server *Server) DesignsShow(responseWriter http.ResponseWriter, request *h
 	design["tags"] = tags
 	images, _ := dbutil.QueryMaps(server.DB, "SELECT * FROM design_images WHERE design_id = ? ORDER BY sort_order ASC, created_at ASC", designID)
 	design["images"] = images
+	// Read through the reader's own fields, so a shared design shows the reader
+	// their fields and no values rather than the owner's.
+	design["custom_fields"] = customValuesFor(server.DB, designID, currentUserID)
 	design["sync_blocked_reason"] = ""
 	if coerce.StringOr(design["source_url"], "") != "" && coerce.Int(design["user_id"]) == currentUserID {
 		if ok, reason := server.platformCredsOK(coerce.StringOr(design["source_platform"], ""), currentUserID); !ok {
@@ -380,6 +439,14 @@ func (server *Server) DesignsUpdate(responseWriter http.ResponseWriter, request 
 		if _, failure := server.DB.Exec("UPDATE designs SET "+strings.Join(assignments, ", ")+" WHERE id = ?", args...); failure != nil {
 			httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 			return
+		}
+	}
+
+	// Values of the user's own fields, addressed by field id. Sent as a map so a
+	// field left out keeps what it had.
+	if raw, present := body["custom_values"]; present {
+		if values, ok := raw.(map[string]any); ok {
+			storeCustomValues(server.DB, designID, currentUserID, values)
 		}
 	}
 
