@@ -150,7 +150,7 @@ const entryJoin = ` FROM design_file_entries dfe
 // expect.
 func versionEntries(querier dbutil.Querier, fileID int) ([]fileEntryRow, error) {
 	rows, failure := querier.Query("SELECT "+fileEntryColumns+
-		" FROM design_file_entries dfe WHERE dfe.design_file_id = ? ORDER BY dfe.relative_path ASC, dfe.filename ASC", fileID)
+		" FROM design_file_entries dfe WHERE dfe.design_file_id = ? ORDER BY dfe.sort_order ASC, dfe.relative_path ASC, dfe.filename ASC", fileID)
 	if failure != nil {
 		return nil, failure
 	}

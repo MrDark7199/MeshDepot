@@ -150,12 +150,28 @@ CREATE TABLE IF NOT EXISTS design_file_entries (
     size_bytes     INTEGER NOT NULL DEFAULT 0,
     file_hash      TEXT    DEFAULT NULL,
     relative_path  TEXT    DEFAULT NULL,
+    -- The order within its folder, as the user arranged it by hand. 0 means
+    -- "never arranged", which sorts by path and leaves the old order in place.
+    sort_order     INTEGER NOT NULL DEFAULT 0,
     blob_hash      TEXT    DEFAULT NULL,
     gcode_meta     TEXT    DEFAULT NULL,
     created_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (design_file_id) REFERENCES design_files (id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_dfe_file ON design_file_entries (design_file_id);
+
+-- Folders a user made by hand inside one version. A folder that holds files
+-- needs no row here - it follows from the entries' relative_path - but one that
+-- is still empty would otherwise vanish on the next reload, and creating a
+-- folder before putting anything in it is how people work.
+CREATE TABLE IF NOT EXISTS design_file_folders (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    design_file_id INTEGER NOT NULL,
+    path           TEXT    NOT NULL,
+    created_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (design_file_id, path),
+    FOREIGN KEY (design_file_id) REFERENCES design_files (id) ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS idx_dfe_hash ON design_file_entries (file_hash);
 
 CREATE TABLE IF NOT EXISTS design_images (

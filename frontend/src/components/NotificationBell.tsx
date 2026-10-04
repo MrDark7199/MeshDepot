@@ -27,8 +27,8 @@ export function NotificationBell(props: {
   return (
     <div ref={panelRef} style={{ position:'relative' }}>
       <button onClick={() => props.store.setPanelOpen(isVisible => !isVisible)}
-        style={{ background:'var(--surface)', border:'1px solid var(--border)', 'border-radius':'11px', width:'42px', height:'42px', display:'flex', 'align-items':'center', 'justify-content':'center', cursor:'pointer', position:'relative', color:'var(--muted)' }}>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        style={{ background:'var(--surface)', border:'1px solid var(--border)', 'border-radius':'11px', width:'44px', height:'44px', display:'flex', 'align-items':'center', 'justify-content':'center', cursor:'pointer', position:'relative', color:'var(--muted)' }}>
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
         </svg>
         {/* Two badges - errors (red) and info (accent), each hidden at zero. */}

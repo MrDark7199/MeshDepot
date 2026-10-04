@@ -1,4 +1,5 @@
 import { createSignal, createEffect, onCleanup, onMount, Show, For } from 'solid-js'
+import type { JSX } from 'solid-js'
 import { api } from '../services/api'
 import { useAuth } from '../services/AuthContext'
 import { useI18n } from '../i18n/index'
@@ -17,6 +18,7 @@ import { PLATFORM_COLORS, platformLabel } from '../constants/platforms'
 import { buildDescriptionFragment, descriptionCss } from '../utils/description'
 import { browserHandlesClick, gridHref } from '../utils/navlink'
 import { sansFont, monoFont, labelStyle, inputStyle, TAG_COLOR_PRESETS } from '../styles/formStyles'
+import { PAGE_X } from '../constants/layout'
 import { GCODE_FORMATS, FDM_JOB_FORMATS, RESIN_FORMATS, RESIN_VIEWER_FORMATS, SLICER_FORMATS, SLICERS, lowerExt } from '../constants/fileFormats'
 import { isResolvableHost, normalizeSourceUrl } from '../utils/sourceUrl'
 import { formatBytes, formatPrintTime } from '../utils/format'
@@ -28,6 +30,7 @@ import { designBreadcrumb, type DesignBreadcrumbDeps } from '../app/designBreadc
 import { designSyncBanner, type DesignSyncBannerDeps } from '../app/designSyncBanner'
 import { designFilesTab, type DesignFilesTabDeps } from '../app/designFilesTab'
 import { designShareTab, type DesignShareTabDeps } from '../app/designShareTab'
+import { designEditScreen, type DesignEditScreenDeps } from '../app/designEditScreen'
 
 export interface DesignPageProps {
   designId:             DesignID
@@ -46,6 +49,12 @@ export interface DesignPageProps {
   syncProgress?:        number
   syncStep?:            { step: string; cur: number; tot: number }
   syncError?:           string
+  /**
+   * The pieces of the navigation bar this page carries itself. It replaces that
+   * bar rather than standing under it, so the way home and the two global
+   * actions are handed in instead of being drawn twice.
+   */
+  chrome?: { logo: () => JSX.Element; globalActions: () => JSX.Element }
 }
 
 /**
@@ -64,7 +73,7 @@ export interface DesignPageProps {
  * because the form normalizes nullable columns to '' and the hidden flag to
  * 0/1, which is what the PUT endpoint expects.
  */
-interface DesignEditForm {
+export interface DesignEditForm {
   name: string
   description: string
   category: string
@@ -80,6 +89,23 @@ interface DesignEditForm {
 /** Blank form used before a design has loaded. */
 function emptyEditForm(): DesignEditForm {
   return { name: '', description: '', category: '', license: '', author: '', source_url: '', rating: 0, print_time_minutes: '', notes: '', is_hidden: 0 }
+}
+
+/** The form as the design stands on the server: nullable columns as '', the
+ *  hidden flag as 0/1, which is what the PUT endpoint expects. */
+function formFromDesign(loaded: Design): DesignEditForm {
+  return {
+    name:               loaded.name || '',
+    description:        loaded.description || '',
+    category:           loaded.category || '',
+    license:            loaded.license || '',
+    author:             loaded.author || '',
+    source_url:         loaded.source_url || '',
+    rating:             loaded.rating || 0,
+    print_time_minutes: loaded.print_time_minutes || '',
+    notes:              loaded.notes || '',
+    is_hidden:          loaded.is_hidden ? 1 : 0,
+  }
 }
 
 export function DesignPage(props: DesignPageProps) {
@@ -113,6 +139,10 @@ export function DesignPage(props: DesignPageProps) {
   const [stlViewZUp, setStlViewZUp] = createSignal(false)
   /** Version the viewer was opened from - where its split tool writes the parts back to. */
   const [stlViewVersionId, setStlViewVersionId] = createSignal<number | null>(null)
+  /** The older fassung the viewer holds against the one on screen, if any. */
+  const [compareUrl, setCompareUrl] = createSignal<string | null>(null)
+  const [compareLabel, setCompareLabel] = createSignal('')
+  const [baseLabel, setBaseLabel] = createSignal('')
   /** When true, the detail view shows the canonical (untranslated) name/description. */
   const [showOriginal, setShowOriginal] = createSignal(false)
 
@@ -160,17 +190,21 @@ export function DesignPage(props: DesignPageProps) {
     setPendingDeleteImageIds(ids => ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id])
     if (pendingCoverId() === id) setPendingCoverId(null) // can't keep a to-be-deleted image as cover
   }
-  /** Image id awaiting the delete-confirmation modal (null = modal closed). */
-  const [confirmDeleteImageId, setConfirmDeleteImageId] = createSignal<number | null>(null)
   const [isSaving, setIsSaving] = createSignal(false)
   const [errorMessage, setErrorMessage] = createSignal('')
-  const { markDirty, resetDirty, guardClose, setShouldBlock } = useUnsavedChanges(translate('confirm_discard_changes'))
+  const { resetDirty, guardClose, setShouldBlock } = useUnsavedChanges(translate('confirm_discard_changes'))
   let editSnapshot = ''
   let initialEditModeDone = false
 
-  const editState = () => JSON.stringify({ form: editForm(), tags: selectedTagIds(), cols: designCollectionIds(), cover: pendingCoverId(), del: pendingDeleteImageIds() })
+  const editState = () => JSON.stringify({ form: editForm(), tags: selectedTagIds(), cols: designCollectionIds(), cover: pendingCoverId(), del: pendingDeleteImageIds(), fields: customValues(), added: pendingImages().length })
 
   const customFields = () => (design()?.custom_fields ?? []) as CustomField[]
+
+  // What the lists looked like before the form touched them. Cancel puts them
+  // back: the detail view reads the same signals, so a tag added and then
+  // dropped would otherwise keep showing there.
+  let tagsBeforeEdit: Tag[] = []
+  let collectionsBeforeEdit: Collection[] = []
 
   const enterEditMode = () => {
     setCustomValues(Object.fromEntries(customFields()
@@ -178,17 +212,44 @@ export function DesignPage(props: DesignPageProps) {
       .map(field => [String(field.id), field.value ?? ''])))
     setPendingCoverId(null)
     setPendingDeleteImageIds([])
+    clearPendingImages()
+    setErrorMessage('')
+    tagsBeforeEdit = selectedTags()
+    collectionsBeforeEdit = selectedCollections()
     editSnapshot = editState()
     setShouldBlock(() => editState() !== editSnapshot)
     setIsEditing(true)
   }
 
-  const exitEditMode = () => {
+  /**
+   * Leaves the form and drops what it staged. A save passes false: what was
+   * staged is the server's state by then, and the reload that follows brings it
+   * back with real ids.
+   */
+  const exitEditMode = (restoreStaged = true) => {
     resetDirty()
     setPendingCoverId(null)
     setPendingDeleteImageIds([])
+    clearPendingImages()
+    if (restoreStaged) {
+      // The typed fields go back as well. Without this a name, a note or the
+      // visibility switch kept the abandoned value and stood there again the
+      // next time the screen was opened, looking saved.
+      const loaded = design()
+      if (loaded) setEditForm(formFromDesign(loaded))
+      setSelectedTags(tagsBeforeEdit)
+      setSelectedCollections(collectionsBeforeEdit)
+    }
+    // The error box belongs to the form that was abandoned. It is shown on the
+    // detail view as well, where "Please enter a name." stood over a design
+    // that has one.
+    setErrorMessage('')
     setIsEditing(false)
   }
+
+  // Photos picked but never saved are only in memory; their preview URLs are
+  // released rather than left behind.
+  onCleanup(() => clearPendingImages())
 
   const [confirmDelete, setConfirmDelete] = createSignal(false)
   const [isDeleting, setIsDeleting] = createSignal(false)
@@ -212,6 +273,14 @@ export function DesignPage(props: DesignPageProps) {
   // taken off the design; that is why it is the complete set rather than a patch.
   const [customValues, setCustomValues] = createSignal<Record<string, string>>({})
   const [addFilesToVersionId, setAddFilesToVersionId] = createSignal<number | null>(null)
+  /** The version a new folder is being named for, and the name so far. */
+  const [newFolderVersionId, setNewFolderVersionId] = createSignal<number | null>(null)
+  const [newFolderName, setNewFolderName] = createSignal('')
+  /** The folder waiting for the delete dialog, with what is in it. */
+  const [folderToDelete, setFolderToDelete] =
+    createSignal<{ versionId: number; folder: string; fileCount: number } | null>(null)
+  /** Where the files of the "+ Files" dialog should land. */
+  const [uploadFolder, setUploadFolder] = createSignal('')
   const [pendingFileEntryDelete, setPendingFileEntryDelete] =
     createSignal<{ fileVersionId: number; entry: DesignFileEntry } | null>(null)
 
@@ -220,7 +289,41 @@ export function DesignPage(props: DesignPageProps) {
   const [expandedVersionIds, setExpandedVersionIds] = createSignal<Set<number>>(new Set())
 
   const [isUploadingImage, setIsUploadingImage] = createSignal(false)
-  let imageInputRef: HTMLInputElement | undefined
+
+  /**
+   * Photos picked on the edit screen. They are kept as files with a preview URL
+   * and only sent when Save is pressed, so leaving the screen takes them with
+   * it instead of leaving them in the gallery.
+   */
+  // Each carries a provisional id, negative like a new tag's, so it can be
+  // picked as the cover before it exists: the save maps that id to the row the
+  // upload creates. Without it a freshly added design - which has no stored
+  // image at all - offered no way to say which picture is the cover.
+  const [pendingImages, setPendingImages] = createSignal<{ key: number; file: File; url: string }[]>([])
+  const addPendingImages = (files: FileList | File[]) => {
+    const picked = Array.from(files).filter(file => file.type.startsWith('image/'))
+    if (picked.length === 0) return
+    setPendingImages(current => [...current,
+      ...picked.map(file => ({ key: takeProvisionalId(), file, url: URL.createObjectURL(file) }))])
+  }
+  const removePendingImage = (index: number) => setPendingImages(current => {
+    const dropped = current[index]
+    URL.revokeObjectURL(dropped.url)
+    // A picture that is going away cannot stay the chosen cover.
+    if (pendingCoverId() === dropped.key) setPendingCoverId(null)
+    return current.filter((_, position) => position !== index)
+  })
+  const clearPendingImages = () => {
+    for (const picked of pendingImages()) URL.revokeObjectURL(picked.url)
+    setPendingImages([])
+  }
+
+  /**
+   * Ids a tag or collection the user invented while editing carries until Save
+   * creates it. Negative, so a real id is never mistaken for one.
+   */
+  let lastProvisionalId = 0
+  const takeProvisionalId = () => --lastProvisionalId
 
   // Tags as a select2-style combobox: the picked ones are held as full objects
   // (chips), and matches are searched on the server rather than loaded up front.
@@ -230,7 +333,6 @@ export function DesignPage(props: DesignPageProps) {
   const [tagResults, setTagResults] = createSignal<Tag[]>([])
   const [tagOpen, setTagOpen] = createSignal(false)
   const [newTagColor, setNewTagColor] = createSignal(TAG_COLOR_PRESETS[0])
-  const [isCreatingTag, setIsCreatingTag] = createSignal(false)
 
   const notSelected = (t: Tag) => !selectedTagIds().includes(t.id)
   const addSelectedTag = (t: Tag) => {
@@ -268,11 +370,13 @@ export function DesignPage(props: DesignPageProps) {
   const designCollectionIds = () => selectedCollections().map(c => c.id)
   const [colQuery, setColQuery] = createSignal('')
   const [colOpen, setColOpen] = createSignal(false)
-  const [isCreatingCol, setIsCreatingCol] = createSignal(false)
   // The picker offers hidden collections too, so a design can still be put into
   // one. The read-only view further down keeps hiding them (it intersects
   // props.allCollections, which never contains hidden ones).
   const [pickerCollections, setPickerCollections] = createSignal<Collection[]>([])
+  /** The collections the server has this design in - what the staged list is
+   *  compared against when saving. */
+  const [savedCollectionIds, setSavedCollectionIds] = createSignal<number[]>([])
 
   const notColSelected = (c: Collection) => !designCollectionIds().includes(c.id)
   const colResults = () => {
@@ -284,6 +388,7 @@ export function DesignPage(props: DesignPageProps) {
   const showCreateCol = () => {
     const q = colQuery().trim().toLowerCase()
     return q !== '' && !pickerCollections().some(c => c.name.toLowerCase() === q)
+      && !selectedCollections().some(c => c.name.toLowerCase() === q)
   }
   const onColKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -485,30 +590,30 @@ export function DesignPage(props: DesignPageProps) {
    * then hydrates the edit form and tag/collection signals.
    */
   const loadDesign = async () => {
-    setIsLoading(true)
+    // Reloading while the edit screen is open must leave it standing: uploading
+    // an image reloads the design, and the spinner would tear the form down
+    // mid-edit, form contents and scroll position with it.
+    const quiet = isEditing()
+    if (!quiet) setIsLoading(true)
     try {
       const response = await api.getDesign(props.designId)
       const loaded = response.data
       setDesign(loaded)
       setShowOriginal(false)
-      setEditForm({
-        name:               loaded.name || '',
-        description:        loaded.description || '',
-        category:           loaded.category || '',
-        license:            loaded.license || '',
-        author:             loaded.author || '',
-        source_url:         loaded.source_url || '',
-        rating:             loaded.rating || 0,
-        print_time_minutes: loaded.print_time_minutes || '',
-        notes:              loaded.notes || '',
-        is_hidden:          loaded.is_hidden ? 1 : 0,
-      })
-      setSelectedTags(loaded.tags || [])
+      // For the same reason the form is only filled from the server when nobody
+      // is typing into it - otherwise an image upload discards the edits.
+      if (!quiet) {
+        setEditForm(formFromDesign(loaded))
+        setSelectedTags(loaded.tags || [])
+      }
       const [colResponse, pickerResponse]: [any, any] = await Promise.all([
         api.getDesignCollections(props.designId, true),
         api.getCollections(true),
       ])
-      setSelectedCollections(colResponse.data)
+      if (!quiet) {
+        setSelectedCollections(colResponse.data)
+        setSavedCollectionIds((colResponse.data || []).map((collection: Collection) => collection.id))
+      }
       setPickerCollections(pickerResponse.data || [])
       if (props.initialEditMode && !initialEditModeDone) { initialEditModeDone = true; enterEditMode() }
     } catch (failure: unknown) {
@@ -521,7 +626,7 @@ export function DesignPage(props: DesignPageProps) {
       const key = errorKey(failure, 'error.not_found')
       setDesign(null)
       setErrorMessage(key === 'error.not_found' ? translate('design_unavailable_hint') : t(key))
-    } finally { setIsLoading(false) }
+    } finally { if (!quiet) setIsLoading(false) }
   }
 
   /**
@@ -529,7 +634,26 @@ export function DesignPage(props: DesignPageProps) {
    * geometry, so what is loaded is the mesh the server rebuilt from the layer
    * stack, parsed as an STL (hence the "model.stl" format hint).
    */
+  /**
+   * Opens one file with its older fassung laid over it. Everything the viewer
+   * does to a single model - splitting, measuring, photographing - is turned off
+   * there; two models in one scene make those questions ambiguous.
+   */
+  const compareInViewer = (olderVersionId: number, olderEntry: DesignFileEntry,
+                           newerVersionId: number, newerEntry: DesignFileEntry) => {
+    const versionNumber = (id: number) => fileVersions().find(version => version.id === id)?.version ?? ''
+    setCompareUrl(api.entryUrl(props.designId, olderVersionId, olderEntry.id))
+    setCompareLabel('v' + versionNumber(olderVersionId))
+    setBaseLabel('v' + versionNumber(newerVersionId))
+    setStlViewUrl(api.entryUrl(props.designId, newerVersionId, newerEntry.id))
+    setStlViewFilename(newerEntry.filename)
+    setStlViewName(newerEntry.filename)
+    setStlViewZUp(false)
+    setStlViewVersionId(newerVersionId)
+  }
+
   const showEntryInViewer = (fileVersionId: number, entry: DesignFileEntry) => {
+    setCompareUrl(null)
     const resin = isResinFile(entry.filename)
     if (resin) {
       setStlViewUrl(api.pwmxMeshUrl(props.designId, fileVersionId, entry.id))
@@ -571,9 +695,16 @@ export function DesignPage(props: DesignPageProps) {
         setFileVersions(versions)
         // Prefill the version field with the suggestion while it is untouched.
         if (!uploadVersion().trim()) setUploadVersion(nextVersion())
-        // Expand newest (current) version by default, collapse the rest.
+        // The newest (current) version is expanded to begin with. What is open
+        // stays open afterwards: every move of a file reloads the list, and
+        // collapsing the card being worked in would close it under the hand.
         const newest = versions.find(v => v.is_current) || versions[0]
-        setExpandedVersionIds(newest ? new Set<number>([newest.id]) : new Set<number>())
+        setExpandedVersionIds(current => {
+          const known = new Set(versions.map(version => version.id))
+          const kept = new Set([...current].filter(id => known.has(id)))
+          if (kept.size === 0 && newest) kept.add(newest.id)
+          return kept
+        })
         openViewerFromUrl(versions)
       })
       .catch(() => {})
@@ -638,17 +769,63 @@ export function DesignPage(props: DesignPageProps) {
     setIsSaving(true); setErrorMessage('')
     try {
       await api.updateDesign(props.designId, { ...editForm(), source_url: sourceUrl, custom_values: customValues() })
-      await api.setDesignTags(props.designId, selectedTagIds())
+
+      // Tags and collections the user invented exist only in the form until
+      // here; they are created first, so the links below have real ids to use.
+      const tagIds: number[] = []
+      for (const tag of selectedTags()) {
+        if (tag.id > 0) { tagIds.push(tag.id); continue }
+        const created = await api.createTag({ name: tag.name, color: tag.color }) as { data: Tag }
+        tagIds.push(created.data.id)
+      }
+      await api.setDesignTags(props.designId, tagIds)
+
+      const collectionIds: number[] = []
+      let collectionsChanged = false
+      for (const collection of selectedCollections()) {
+        if (collection.id > 0) { collectionIds.push(collection.id); continue }
+        const created = await api.createCollection({ name: collection.name }) as { data: Collection }
+        collectionIds.push(created.data.id)
+        collectionsChanged = true
+      }
+      // Only the difference is written: the rest the design is already in.
+      for (const id of collectionIds) {
+        if (savedCollectionIds().includes(id)) continue
+        await api.addToCollection(id, [props.designId])
+        collectionsChanged = true
+      }
+      for (const id of savedCollectionIds()) {
+        if (collectionIds.includes(id)) continue
+        await api.removeFromCollection(id, props.designId)
+        collectionsChanged = true
+      }
+
+      // Photos picked on the screen are sent only now, which is what lets
+      // Cancel leave the gallery as it was. Each answer says which row it
+      // created, so a cover chosen among them can be pointed at it below.
+      const uploadedIds = new Map<number, number>()
+      for (const picked of pendingImages()) {
+        const formData = new FormData()
+        formData.append('image', picked.file)
+        const answer = await api.uploadImage(props.designId, formData) as { data?: { image_id?: number } }
+        const newId = answer?.data?.image_id
+        if (newId) uploadedIds.set(picked.key, newId)
+      }
+
       // Staged image deletions (Galerie) - only now removed on the server.
       const toDelete = pendingDeleteImageIds()
       for (const id of toDelete) { try { await api.deleteImage(props.designId, id) } catch {} }
       if (toDelete.length) setActiveImageIndex(0)
       // Staged cover selection (Titelbild) - only now committed to the server.
+      // A negative one names a picture from this same save, whose real id the
+      // upload just handed back.
       const pendingCover = pendingCoverId()
-      if (pendingCover !== null) await api.setDesignImageCover(props.designId, pendingCover)
+      const coverId = pendingCover !== null && pendingCover < 0 ? uploadedIds.get(pendingCover) : pendingCover
+      if (coverId) await api.setDesignImageCover(props.designId, coverId)
       props.showToast(translate('toast_design_saved'))
       props.onTagsChanged()
-      exitEditMode()
+      if (collectionsChanged) props.onCollectionsChanged()
+      exitEditMode(false)
       loadDesign()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'error.internal'
@@ -740,12 +917,70 @@ export function DesignPage(props: DesignPageProps) {
     } finally { setIsUploading(false) }
   }
 
+  /** The folders of one version, for the pickers. */
+  const foldersOfVersion = (fileVersionId: number | null) =>
+    fileVersions().find(version => version.id === fileVersionId)?.folders ?? []
+
+  const createFolder = async () => {
+    const versionId = newFolderVersionId()
+    const name = newFolderName().trim()
+    if (versionId === null || !name) return
+    try {
+      await api.createFolder(props.designId, versionId, name)
+      setNewFolderVersionId(null)
+      setNewFolderName('')
+      loadFiles()
+    } catch (failure: unknown) {
+      props.showToast(t(errorKey(failure)), 'error')
+    }
+  }
+
+  /**
+   * Moves one file into a folder of its version - dropped there, usually. With
+   * an order, the folder is also arranged the way it was dropped; the move runs
+   * first, so the file is in that folder by the time the order is written.
+   */
+  const moveEntryToFolder = async (fileVersionId: number, entryId: number, folder: string, order?: number[]) => {
+    try {
+      await api.moveEntry(props.designId, fileVersionId, entryId, folder)
+      if (order && order.length > 0) await api.reorderEntries(props.designId, fileVersionId, order)
+      loadFiles()
+    } catch (failure: unknown) {
+      props.showToast(t(errorKey(failure)), 'error')
+    }
+  }
+
+  /** Arranges one folder's files, without any of them changing folder. */
+  const reorderEntries = async (fileVersionId: number, entryIds: number[]) => {
+    try {
+      await api.reorderEntries(props.designId, fileVersionId, entryIds)
+      loadFiles()
+    } catch (failure: unknown) {
+      props.showToast(t(errorKey(failure)), 'error')
+    }
+  }
+
+  /** Removes a folder, with or without what is in it - the dialog asks which. */
+  const removeFolder = async (deleteFiles: boolean) => {
+    const pending = folderToDelete()
+    if (!pending) return
+    setFolderToDelete(null)
+    try {
+      await api.deleteFolder(props.designId, pending.versionId, pending.folder, deleteFiles)
+      loadFiles()
+      if (deleteFiles) loadDesign()
+    } catch (failure: unknown) {
+      props.showToast(t(errorKey(failure)), 'error')
+    }
+  }
+
   /** Appends one or more files to an existing version. */
   const addFilesToVersion = async (fileVersionId: number, files: File[]) => {
     if (files.length === 0) return
     try {
       const formData = new FormData()
       for (const f of files) formData.append('file', f)
+      if (uploadFolder().trim()) formData.append('folder', uploadFolder().trim())
       await api.addEntries(props.designId, fileVersionId, formData)
       props.showToast(translate('toast_file_uploaded'))
       setAddFilesToVersionId(null)
@@ -774,48 +1009,27 @@ export function DesignPage(props: DesignPageProps) {
     }
   }
 
-  /**
-   * Adds the design to a collection picked from the dropdown. Persisted right
-   * away rather than on save.
-   */
-  const addCollectionSel = async (col: Collection) => {
+  /** Puts the design in a collection picked from the dropdown - staged, like
+   *  everything else on the edit screen, and written when Save is pressed. */
+  const addCollectionSel = (col: Collection) => {
     setColQuery(''); setColOpen(false)
     if (!notColSelected(col)) return
-    try {
-      await api.addToCollection(col.id, [props.designId])
-      setSelectedCollections(cs => [...cs, col])
-      props.showToast(translate('toast_added_to_collection'))
-      props.onCollectionsChanged()
-    } catch {}
+    setSelectedCollections(cs => [...cs, col])
   }
 
-  /** Removes the design from a collection (the chip's ×). Persisted right away. */
-  const removeCollectionSel = async (id: number) => {
-    try {
-      await api.removeFromCollection(id, props.designId)
-      setSelectedCollections(cs => cs.filter(c => c.id !== id))
-      props.showToast(translate('toast_removed_from_collection'))
-      props.onCollectionsChanged()
-    } catch {}
-  }
+  /** Takes the design out of a collection (the chip's ×). Staged as well. */
+  const removeCollectionSel = (id: number) => setSelectedCollections(cs => cs.filter(c => c.id !== id))
 
   /**
-   * Creates a collection named after what is in the search box and puts the
-   * design in it right away, like createNewTag. Refreshes the parent list.
+   * A collection named after what is in the search box. It does not exist yet:
+   * it carries a provisional id until Save creates it, so cancelling leaves no
+   * empty collection behind.
    */
-  const createNewCollection = async () => {
+  const createNewCollection = () => {
     const name = colQuery().trim()
-    if (!name || isCreatingCol()) return
-    setIsCreatingCol(true)
-    try {
-      const res = await api.createCollection({ name }) as { data: Collection }
-      const col = res.data
-      await api.addToCollection(col.id, [props.designId])
-      setSelectedCollections(cs => [...cs, col])
-      props.showToast(translate('toast_collection_created'))
-      props.onCollectionsChanged()
-    } catch (failure: unknown) { props.showToast(translate(errorKey(failure)), 'error') }
-    finally { setIsCreatingCol(false); setColQuery(''); setColOpen(false) }
+    if (!name) return
+    setSelectedCollections(cs => [...cs, { id: takeProvisionalId(), name }])
+    setColQuery(''); setColOpen(false)
   }
 
   /**
@@ -851,18 +1065,14 @@ export function DesignPage(props: DesignPageProps) {
   }
 
   /**
-   * Creates a new tag with the current name/colour inputs and immediately
-   * selects it for the design. Notifies the parent via `onTagsChanged`.
+   * A tag named after what is in the search box, in the chosen colour. Like a
+   * new collection it is only promised here and created on save, so a tag typed
+   * and then abandoned does not end up in the library.
    */
-  const createNewTag = async () => {
+  const createNewTag = () => {
     const name = tagQuery().trim()
     if (!name) return
-    setIsCreatingTag(true)
-    try {
-      const response = await api.createTag({ name, color: newTagColor() }) as { data: Tag }
-      addSelectedTag(response.data)
-      props.onTagsChanged()
-    } catch {} finally { setIsCreatingTag(false) }
+    addSelectedTag({ id: takeProvisionalId(), name, color: newTagColor() })
   }
 
   const GRADIENT_FALLBACK = `linear-gradient(135deg, #1a1a2e, #16213e, #0f3460)`
@@ -870,7 +1080,7 @@ export function DesignPage(props: DesignPageProps) {
   const setFileInputRef = (element: HTMLInputElement) => { fileInputRef = element }
 
   const designBreadcrumbDeps: DesignBreadcrumbDeps = {
-    props, translate, user, design, shownName, isLoading, isEditing, enterEditMode, exitEditMode,
+    props, translate, design, shownName, isLoading, enterEditMode,
     openUploadVersion: () => { setUploadError(''); setUploadVersionOpen(true) },
     guardClose, setConfirmDelete, startSyncStream,
   }
@@ -880,8 +1090,27 @@ export function DesignPage(props: DesignPageProps) {
   const designFilesTabDeps: DesignFilesTabDeps = {
     props, translate, lang, user, design, activeTab, fileVersions, isLoadingFiles, expandedVersionIds,
     setExpandedVersionIds, collapsedFolders, setCollapsedFolders, deleteFileEntry, setConfirmDeleteFileId,
-    openAddFiles: (fileVersionId: number) => setAddFilesToVersionId(fileVersionId),
+    openAddFiles: (fileVersionId: number) => { setUploadFolder(''); setAddFilesToVersionId(fileVersionId) },
+    openNewFolder: (fileVersionId: number) => { setNewFolderName(''); setNewFolderVersionId(fileVersionId) },
+    moveEntryToFolder,
+    reorderEntries,
+    askDeleteFolder: (fileVersionId: number, folder: string, fileCount: number) =>
+      setFolderToDelete({ versionId: fileVersionId, folder, fileCount }),
+    compareInViewer,
     showEntryInViewer, isGcodeFile, isResinFile, isResinViewable, gcodeSummary,
+  }
+
+  const designEditScreenDeps: DesignEditScreenDeps = {
+    translate, logo: props.chrome?.logo, shownName, editForm, setEditForm, errorMessage, isSaving, saveDesign,
+    cancelEdit: () => guardClose(exitEditMode),
+    galleryImages, effectiveCoverId, stageCover, isStagedDelete, toggleDeleteImage,
+    pendingImages, addPendingImages, removePendingImage,
+    selectedTags, notSelected, addSelectedTag, removeSelectedTag, tagQuery, onTagInput, runTagSearch,
+    tagResults, tagOpen, setTagOpen, onTagKeyDown, showCreateTag, createNewTag,
+    newTagColor, setNewTagColor,
+    selectedCollections, colResults, addCollectionSel, removeCollectionSel, colQuery, setColQuery,
+    colOpen, setColOpen, onColKeyDown, showCreateCol, createNewCollection,
+    customFields, customValues, setCustomValues,
   }
 
   const designShareTabDeps: DesignShareTabDeps = {
@@ -892,11 +1121,14 @@ export function DesignPage(props: DesignPageProps) {
   }
 
 
+  // The room at the bottom is for the detail view, whose last tab should not end
+  // flush with the window. The edit screen brings its own and would only be
+  // pushed into a scrollbar by it.
   return (
-    <div style={{ 'min-height': '100vh', background: 'var(--bg)', 'padding-bottom': '70px' }}>
+    <div style={{ 'min-height': '100vh', background: 'var(--bg)', 'padding-bottom': isEditing() ? '0' : '70px' }}>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
 
-      {designBreadcrumb(designBreadcrumbDeps)}
+      <Show when={!isEditing()}>{designBreadcrumb(designBreadcrumbDeps)}</Show>
 
       {designSyncBanner(designSyncBannerDeps)}
 
@@ -919,7 +1151,11 @@ export function DesignPage(props: DesignPageProps) {
             </button>
           </div>
         }>
-          <div style={{ padding: '32px 36px', 'max-width': '1500px', margin: '0 auto' }}>
+          {/* Editing takes the whole page. The form used to sit below the detail
+              view, which meant reading one layout while typing into another, with
+              the tabs underneath showing what was not being edited. */}
+          <Show when={isEditing() && !props.isReadOnly} fallback={
+          <div style={{ padding: `32px ${PAGE_X}`, 'max-width': '1500px', margin: '0 auto' }}>
             <ErrorBox message={errorMessage()} />
 
             {/* - Main 2-column layout - */}
@@ -969,18 +1205,6 @@ export function DesignPage(props: DesignPageProps) {
                     </button>
                   </Show>
 
-                  {/* Add photo button */}
-                  <Show when={!props.isReadOnly && isEditing()}>
-                    <button onClick={() => imageInputRef?.click()} disabled={isUploadingImage()}
-                      style={{ position: 'absolute', bottom: '14px', right: '14px', background: 'rgba(0,0,0,0.65)', border: '1px solid rgba(255,255,255,0.2)', 'border-radius': '10px', padding: '7px 13px', color: '#fff', 'font-size': '12px', cursor: 'pointer', ...monoFont, display: 'flex', 'align-items': 'center', gap: '6px', 'backdrop-filter': 'blur(4px)' }}>
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5">
-                        <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
-                      </svg>
-                      {isUploadingImage() ? '…' : translate('btn_add_photo')}
-                    </button>
-                    <input ref={imageInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }}
-                      onChange={e => { const files = e.currentTarget.files; if (files && files.length > 0) uploadDesignImage(files); e.currentTarget.value = '' }} />
-                  </Show>
                 </div>
 
                 {/* Thumbnail strip */}
@@ -989,34 +1213,14 @@ export function DesignPage(props: DesignPageProps) {
                     <For each={galleryImages()}>{(img, index) => (
                       <div onClick={() => setActiveImageIndex(index())}
                         style={{ width: '80px', height: '80px', 'flex-shrink': '0', 'border-radius': '10px', overflow: 'hidden', cursor: 'pointer', border: activeImageIndex() === index() ? '2px solid var(--accent)' : '2px solid var(--border)', 'transition': 'border 0.15s', position: 'relative' }}>
-                        <img src={api.coverUrl(img.path)} alt="" style={{ width: '100%', height: '100%', 'object-fit': 'cover', opacity: ('id' in img && isStagedDelete((img as any).id)) ? '0.3' : '1', transition: 'opacity 0.15s' }} />
-                        {/* Cover-Kennzeichnung / „Als Titelbild"-Knopf (nur echte Bilder, nicht bei zum Löschen markierten). */}
-                        <Show when={'id' in img && (img as any).id > 0 && !isStagedDelete((img as any).id)}>
-                          <Show when={effectiveCoverId() === (img as any).id} fallback={
-                            <Show when={isEditing() && !props.isReadOnly}>
-                              <button onClick={e => { e.stopPropagation(); stageCover((img as any).id) }} title={translate('btn_set_cover')}
-                                style={{ position: 'absolute', top: '3px', left: '3px', background: 'rgba(0,0,0,0.6)', border: 'none', 'border-radius': '4px', color: '#fff', cursor: 'pointer', width: '20px', height: '20px', display: 'flex', 'align-items': 'center', 'justify-content': 'center', padding: '0' }}>
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                              </button>
-                            </Show>
-                          }>
-                            <div title={translate('label_cover')}
-                              style={{ position: 'absolute', top: '3px', left: '3px', background: 'var(--accent)', 'border-radius': '4px', color: '#fff', width: '20px', height: '20px', display: 'flex', 'align-items': 'center', 'justify-content': 'center' }}>
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill="#fff" stroke="#fff" stroke-width="1"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                            </div>
-                          </Show>
-                        </Show>
-                        <Show when={isEditing() && !props.isReadOnly && 'id' in img && (img as any).id > 0}>
-                          <Show when={isStagedDelete((img as any).id)} fallback={
-                            <button onClick={e => { e.stopPropagation(); setConfirmDeleteImageId((img as any).id) }} title={translate('btn_delete_image')}
-                              style={{ position: 'absolute', top: '3px', right: '3px', background: 'rgba(230,57,70,0.85)', border: 'none', 'border-radius': '4px', color: '#fff', 'font-size': '11px', cursor: 'pointer', width: '20px', height: '20px', display: 'flex', 'align-items': 'center', 'justify-content': 'center' }}>×</button>
-                          }>
-                            {/* Zum Löschen markiert: „Rückgängig"-Knopf; endgültig gelöscht wird erst beim Speichern. */}
-                            <button onClick={e => { e.stopPropagation(); toggleDeleteImage((img as any).id) }} title={translate('btn_undo_delete')}
-                              style={{ position: 'absolute', inset: '0', background: 'rgba(230,57,70,0.28)', border: '2px solid var(--danger)', 'border-radius': '10px', color: '#fff', cursor: 'pointer', display: 'flex', 'align-items': 'center', 'justify-content': 'center', gap: '4px', ...monoFont, 'font-size': '10px', 'font-weight': '700' }}>
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-                            </button>
-                          </Show>
+                        <img src={api.coverUrl(img.path)} alt="" style={{ width: '100%', height: '100%', 'object-fit': 'cover' }} />
+                        {/* Which one is the cover. Choosing another happens on
+                            the edit screen, so there is no button here. */}
+                        <Show when={'id' in img && (img as any).id > 0 && effectiveCoverId() === (img as any).id}>
+                          <div title={translate('label_cover')}
+                            style={{ position: 'absolute', top: '3px', left: '3px', background: 'var(--accent)', 'border-radius': '4px', color: '#fff', width: '20px', height: '20px', display: 'flex', 'align-items': 'center', 'justify-content': 'center' }}>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="#fff" stroke="#fff" stroke-width="1"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                          </div>
                         </Show>
                       </div>
                     )}</For>
@@ -1171,252 +1375,6 @@ export function DesignPage(props: DesignPageProps) {
               </div>
             </div>
 
-            {/* - Edit form - */}
-            <Show when={isEditing() && !props.isReadOnly}>
-              <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', 'border-radius': '18px', padding: '26px', 'margin-bottom': '30px' }}
-                onInput={markDirty} onChange={markDirty}>
-                <div style={{ ...sansFont, 'font-weight': '700', 'font-size': '16px', color: 'var(--text)', 'margin-bottom': '20px' }}>{translate('label_edit_design')}</div>
-                <ErrorBox message={errorMessage()} />
-                <div style={{ display: 'grid', 'grid-template-columns': '1fr 1fr', gap: '14px' }}>
-                  <div style={{ 'grid-column': '1 / -1' }}>
-                    <label style={labelStyle}>{translate('field_name')} *</label>
-                    <input style={inputStyle} value={editForm().name} onInput={e => setEditForm(f => ({...f, name: e.currentTarget.value}))} />
-                  </div>
-                  <div style={{ 'grid-column': '1 / -1' }}>
-                    <label style={labelStyle}>{translate('field_description')}</label>
-                    <textarea rows={3} style={{...inputStyle, resize: 'vertical'}} value={editForm().description} onInput={e => setEditForm(f => ({...f, description: e.currentTarget.value}))} />
-                  </div>
-                  <div><label style={labelStyle}>{translate('field_category')}</label><input style={inputStyle} value={editForm().category} onInput={e => setEditForm(f => ({...f, category: e.currentTarget.value}))} /></div>
-                  <div><label style={labelStyle}>{translate('field_author')}</label><input style={inputStyle} value={editForm().author} onInput={e => setEditForm(f => ({...f, author: e.currentTarget.value}))} /></div>
-                  <div><label style={labelStyle}>{translate('field_license')}</label><input style={inputStyle} value={editForm().license} onInput={e => setEditForm(f => ({...f, license: e.currentTarget.value}))} /></div>
-                  <div style={{ 'grid-column': '1 / -1' }}>
-                    <label style={labelStyle}>{translate('field_source_url')}</label>
-                    <input style={inputStyle} value={editForm().source_url} onInput={e => setEditForm(f => ({...f, source_url: e.currentTarget.value}))} />
-                  </div>
-                  <div style={{ 'grid-column': '1 / -1' }}>
-                    <label style={labelStyle}>{translate('field_visibility')}</label>
-                    <button type="button" onClick={() => setEditForm(f => ({...f, is_hidden: f.is_hidden ? 0 : 1}))}
-                      style={{ padding: '9px 17px', 'border-radius': '9px', border: `1px solid ${editForm().is_hidden ? 'var(--accent)' : 'var(--border)'}`, background: editForm().is_hidden ? 'rgba(69,123,157,0.15)' : 'var(--surface)', color: editForm().is_hidden ? 'var(--accent-light)' : 'var(--text3)', 'font-size': '14px', cursor: 'pointer', ...sansFont, 'font-weight': '500', display: 'flex', 'align-items': 'center', gap: '7px' }}>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-                        <Show when={!editForm().is_hidden}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></Show>
-                        <Show when={!!editForm().is_hidden}><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></Show>
-                      </svg>
-                      {editForm().is_hidden ? translate('btn_unhide_design') : translate('btn_hide_design')}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Collection editor - durchsuchbare Combobox (Select2-Stil), nur beim Bearbeiten */}
-                <Show when={!props.isReadOnly}>
-                  <div style={{ 'margin-top': '16px' }}>
-                    <label style={labelStyle}>{translate('collection_title')}</label>
-                    {/* Ausgewählte Sammlungen als entfernbare Chips */}
-                    <div style={{ display: 'flex', 'flex-wrap': 'wrap', gap: '7px', 'margin-bottom': '9px' }}>
-                      <For each={selectedCollections()}>{col => (
-                        <span style={{ display: 'inline-flex', 'align-items': 'center', gap: '6px', 'font-size': '12px', padding: '4px 6px 4px 11px', 'border-radius': '7px', background: 'rgba(69,123,157,0.18)', color: 'var(--accent-light)', ...sansFont, 'font-weight': '600' }}>
-                          {col.name}
-                          <button onClick={() => removeCollectionSel(col.id)} title={translate('btn_delete')}
-                            style={{ background: 'none', border: 'none', color: 'var(--accent-light)', cursor: 'pointer', 'font-size': '15px', 'line-height': '1', padding: '0' }}>×</button>
-                        </span>
-                      )}</For>
-                      <Show when={selectedCollections().length === 0}>
-                        <span style={{ 'font-size': '13px', color: 'var(--muted)', 'font-style': 'italic' }}>{translate('label_no_collections')}</span>
-                      </Show>
-                    </div>
-                    {/* Sucheingabe + Dropdown */}
-                    <div style={{ position: 'relative' }}>
-                      <input value={colQuery()} placeholder={translate('collection_search_placeholder')}
-                        onInput={e => { setColQuery(e.currentTarget.value); setColOpen(true) }}
-                        onFocus={() => setColOpen(true)}
-                        onClick={() => setColOpen(true)}
-                        onBlur={() => setTimeout(() => setColOpen(false), 150)}
-                        onKeyDown={onColKeyDown}
-                        style={{ ...inputStyle, width: '100%', 'font-size': '13px', padding: '7px 11px' }} />
-                      <Show when={colOpen() && (colResults().length > 0 || showCreateCol())}>
-                        <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: '0', right: '0', 'z-index': '30', background: 'var(--bg2)', border: '1px solid var(--border)', 'border-radius': '10px', 'box-shadow': '0 12px 30px rgba(0,0,0,0.35)', 'max-height': '240px', 'overflow-y': 'auto', padding: '5px' }}>
-                          <For each={colResults()}>{col => (
-                            <button onMouseDown={e => e.preventDefault()} onClick={() => addCollectionSel(col)}
-                              style={{ display: 'flex', 'align-items': 'center', gap: '8px', width: '100%', 'text-align': 'left', padding: '7px 9px', background: 'none', border: 'none', 'border-radius': '7px', cursor: 'pointer', ...sansFont, 'font-size': '13px', color: 'var(--text2)' }}>
-                              {col.name}
-                            </button>
-                          )}</For>
-                          <Show when={showCreateCol()}>
-                            <div style={{ padding: '7px 9px', 'border-top': colResults().length > 0 ? '1px solid var(--border)' : 'none' }}>
-                              <button onMouseDown={e => e.preventDefault()} onClick={createNewCollection} disabled={isCreatingCol()}
-                                style={{ 'max-width': '100%', padding: '5px 11px', background: 'var(--accent)', border: 'none', 'border-radius': '7px', color: '#fff', 'font-size': '13px', cursor: 'pointer', ...sansFont, opacity: isCreatingCol() ? '0.6' : '1', overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap' }}>
-                                {isCreatingCol() ? '…' : translate('collection_create', { name: colQuery().trim() })}
-                              </button>
-                            </div>
-                          </Show>
-                        </div>
-                      </Show>
-                    </div>
-                  </div>
-                </Show>
-
-                {/* Tag editor - durchsuchbare Combobox (Select2-Stil) */}
-                <div style={{ 'margin-top': '16px' }}>
-                  <label style={labelStyle}>{translate('label_tags')}</label>
-                  {/* Ausgewählte Tags als entfernbare Chips */}
-                  <div style={{ display: 'flex', 'flex-wrap': 'wrap', gap: '7px', 'margin-bottom': '9px' }}>
-                    <For each={selectedTags()}>{tag => (
-                      <span style={{ display: 'inline-flex', 'align-items': 'center', gap: '6px', 'font-size': '12px', padding: '4px 6px 4px 11px', 'border-radius': '7px', background: tag.color + '33', color: tag.color, ...sansFont, 'font-weight': '600' }}>
-                        {tag.name}
-                        <button onClick={() => removeSelectedTag(tag.id)} title={translate('btn_delete')}
-                          style={{ background: 'none', border: 'none', color: tag.color, cursor: 'pointer', 'font-size': '15px', 'line-height': '1', padding: '0' }}>×</button>
-                      </span>
-                    )}</For>
-                    <Show when={selectedTags().length === 0}>
-                      <span style={{ 'font-size': '13px', color: 'var(--muted)', 'font-style': 'italic' }}>{translate('label_no_tags')}</span>
-                    </Show>
-                  </div>
-                  {/* Sucheingabe + Dropdown */}
-                  <div style={{ position: 'relative' }}>
-                    <input value={tagQuery()} placeholder={translate('tag_search_placeholder')}
-                      onInput={e => onTagInput(e.currentTarget.value)}
-                      onFocus={() => { setTagOpen(true); runTagSearch(tagQuery()) }}
-                      onClick={() => { if (!tagOpen()) { setTagOpen(true); runTagSearch(tagQuery()) } }}
-                      onBlur={() => setTimeout(() => setTagOpen(false), 150)}
-                      onKeyDown={onTagKeyDown}
-                      style={{ ...inputStyle, width: '100%', 'font-size': '13px', padding: '7px 11px' }} />
-                    <Show when={tagOpen() && (tagResults().filter(notSelected).length > 0 || showCreateTag())}>
-                      <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: '0', right: '0', 'z-index': '30', background: 'var(--bg2)', border: '1px solid var(--border)', 'border-radius': '10px', 'box-shadow': '0 12px 30px rgba(0,0,0,0.35)', 'max-height': '240px', 'overflow-y': 'auto', padding: '5px' }}>
-                        <For each={tagResults().filter(notSelected)}>{tag => (
-                          <button onMouseDown={e => e.preventDefault()} onClick={() => addSelectedTag(tag)}
-                            style={{ display: 'flex', 'align-items': 'center', gap: '8px', width: '100%', 'text-align': 'left', padding: '7px 9px', background: 'none', border: 'none', 'border-radius': '7px', cursor: 'pointer', ...sansFont, 'font-size': '13px', color: 'var(--text2)' }}>
-                            <span style={{ width: '10px', height: '10px', 'border-radius': '3px', background: tag.color, 'flex-shrink': '0' }} />
-                            {tag.name}
-                          </button>
-                        )}</For>
-                        <Show when={showCreateTag()}>
-                          <div style={{ display: 'flex', 'align-items': 'center', gap: '8px', padding: '7px 9px', 'border-top': tagResults().filter(notSelected).length > 0 ? '1px solid var(--border)' : 'none' }}>
-                            <div style={{ display: 'flex', gap: '3px', 'flex-shrink': '0' }}>
-                              <For each={TAG_COLOR_PRESETS.slice(0, 7)}>{color => (
-                                <div onMouseDown={e => e.preventDefault()} onClick={() => setNewTagColor(color)} style={{ width: '18px', height: '18px', 'border-radius': '4px', background: color, cursor: 'pointer', border: newTagColor() === color ? '2px solid #fff' : '2px solid transparent' }} />
-                              )}</For>
-                            </div>
-                            <button onMouseDown={e => e.preventDefault()} onClick={createNewTag} disabled={isCreatingTag()}
-                              style={{ 'flex-shrink': '0', 'max-width': '100%', padding: '5px 11px', background: 'var(--accent)', border: 'none', 'border-radius': '7px', color: '#fff', 'font-size': '13px', cursor: 'pointer', ...sansFont, opacity: isCreatingTag() ? '0.6' : '1', overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap' }}>
-                              {isCreatingTag() ? '…' : translate('tag_create', { name: tagQuery().trim() })}
-                            </button>
-                          </div>
-                        </Show>
-                      </div>
-                    </Show>
-                  </div>
-                </div>
-
-                {/* The user's own fields, and only the ones put on this design: a field
-                    that is not here is not on the design at all, so a yes/no does not
-                    read as "no" on everything ever defined. */}
-                <Show when={customFields().length > 0}>
-                  <div style={{ 'grid-column': '1 / -1', 'border-top': '1px solid var(--border)', 'padding-top': '18px', 'margin-top': '20px' }}>
-                    <div style={{ ...monoFont, 'font-size': '11px', color: 'var(--muted)', 'text-transform': 'uppercase', 'letter-spacing': '0.08em', 'margin-bottom': '14px' }}>
-                      {translate('section_custom_fields')}
-                    </div>
-                    <div style={{ display: 'flex', 'flex-direction': 'column', gap: '14px' }}>
-                      <For each={customFields().filter(field => String(field.id) in customValues())}>{field => {
-                        const value = () => customValues()[String(field.id)] ?? ''
-                        const set = (next: string) =>
-                          setCustomValues(current => ({ ...current, [String(field.id)]: next }))
-                        const drop = () => setCustomValues(current => {
-                          const { [String(field.id)]: _removed, ...rest } = current
-                          return rest
-                        })
-                        return (
-                          <div>
-                            <div style={{ display: 'flex', 'align-items': 'center', 'justify-content': 'space-between', gap: '10px' }}>
-                              <label style={labelStyle}>{field.name}</label>
-                              <button onClick={drop} title={translate('custom_field_remove_hint')}
-                                style={{ padding: '3px 10px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '7px', color: 'var(--danger)', 'font-size': '11px', cursor: 'pointer', ...sansFont, 'margin-bottom': '6px' }}>
-                                {translate('btn_delete')}
-                              </button>
-                            </div>
-                            <Show when={field.field_type === 'multiselect'}>
-                              <div style={{ display: 'flex', 'flex-wrap': 'wrap', gap: '8px' }}>
-                                <For each={field.options ?? []}>{choice => {
-                                  const picked = () => parseChoices(value()).includes(choice)
-                                  return (
-                                    <button onClick={() => {
-                                      const current = parseChoices(value())
-                                      set(serialiseChoices(picked()
-                                        ? current.filter(entry => entry !== choice)
-                                        : [...current, choice]))
-                                    }}
-                                      style={{ padding: '5px 12px', 'border-radius': '8px', border: `1px solid ${picked() ? 'var(--accent)' : 'var(--border2)'}`, background: picked() ? 'rgba(69,123,157,0.18)' : 'var(--surface)', color: picked() ? 'var(--accent-light)' : 'var(--muted)', 'font-size': '12px', cursor: 'pointer', ...sansFont, 'font-weight': picked() ? '600' : '400' }}>
-                                      {choice}
-                                    </button>
-                                  )
-                                }}</For>
-                              </div>
-                            </Show>
-                            <Show when={field.field_type !== 'multiselect'}>
-                            <Show when={field.field_type === 'select'} fallback={
-                              <Show when={field.field_type === 'boolean'} fallback={
-                                <input style={inputStyle}
-                                  type={field.field_type === 'int' || field.field_type === 'float' ? 'number' : 'text'}
-                                  step={field.field_type === 'float' ? 'any' : '1'}
-                                  placeholder={translate(`custom_field_type_${field.field_type}` as any)}
-                                  value={value()} onInput={event => set(event.currentTarget.value)} />
-                              }>
-                                <div style={{ display: 'flex', 'align-items': 'center', gap: '10px', 'padding-top': '2px' }}>
-                                  <ToggleSwitch checked={value() === '1'} onChange={on => set(on ? '1' : '0')} />
-                                  <span style={{ ...sansFont, 'font-size': '13px', color: 'var(--text2)' }}>
-                                    {translate(value() === '1' ? 'label_yes' : 'label_no')}
-                                  </span>
-                                </div>
-                              </Show>
-                            }>
-                              <select style={inputStyle} value={value()} onChange={event => set(event.currentTarget.value)}>
-                                <option value="">-</option>
-                                <For each={field.options ?? []}>{choice => (
-                                  <option value={choice}>{choice}</option>
-                                )}</For>
-                              </select>
-                            </Show>
-                            </Show>
-                          </div>
-                        )
-                      }}</For>
-
-                      <Show when={customFields().some(field => !(String(field.id) in customValues()))}>
-                        <select style={{ ...inputStyle, 'align-self': 'flex-start', width: 'auto', 'min-width': '220px' }}
-                          value=""
-                          onChange={event => {
-                            const chosen = customFields().find(field => String(field.id) === event.currentTarget.value)
-                            event.currentTarget.value = ''
-                            if (!chosen) return
-                            // A yes/no starts at no, which is a value like any other now that
-                            // the field is deliberately on this design.
-                            setCustomValues(current => ({
-                              ...current,
-                              [String(chosen.id)]: chosen.field_type === 'boolean' ? '0' : '',
-                            }))
-                          }}>
-                          <option value="">＋ {translate('custom_field_add_to_design')}</option>
-                          <For each={customFields().filter(field => !(String(field.id) in customValues()))}>{field => (
-                            <option value={String(field.id)}>{field.name}</option>
-                          )}</For>
-                        </select>
-                      </Show>
-                    </div>
-                  </div>
-                </Show>
-
-                {/* Edit actions */}
-                <div style={{ display: 'flex', gap: '11px', 'margin-top': '20px', 'justify-content': 'flex-end', 'align-items': 'center' }}>
-                  <button onClick={() => guardClose(exitEditMode)}
-                    style={{ padding: '9px 20px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '10px', color: 'var(--text3)', ...sansFont, 'font-size': '14px', cursor: 'pointer' }}>
-                    {translate('btn_cancel')}
-                  </button>
-                  <button onClick={saveDesign} disabled={isSaving()}
-                    style={{ padding: '9px 26px', background: isSaving() ? 'var(--bg4)' : 'var(--accent)', border: 'none', 'border-radius': '10px', color: '#fff', ...sansFont, 'font-size': '14px', 'font-weight': '700', cursor: isSaving() ? 'not-allowed' : 'pointer' }}>
-                    {isSaving() ? translate('btn_saving') : translate('btn_save')}
-                  </button>
-                </div>
-              </div>
-            </Show>
-
             {/* A note is written to be seen again; behind a tab it was not. */}
             <Show when={design()?.notes?.trim()}>
               <div onClick={() => setActiveTab('notes')}
@@ -1532,6 +1490,9 @@ export function DesignPage(props: DesignPageProps) {
 
             {designShareTab(designShareTabDeps)}
           </div>
+          }>
+            {designEditScreen(designEditScreenDeps)}
+          </Show>
         </Show>
       }>
         {/* Loading spinner */}
@@ -1543,6 +1504,7 @@ export function DesignPage(props: DesignPageProps) {
       {/* 3D Viewer */}
       <Show when={stlViewUrl()}>
         <StlViewerModal url={stlViewUrl()!} filename={stlViewFilename()} designName={stlViewName()} zUp={stlViewZUp()}
+          compareUrl={compareUrl() ?? undefined} compareLabel={compareLabel()} baseLabel={baseLabel()}
           onSaveFiles={async (files) => {
             // Lands in the version the viewer was opened from. The request has to
             // throw on failure: that is the only way the viewer learns of it.
@@ -1583,6 +1545,7 @@ export function DesignPage(props: DesignPageProps) {
           }}
           onClose={() => {
           setStlViewUrl(null)
+          setCompareUrl(null)
           // Drop a ?viewer= deep link so a reload doesn't reopen the viewer
           if (new URLSearchParams(window.location.search).has('viewer')) {
             history.replaceState(null, '', `${window.location.pathname}?design=${props.designId}`)
@@ -1693,33 +1656,83 @@ export function DesignPage(props: DesignPageProps) {
       <Show when={addFilesToVersionId() !== null}>
         <UploadFilesModal
           title={translate('title_add_files_to_version')}
+          folders={foldersOfVersion(addFilesToVersionId())}
+          folder={uploadFolder()}
+          onFolderChange={setUploadFolder}
+          // Only the names of the chosen folder clash: the same name in two
+          // folders is two files, on disk as in the ZIP export.
           takenNames={(fileVersions().find(version => version.id === addFilesToVersionId())?.entries ?? [])
+            .filter(entry => {
+              const path = entry.relative_path || entry.filename
+              const folder = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+              return folder === uploadFolder().trim()
+            })
             .map(entry => entry.filename)}
           onClose={() => setAddFilesToVersionId(null)}
           onSubmit={files => addFilesToVersion(addFilesToVersionId()!, files)} />
       </Show>
 
-      <Show when={confirmDeleteImageId() !== null}>
+      {/* Naming a new folder */}
+      <Show when={newFolderVersionId() !== null}>
         <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.65)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'z-index': '600', 'backdrop-filter': 'blur(5px)' }}
-          onClick={() => setConfirmDeleteImageId(null)}>
+          onClick={() => setNewFolderVersionId(null)}>
           <div onClick={e => e.stopPropagation()}
             style={{ background: 'var(--bg2)', 'border-radius': '18px', padding: '28px 32px', width: '420px', border: '1px solid var(--border)', 'box-shadow': '0 24px 64px rgba(0,0,0,0.5)' }}>
-            <div style={{ ...sansFont, 'font-size': '18px', 'font-weight': '700', color: 'var(--text)', 'margin-bottom': '10px' }}>{translate('delete_image_title')}</div>
-            <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--text2)', 'margin-bottom': '24px', 'line-height': '1.6' }}>
-              {translate('delete_image_body')}
-            </div>
-            <div style={{ display: 'flex', gap: '11px', 'justify-content': 'flex-end' }}>
-              <button onClick={() => setConfirmDeleteImageId(null)}
+            <div style={{ ...sansFont, 'font-size': '18px', 'font-weight': '700', color: 'var(--text)', 'margin-bottom': '16px' }}>{translate('new_folder_title')}</div>
+            <input style={inputStyle} value={newFolderName()} placeholder={translate('new_folder_placeholder')} autofocus
+              onInput={e => setNewFolderName(e.currentTarget.value)}
+              onKeyDown={(e: KeyboardEvent) => { if (e.key === 'Enter') createFolder() }} />
+            <div style={{ display: 'flex', gap: '11px', 'justify-content': 'flex-end', 'margin-top': '22px' }}>
+              <button onClick={() => setNewFolderVersionId(null)}
                 style={{ padding: '9px 20px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '10px', color: 'var(--muted)', 'font-size': '14px', cursor: 'pointer', ...sansFont }}>
                 {translate('btn_cancel')}
               </button>
-              <button onClick={() => { const id = confirmDeleteImageId(); if (id !== null) toggleDeleteImage(id); setConfirmDeleteImageId(null) }}
-                style={{ padding: '9px 20px', background: 'var(--danger-bg)', border: '1px solid var(--danger)', 'border-radius': '10px', color: 'var(--danger)', 'font-size': '14px', 'font-weight': '700', cursor: 'pointer', ...sansFont }}>
-                {translate('btn_mark_for_deletion')}
+              <button onClick={createFolder} disabled={!newFolderName().trim()}
+                style={{ padding: '9px 20px', background: newFolderName().trim() ? 'var(--accent)' : 'var(--bg4)', border: 'none', 'border-radius': '10px', color: newFolderName().trim() ? '#fff' : 'var(--muted)', 'font-size': '14px', 'font-weight': '700', cursor: newFolderName().trim() ? 'pointer' : 'not-allowed', ...sansFont }}>
+                {translate('btn_create')}
               </button>
             </div>
           </div>
         </div>
+      </Show>
+
+      {/* Deleting a folder. Two ways out, because both are reasonable and only
+          one of them can be undone - which is to say, neither, so the one that
+          destroys nothing is the default. */}
+      <Show when={folderToDelete()}>
+        {pending => (
+          /* No closing on a click beside it: the three answers differ in what they
+             destroy, and the way out of that question is one of them, not a
+             stray click. */
+          <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.65)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'z-index': '600', 'backdrop-filter': 'blur(5px)' }}>
+            <div style={{ background: 'var(--bg2)', 'border-radius': '18px', padding: '28px 32px', width: '720px', 'max-width': '94vw', border: '1px solid var(--border)', 'box-shadow': '0 24px 64px rgba(0,0,0,0.5)' }}>
+              <div style={{ ...sansFont, 'font-size': '18px', 'font-weight': '700', color: 'var(--text)', 'margin-bottom': '10px' }}>
+                {translate('delete_folder_title').replace('{name}', pending().folder)}
+              </div>
+              <div style={{ ...sansFont, 'font-size': '14px', color: 'var(--text2)', 'margin-bottom': '24px', 'line-height': '1.6' }}>
+                <Show when={pending().fileCount > 0} fallback={translate('delete_folder_empty')}>
+                  {translate('delete_folder_body').replace('{count}', String(pending().fileCount))}
+                </Show>
+              </div>
+              <div style={{ display: 'flex', gap: '11px', 'justify-content': 'flex-end', 'flex-wrap': 'wrap' }}>
+                <button onClick={() => setFolderToDelete(null)}
+                  style={{ padding: '9px 20px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '10px', color: 'var(--muted)', 'font-size': '14px', cursor: 'pointer', ...sansFont }}>
+                  {translate('btn_cancel')}
+                </button>
+                <button onClick={() => removeFolder(false)}
+                  style={{ padding: '9px 20px', background: 'var(--accent)', border: 'none', 'border-radius': '10px', color: '#fff', 'font-size': '14px', 'font-weight': '700', cursor: 'pointer', ...sansFont }}>
+                  {pending().fileCount > 0 ? translate('btn_folder_keep_files') : translate('btn_confirm_delete')}
+                </button>
+                <Show when={pending().fileCount > 0}>
+                  <button onClick={() => removeFolder(true)}
+                    style={{ padding: '9px 20px', background: 'var(--danger-bg)', border: '1px solid var(--danger)', 'border-radius': '10px', color: 'var(--danger)', 'font-size': '14px', 'font-weight': '700', cursor: 'pointer', ...sansFont }}>
+                    {translate('btn_folder_delete_files').replace('{count}', String(pending().fileCount))}
+                  </button>
+                </Show>
+              </div>
+            </div>
+          </div>
+        )}
       </Show>
 
     </div>

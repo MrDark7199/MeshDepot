@@ -127,6 +127,17 @@ export const api = {
   deleteFile:  (designId: DesignID, fileVersionId: number) => request('DELETE', `/designs/${designId}/files/${fileVersionId}`),
   deleteFileEntry: (designId: DesignID, fileVersionId: number, entryId: number) =>
     request('DELETE', `/designs/${designId}/files/${fileVersionId}/entry/${entryId}`),
+  moveEntry: (designId: DesignID, fileVersionId: number, entryId: number, folder: string) =>
+    request('PUT', `/designs/${designId}/files/${fileVersionId}/entry/${entryId}/folder`, { folder }),
+  /** The order of one folder's files, as they should read. */
+  reorderEntries: (designId: DesignID, fileVersionId: number, entryIds: number[]) =>
+    request('PUT', `/designs/${designId}/files/${fileVersionId}/order`, { entry_ids: entryIds }),
+  createFolder: (designId: DesignID, fileVersionId: number, path: string) =>
+    request('POST', `/designs/${designId}/files/${fileVersionId}/folders`, { path }),
+  /** deleteFiles decides what happens to what is inside: kept and moved up, or
+   *  deleted along with the folder. */
+  deleteFolder: (designId: DesignID, fileVersionId: number, path: string, deleteFiles: boolean) =>
+    request('DELETE', `/designs/${designId}/files/${fileVersionId}/folders`, { path, delete_files: deleteFiles }),
   downloadUrl: (designId: DesignID, fileVersionId: number) => `${BASE}/designs/${designId}/files/${fileVersionId}/download`,
   entryUrl:    (designId: DesignID, fileVersionId: number, entryId: number) =>
     `${BASE}/designs/${designId}/files/${fileVersionId}/entry/${entryId}`,

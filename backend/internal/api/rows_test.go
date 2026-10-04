@@ -25,7 +25,8 @@ func testDB(t *testing.T) *sql.DB {
 		`CREATE TABLE design_files (id INTEGER PRIMARY KEY, design_id INTEGER, version TEXT,
 			filename TEXT, path TEXT, size_bytes INTEGER, file_count INTEGER, is_current INTEGER)`,
 		`CREATE TABLE design_file_entries (id INTEGER PRIMARY KEY, design_file_id INTEGER, filename TEXT,
-			path TEXT, relative_path TEXT, file_hash TEXT, blob_hash TEXT, size_bytes INTEGER)`,
+			path TEXT, relative_path TEXT, file_hash TEXT, blob_hash TEXT, size_bytes INTEGER,
+			sort_order INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE design_images (id INTEGER PRIMARY KEY, design_id INTEGER, path TEXT, sort_order INTEGER)`,
 		// Design 1 belongs to user 1 and has a current version with two files;
 		// design 2 belongs to user 2 and exists to check the isolation.

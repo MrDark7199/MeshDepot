@@ -46,6 +46,10 @@ export interface DesignFileEntry {
   path: string
   size_bytes: number
   created_at?: string
+  /** Where the file sits inside its version - the folder and the name. */
+  relative_path?: string
+  /** Content hash, the same figure the sync compares versions by. */
+  file_hash?: string
   /** Print parameters extracted from a G-code file (only set for G-code). */
   gcode_meta?: GcodeMeta
 }
@@ -109,6 +113,8 @@ export interface DesignFile {
   created_at: string
   /** Individual files within this version */
   entries?: DesignFileEntry[]
+  /** Every folder of this version, the ones still without a file included. */
+  folders?: string[]
 }
 
 /**

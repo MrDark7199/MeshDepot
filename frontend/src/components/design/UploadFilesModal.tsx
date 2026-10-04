@@ -15,8 +15,12 @@ export interface UploadFilesModalProps {
   onNotesInput?: (value: string) => void
   error?: string
   busy?: boolean
-  /** Filenames the target version already holds, marked as they are picked. */
+  /** Filenames the target folder already holds, marked as they are picked. */
   takenNames?: string[]
+  /** The folders of the version. Given, the dialog asks where the files go. */
+  folders?: string[]
+  folder?: string
+  onFolderChange?: (folder: string) => void
   onClose: () => void
   onSubmit: (files: File[]) => void
 }
@@ -26,8 +30,12 @@ export interface UploadFilesModalProps {
  * anything is sent. Shared by "upload a new version" and "add files to this
  * version": the two differ only in the version and notes fields.
  */
+/** The option that turns the folder list into a text field. */
+const NEW_FOLDER = '\u0000new'
+
 export function UploadFilesModal(props: UploadFilesModalProps) {
   const { translate } = useI18n()
+  const [creatingFolder, setCreatingFolder] = createSignal(false)
   const [chosen, setChosen] = createSignal<File[]>([])
   const [dragging, setDragging] = createSignal(false)
   let fileInput: HTMLInputElement | undefined
@@ -111,7 +119,41 @@ export function UploadFilesModal(props: UploadFilesModalProps) {
             </div>
           </Show>
 
-          <Show when={props.withVersionFields}>
+          {/* Where the files land. A version without folders is not asked at all:
+            there would be one choice, and it is the one it already has. */}
+          <Show when={(props.folders ?? []).length > 0 || creatingFolder()}>
+            <div>
+              <label style={labelStyle}>{translate('label_target_folder')}</label>
+              <Show when={creatingFolder()} fallback={
+                <select style={inputStyle} value={props.folder ?? ''}
+                  onChange={event => {
+                    if (event.currentTarget.value === NEW_FOLDER) {
+                      setCreatingFolder(true)
+                      props.onFolderChange?.('')
+                      return
+                    }
+                    props.onFolderChange?.(event.currentTarget.value)
+                  }}>
+                  <option value="">{translate('label_main_folder')}</option>
+                  <For each={props.folders ?? []}>{folder => (
+                    <option value={folder}>{folder}</option>
+                  )}</For>
+                  <option value={NEW_FOLDER}>＋ {translate('btn_new_folder')}</option>
+                </select>
+              }>
+                <div style={{ display: 'flex', gap: '9px' }}>
+                  <input style={inputStyle} value={props.folder ?? ''} placeholder={translate('new_folder_placeholder')} autofocus
+                    onInput={event => props.onFolderChange?.(event.currentTarget.value)} />
+                  <button onClick={() => { setCreatingFolder(false); props.onFolderChange?.('') }}
+                    style={{ padding: '9px 16px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '10px', color: 'var(--muted)', 'font-size': '13px', cursor: 'pointer', ...sansFont, 'white-space': 'nowrap' }}>
+                    {translate('btn_cancel')}
+                  </button>
+                </div>
+              </Show>
+            </div>
+          </Show>
+
+        <Show when={props.withVersionFields}>
             <div style={{ display: 'grid', 'grid-template-columns': '1fr 2fr', gap: '11px' }}>
               <div>
                 <label style={labelStyle}>{translate('field_version')} *</label>

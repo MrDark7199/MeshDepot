@@ -14,6 +14,8 @@ export interface ViewerHeaderDeps {
   setSettingsOpen: Setter<boolean>
   toolsOpen: () => boolean
   setToolsOpen: Setter<boolean>
+  /** Two models in the scene; the tools that act on one step aside. */
+  isComparing: () => boolean
   measureActive: () => boolean
   resetView: () => void
   downloadFile: () => void
@@ -22,7 +24,7 @@ export interface ViewerHeaderDeps {
 /** The viewer's title bar. A plain function, so it stays in the viewer's own owner. */
 export function viewerHeader(deps: ViewerHeaderDeps) {
   const { props, translate, isLoading, formatLabel, colorGroups, colorsOpen, setColorsOpen,
-    settingsOpen, setSettingsOpen, toolsOpen, setToolsOpen, measureActive, resetView,
+    settingsOpen, setSettingsOpen, toolsOpen, setToolsOpen, isComparing, measureActive, resetView,
     downloadFile } = deps
   return (
     <>
@@ -53,13 +55,15 @@ export function viewerHeader(deps: ViewerHeaderDeps) {
         {/* Unavailable until the model is there. Every tool behind it works on the
             loaded geometry - measuring needs a surface to pick, splitting needs
             triangles to walk - so offering them mid-load can only disappoint. */}
+        <Show when={!isComparing()}>
         <button onClick={() => { if (isLoading()) return; setToolsOpen(o => !o); setColorsOpen(false); setSettingsOpen(false) }}
           disabled={isLoading()}
           title={isLoading() ? translate('viewer_tools_wait') : translate('viewer_btn_tools')}
           style={{ background: toolsOpen() || measureActive() ? 'rgba(74,144,217,0.25)' : 'rgba(255,255,255,0.08)', border: `1px solid ${toolsOpen() || measureActive() ? 'rgba(74,144,217,0.6)' : 'rgba(255,255,255,0.15)'}`, 'border-radius': '8px', padding: '6px 14px', color: '#fff', 'font-size': '12px', cursor: isLoading() ? 'not-allowed' : 'pointer', opacity: isLoading() ? '0.4' : '1', 'font-family': "'DM Sans',sans-serif", 'flex-shrink': '0' }}>
           {translate('viewer_btn_tools')}
         </button>
-        <Show when={colorGroups().length > 0}>
+        </Show>
+        <Show when={colorGroups().length > 0 && !isComparing()}>
           <button onClick={() => { setColorsOpen(o => !o); setSettingsOpen(false); setToolsOpen(false) }}
             style={{ background: colorsOpen() ? 'rgba(74,144,217,0.25)' : 'rgba(255,255,255,0.08)', border: `1px solid ${colorsOpen() ? 'rgba(74,144,217,0.6)' : 'rgba(255,255,255,0.15)'}`, 'border-radius': '8px', padding: '6px 14px', color: '#fff', 'font-size': '12px', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif", 'flex-shrink': '0' }}>
             {translate('viewer_btn_colors')}

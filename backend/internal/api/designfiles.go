@@ -110,9 +110,12 @@ func (server *Server) FilesIndex(responseWriter http.ResponseWriter, request *ht
 	}
 	versions, _ := dbutil.QueryMaps(server.DB, "SELECT * FROM design_files WHERE design_id = ? ORDER BY is_current DESC, created_at DESC", designID)
 	for _, version := range versions {
-		entries, _ := dbutil.QueryMaps(server.DB, "SELECT * FROM design_file_entries WHERE design_file_id = ? ORDER BY relative_path ASC, filename ASC", coerce.Int(version["id"]))
+		entries, _ := dbutil.QueryMaps(server.DB, "SELECT * FROM design_file_entries WHERE design_file_id = ? ORDER BY sort_order ASC, relative_path ASC, filename ASC", coerce.Int(version["id"]))
 		decodeEntryMeta(entries)
 		version["entries"] = entries
+		// Listed rather than left to the client: a folder nobody has put a file in
+		// yet exists only as a row, and the files alone would not mention it.
+		version["folders"] = foldersOfVersion(server.DB, coerce.Int(version["id"]))
 	}
 	httpx.Success(responseWriter, versions)
 }
@@ -245,11 +248,24 @@ func (server *Server) FilesAddEntries(responseWriter http.ResponseWriter, reques
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.file_required")
 		return
 	}
-	// Case-insensitive, to prevent name collisions within the version.
-	existing, _ := dbutil.QueryMaps(server.DB, "SELECT filename FROM design_file_entries WHERE design_file_id = ?", fileID)
-	existingNames := make(map[string]bool, len(existing))
+	// Where the files should land. Empty means the version's own root, which is
+	// what every upload did before folders existed.
+	folder, validFolder := cleanFolderPath(request.FormValue("folder"))
+	if !validFolder {
+		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.folder_name_invalid")
+		return
+	}
+
+	// Case-insensitive, and over the whole path: the same name in two folders is
+	// two files, in one folder it is a collision - on disk as in the ZIP export.
+	existing, _ := dbutil.QueryMaps(server.DB, "SELECT filename, COALESCE(relative_path, '') AS relative_path FROM design_file_entries WHERE design_file_id = ?", fileID)
+	existingPaths := make(map[string]bool, len(existing))
 	for _, entry := range existing {
-		existingNames[strings.ToLower(coerce.StringOr(entry["filename"], ""))] = true
+		path := coerce.StringOr(entry["relative_path"], "")
+		if path == "" {
+			path = coerce.StringOr(entry["filename"], "")
+		}
+		existingPaths[strings.ToLower(path)] = true
 	}
 
 	stored, total := server.storeUploads(headers, server.userLayout(request))
@@ -258,11 +274,20 @@ func (server *Server) FilesAddEntries(responseWriter http.ResponseWriter, reques
 		return
 	}
 	// A collision with a file already in the version leaves the version unchanged.
-	for _, storedItem := range stored {
-		if existingNames[strings.ToLower(storedItem.filename)] {
+	for index, storedItem := range stored {
+		target := storedItem.relativePath
+		if target == "" {
+			target = storedItem.filename
+		}
+		if folder != "" {
+			target = folder + "/" + target
+		}
+		if existingPaths[strings.ToLower(target)] {
 			httpx.Error(responseWriter, http.StatusConflict, "error.filename_exists")
 			return
 		}
+		existingPaths[strings.ToLower(target)] = true
+		stored[index].relativePath = target
 	}
 	// Entries and their version's counters must land together, or the version
 	// reports a wrong file count and size forever - nothing recomputes it.
@@ -292,7 +317,7 @@ func (server *Server) FilesAddEntries(responseWriter http.ResponseWriter, reques
 		}
 	}
 	saved, found, failure := dbutil.QueryMap(transaction, "SELECT * FROM design_files WHERE id = ? LIMIT 1", fileID)
-	entries, entriesFailure := dbutil.QueryMaps(transaction, "SELECT * FROM design_file_entries WHERE design_file_id = ? ORDER BY relative_path ASC, filename ASC", fileID)
+	entries, entriesFailure := dbutil.QueryMaps(transaction, "SELECT * FROM design_file_entries WHERE design_file_id = ? ORDER BY sort_order ASC, relative_path ASC, filename ASC", fileID)
 	if writeFailed || failure != nil || !found || entriesFailure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.internal")
 		return
@@ -352,10 +377,15 @@ func (server *Server) insertEntries(querier dbutil.Querier, versionID, designID,
 		if storedItem.gcodeMeta != "" {
 			metaValue = storedItem.gcodeMeta
 		}
+		// At the end of whatever arrangement the version already has: a file added
+		// now has no business jumping ahead of the order somebody made by hand.
+		var nextOrder int
+		_ = querier.QueryRow("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM design_file_entries WHERE design_file_id = ?",
+			versionID).Scan(&nextOrder)
 		if _, failure := querier.Exec(
-			`INSERT INTO design_file_entries (design_file_id, filename, path, size_bytes, file_hash, relative_path, blob_hash, gcode_meta)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			versionID, storedItem.filename, server.layout().Rel(published), storedItem.size, storedItem.fileHash, storedItem.relativePath, storedItem.blobHash, metaValue); failure != nil {
+			`INSERT INTO design_file_entries (design_file_id, filename, path, size_bytes, file_hash, relative_path, blob_hash, gcode_meta, sort_order)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			versionID, storedItem.filename, server.layout().Rel(published), storedItem.size, storedItem.fileHash, storedItem.relativePath, storedItem.blobHash, metaValue, nextOrder); failure != nil {
 			return nil, failure
 		}
 		if storedItem.fileHash != "" {

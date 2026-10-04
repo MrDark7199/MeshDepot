@@ -3,7 +3,7 @@ import { useI18n } from '../i18n/index'
 import { useTheme } from '../ThemeContext'
 import { splitConnectedComponents, writeBinaryStl, buildZip, type MeshPart } from '../utils/meshSplit'
 import {
-  Engine, Scene, ArcRotateCamera, Vector3, Matrix,
+  Engine, Scene, ArcRotateCamera, Vector3, Matrix, Plane,
   HemisphericLight, DirectionalLight, Color3, Color4,
   StandardMaterial, Mesh, type LinesMesh, VertexData, PointerEventTypes, AbstractMesh,
   MeshBuilder, TransformNode, Quaternion, DynamicTexture, Texture,
@@ -16,6 +16,7 @@ import { DEFAULT_HEX, normalizeHex, relativeLuminance, legibleModelHex, hexToCle
 import { decodeText, bytesToBase64, hasUsableNormals, weldSmooth } from '../utils/meshTools'
 import { extractModelFiles, findEntry, parseModelSettings, parseProjectColors, parseModelFile, type M3mfObject } from '../utils/threemf'
 import { parseGcode } from '../utils/gcodeParse'
+import type { DeviationResponse } from '../workers/deviation'
 import { splitPanel, type SplitPanelDeps } from '../app/viewerSplitPanel'
 import { settingsPanel, type SettingsPanelDeps } from '../app/viewerSettingsPanel'
 import { viewerHeader, type ViewerHeaderDeps } from '../app/viewerHeader'
@@ -37,6 +38,15 @@ export interface StlViewerModalProps {
   onSaveImage?: (blob: Blob) => Promise<void>
   onSaveFiles?: (files: File[]) => Promise<void>
   zUp?: boolean
+  /**
+   * An older fassung of the same file, laid over the one being viewed. Given,
+   * the viewer turns into a comparison: both models are tinted and the tools
+   * that act on a single model step aside.
+   */
+  compareUrl?: string
+  /** What the two sides are called - version numbers, as a rule. */
+  compareLabel?: string
+  baseLabel?: string
 }
 
 /**
@@ -58,8 +68,50 @@ export function StlViewerModal(props: StlViewerModalProps) {
   let splitHighlight: Mesh | undefined
   let splitFlashTick: (() => void) | undefined
 
+  // Green for what is in the design now, red for what it replaced.
+  const COMPARE_NEW_HEX = '#4ade80'
+  const COMPARE_OLD_HEX = '#e63946'
+
+  /** The older model of a comparison, and the two tinted materials. */
+  let compareMeshes: Mesh[] = []
+  let baseMaterial: StandardMaterial | undefined
+  let compareMaterial: StandardMaterial | undefined
+  const isComparing = () => !!props.compareUrl
+  const [compareReady, setCompareReady] = createSignal(false)
+  const [showBase, setShowBase] = createSignal(true)
+  const [showCompare, setShowCompare] = createSignal(true)
+  /**
+   * Where the wipe stands, 0..1 across the model, or null when it is off. Left
+   * of it the older fassung shows, right of it the newer one.
+   */
+  const [wipeAt, setWipeAt] = createSignal<number | null>(null)
+  /** The deviation colouring: off, being computed, or on with its scale. */
+  const [deviationState, setDeviationState] = createSignal<'off' | 'running' | 'on'>('off')
+  const [deviationProgress, setDeviationProgress] = createSignal(0)
+  const [deviationMax, setDeviationMax] = createSignal(0)
+  let deviationWorker: Worker | undefined
+
   let gcodePath: Mesh | undefined
   let gcodeData: { polylines: Vector3[][]; minH: number; maxH: number; layerH: number } | null = null
+  /**
+   * The extrusion paths of each layer, and where each layer's indices end in the
+   * built mesh. Together they let the slider narrow what is drawn to a range of
+   * the index buffer: building the geometry again at every step is what made the
+   * model flicker.
+   */
+  let gcodeLayers: Vector3[][][] = []
+  let gcodeLayerEnds: number[] = []
+  /**
+   * Whether the built mesh draws by vertex range rather than by index range.
+   * The solid body does: the flat-shading pass unfolds it into one vertex per
+   * index, in the same order, and Babylon then draws it unindexed.
+   */
+  let gcodeDrawsUnindexed = false
+  /** How many layers the loaded g-code has; 0 while none is loaded. */
+  const [gcodeLayerCount, setGcodeLayerCount] = createSignal(0)
+  /** The topmost layer still drawn. -1 means the whole print. */
+  const [gcodeTopLayer, setGcodeTopLayer] = createSignal(-1)
+
   let gcodeMat: StandardMaterial | undefined
   let gridNodes: { dispose: () => void }[] = []
   let bedNodes: { dispose: () => void }[] = []
@@ -213,7 +265,9 @@ export function StlViewerModal(props: StlViewerModalProps) {
   const visibleModelMeshes = (): AbstractMesh[] => {
     if (gcodePath) return [gcodePath]
     if (builtPlates.length > 1) return builtPlates[activePlate()].meshes
-    return builtGroups.flatMap(g => g.meshes)
+    // The older fassung counts as well while comparing: framed on the newer one
+    // alone, whatever grew beyond it would sit outside the picture.
+    return [...builtGroups.flatMap(g => g.meshes), ...compareMeshes]
   }
 
   /**
@@ -1093,6 +1147,8 @@ export function StlViewerModal(props: StlViewerModalProps) {
     window.removeEventListener('resize', resizeHandler)
     window.removeEventListener('keydown', keydownHandler)
     canvasRef?.removeEventListener('pointerleave', hoverLeaveHandler)
+    // A measurement nobody is waiting for any more: the viewer is closing.
+    deviationWorker?.terminate()
     engine?.dispose()
   })
 
@@ -1241,6 +1297,10 @@ export function StlViewerModal(props: StlViewerModalProps) {
         // G-code is generated tool-path data, not a mesh: parse once, then render as coloured
         // lines or a swept-bead solid per the user's setting (switchable without re-parsing).
         gcodeData = parseGcode(decodeText(new Uint8Array(buffer)))
+        gcodeLayers = splitByLayer()
+        gcodeLayerEnds = []
+        setGcodeLayerCount(gcodeLayers.length)
+        setGcodeTopLayer(-1)
         builtGroups = []
         setColorGroups([]) // no per-part colour panel for toolpaths
         if (gcodeData) renderGcode(); else setErrorMessage(translate('viewer_load_failed'))
@@ -1284,6 +1344,8 @@ export function StlViewerModal(props: StlViewerModalProps) {
           return
         }
       }
+
+      if (isComparing()) await loadComparison(scene)
 
       refreshHelpers() // draw the grid / build plate if they were left enabled
       resetView()      // frame the model (+ bed) from the default 45° angle
@@ -1440,6 +1502,191 @@ export function StlViewerModal(props: StlViewerModalProps) {
 
     return buildMesh('obj', positions, normals.length === positions.length ? normals : [], scene)
   }
+
+  /**
+   * Loads the older fassung into the same scene and tints both sides: the file
+   * on screen in green, the one it replaced in red, each half transparent so
+   * the one inside the other still shows.
+   *
+   * A deliberately short path - no plates, no colour groups, no g-code: what is
+   * being compared are two meshes of one file, and everything else the viewer
+   * can do is switched off while it does this.
+   */
+  const loadComparison = async (scene: Scene) => {
+    try {
+      const response = await fetch(props.compareUrl!, { credentials: 'include' })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const buffer = await response.arrayBuffer()
+      const magic = new Uint8Array(buffer, 0, 4)
+      const isZip = magic[0] === 0x50 && magic[1] === 0x4B && magic[2] === 0x03 && magic[3] === 0x04
+      const extension = fileExtension()
+
+      let meshes: Mesh[]
+      if (extension === 'obj') {
+        meshes = [parseWavefrontMesh(new TextDecoder().decode(buffer), scene)]
+      } else if (extension === '3mf' || isZip) {
+        meshes = (await parse3mf(buffer, scene)).groups.flatMap(group => group.meshes)
+      } else {
+        meshes = [await parseStl(buffer, scene)]
+      }
+      compareMeshes = meshes
+
+      // The same re-orientation the main model gets, or the two would lie at
+      // right angles to each other.
+      if (extension === '3mf' || isZip || props.zUp) {
+        const root = new TransformNode('compareRoot', scene)
+        root.rotation.x = -Math.PI / 2
+        for (const mesh of meshes) mesh.parent = root
+      }
+
+      baseMaterial = makeMaterial('baseMat', COMPARE_NEW_HEX, scene)
+      baseMaterial.alpha = 0.55
+      compareMaterial = makeMaterial('compareMat', COMPARE_OLD_HEX, scene)
+      compareMaterial.alpha = 0.55
+      // Both sides are see-through, so the back faces have to be drawn too or
+      // the inside of the shell reads as a hole.
+      for (const material of [baseMaterial, compareMaterial]) material.backFaceCulling = false
+      for (const group of builtGroups) for (const mesh of group.meshes) mesh.material = baseMaterial
+      for (const mesh of meshes) { mesh.material = compareMaterial; mesh.isPickable = false }
+      setCompareReady(true)
+    } catch (failure: unknown) {
+      setErrorMessage(translate('compare_load_failed') + ': ' + (failure instanceof Error ? failure.message : String(failure)))
+    }
+  }
+
+  /** Which side of the wipe each model is drawn on, or neither when it is off. */
+  const applyCompareView = () => {
+    const base = builtGroups.flatMap(group => group.meshes)
+    for (const mesh of base) mesh.setEnabled(showBase())
+    for (const mesh of compareMeshes) mesh.setEnabled(showCompare())
+    const at = wipeAt()
+    if (!baseMaterial || !compareMaterial) return
+    if (at === null) {
+      baseMaterial.clipPlane = null
+      compareMaterial.clipPlane = null
+      return
+    }
+    // A fragment is dropped where normal·position + d is positive, so the newer
+    // model keeps the right-hand side and the older one the left.
+    const x = wipeWorldX(at)
+    baseMaterial.clipPlane = new Plane(-1, 0, 0, x)
+    compareMaterial.clipPlane = new Plane(1, 0, 0, -x)
+  }
+
+  /** The wipe position in world units - 0 is the left edge of the two models. */
+  const wipeWorldX = (fraction: number) => {
+    const { min, max } = worldBoundsOf(visibleModelMeshes())
+    return min.x + (max.x - min.x) * fraction
+  }
+
+  /**
+   * The geometry of a set of meshes as one triangle soup, with the vertex offset
+   * of each mesh so the answer can be handed back per mesh. Positions are taken
+   * as they are authored: both sides of a comparison get the same treatment, so
+   * comparing in their own space is comparing like with like.
+   */
+  const meshGeometry = (meshes: Mesh[]) => {
+    const positions: number[] = []
+    const indices: number[] = []
+    const offsets: number[] = []
+    for (const mesh of meshes) {
+      const own = mesh.getVerticesData(VertexBuffer.PositionKind)
+      if (!own) { offsets.push(positions.length / 3); continue }
+      const base = positions.length / 3
+      offsets.push(base)
+      for (let at = 0; at < own.length; at++) positions.push(own[at])
+      const ownIndices = mesh.getIndices()
+      if (ownIndices) {
+        for (const index of ownIndices) indices.push(base + index)
+      } else {
+        // No index buffer: the positions are already one triangle after another.
+        for (let vertex = 0; vertex < own.length / 3; vertex++) indices.push(base + vertex)
+      }
+    }
+    offsets.push(positions.length / 3)
+    return { positions: new Float32Array(positions), indices: new Uint32Array(indices), offsets }
+  }
+
+  /**
+   * Colours the newer model by how far each of its vertices sits from the older
+   * one's surface. The work happens in a worker - a few hundred thousand
+   * vertices against as many triangles would otherwise stop the page.
+   */
+  const runDeviation = () => {
+    const base = builtGroups.flatMap(group => group.meshes)
+    if (base.length === 0 || compareMeshes.length === 0) return
+    const reference = meshGeometry(compareMeshes)
+    const samples = meshGeometry(base)
+    if (reference.indices.length === 0 || samples.positions.length === 0) return
+
+    setDeviationState('running')
+    setDeviationProgress(0)
+    deviationWorker?.terminate()
+    deviationWorker = new Worker(new URL('../workers/deviation.ts', import.meta.url), { type: 'module' })
+    deviationWorker.onmessage = (event: MessageEvent<DeviationResponse>) => {
+      const message = event.data
+      if (message.type === 'progress') { setDeviationProgress(message.fraction); return }
+      if (message.type === 'error') { setDeviationState('off'); setErrorMessage(message.message); return }
+      paintDeviation(base, samples.offsets, message.distances, message.maximum)
+      deviationWorker?.terminate()
+      deviationWorker = undefined
+    }
+    deviationWorker.postMessage({
+      referencePositions: reference.positions.buffer,
+      referenceTriangles: reference.indices.buffer,
+      samplePositions: samples.positions.buffer,
+    }, [reference.positions.buffer, reference.indices.buffer, samples.positions.buffer])
+  }
+
+  /** Writes the measured distances onto the meshes as vertex colours. */
+  const paintDeviation = (meshes: Mesh[], offsets: number[], distances: Float32Array, maximum: number) => {
+    setDeviationMax(maximum)
+    const scale = maximum > 0 ? maximum : 1
+    for (let at = 0; at < meshes.length; at++) {
+      const from = offsets[at], to = offsets[at + 1]
+      if (to <= from) continue
+      const colours = new Float32Array((to - from) * 4)
+      for (let vertex = from; vertex < to; vertex++) {
+        const colour = heightColor(1 - distances[vertex] / scale)
+        const target = (vertex - from) * 4
+        colours[target] = colour.r
+        colours[target + 1] = colour.g
+        colours[target + 2] = colour.b
+        colours[target + 3] = 1
+      }
+      meshes[at].setVerticesData(VertexBuffer.ColorKind, colours)
+      meshes[at].useVertexColors = true
+    }
+    if (baseMaterial) {
+      // White, so what shows is the vertex colour and not a tint over it, and
+      // opaque, because a heat map read through a second model says nothing.
+      baseMaterial.diffuseColor = new Color3(1, 1, 1)
+      baseMaterial.alpha = 1
+    }
+    setShowCompare(false)
+    setDeviationState('on')
+    applyCompareView()
+  }
+
+  /** Back to the two tinted models. */
+  const clearDeviation = () => {
+    deviationWorker?.terminate()
+    deviationWorker = undefined
+    for (const group of builtGroups) for (const mesh of group.meshes) mesh.useVertexColors = false
+    if (baseMaterial) {
+      baseMaterial.diffuseColor = Color3.FromHexString(COMPARE_NEW_HEX)
+      baseMaterial.alpha = 0.55
+    }
+    setDeviationState('off')
+    setShowCompare(true)
+    applyCompareView()
+  }
+
+  const toggleDeviation = () => { if (deviationState() === 'off') runDeviation(); else clearDeviation() }
+
+  const applyShowBase = (on: boolean) => { setShowBase(on); applyCompareView() }
+  const applyShowCompare = (on: boolean) => { setShowCompare(on); applyCompareView() }
+  const applyWipe = (at: number | null) => { setWipeAt(at); applyCompareView() }
 
   interface BuiltGroup {
     label: string
@@ -1686,8 +1933,67 @@ export function StlViewerModal(props: StlViewerModalProps) {
     return mesh
   }
 
-  const buildGcodeLines = (data: { polylines: Vector3[][]; minH: number; maxH: number }, scene: Scene): Mesh => {
-    const { polylines, minH, maxH } = data
+  /** The layer a height falls on, counted from the first extrusion. */
+  const layerOf = (height: number) => {
+    if (!gcodeData) return 0
+    return Math.max(0, Math.round((height - gcodeData.minH) / Math.max(gcodeData.layerH, 1e-3)))
+  }
+
+  /** The height of the topmost drawn layer, for the readout beside the slider. */
+  const gcodeTopHeight = () => {
+    if (!gcodeData) return 0
+    const top = gcodeTopLayer()
+    return top < 0 ? gcodeData.maxH : gcodeData.minH + top * gcodeData.layerH
+  }
+
+  /** The whole print's height - what that readout will be at its widest. */
+  const gcodeMaxHeight = () => gcodeData?.maxH ?? 0
+
+  /**
+   * The paths sorted into one bucket per layer, cut where they cross from one to
+   * the next rather than filed whole: a vase-mode print is a single path running
+   * through every layer, and filing it under one would leave the slider doing
+   * nothing there.
+   */
+  const splitByLayer = (): Vector3[][][] => {
+    if (!gcodeData) return []
+    const layers: Vector3[][][] = []
+    const bucket = (index: number) => {
+      while (layers.length <= index) layers.push([])
+      return layers[index]
+    }
+    for (const line of gcodeData.polylines) {
+      let run: Vector3[] = []
+      let runLayer = -1
+      for (let index = 0; index + 1 < line.length; index++) {
+        const layer = layerOf(Math.max(line[index].y, line[index + 1].y))
+        if (layer !== runLayer) {
+          if (run.length >= 2) bucket(runLayer).push(run)
+          run = [line[index]]
+          runLayer = layer
+        }
+        run.push(line[index + 1])
+      }
+      if (run.length >= 2 && runLayer >= 0) bucket(runLayer).push(run)
+    }
+    return layers
+  }
+
+  const buildGcodeLines = (data: { minH: number; maxH: number }, scene: Scene): Mesh => {
+    const { minH, maxH } = data
+    // In layer order, and with the end of each layer written down as it goes:
+    // the line system emits two indices per segment, in the order of the array.
+    const polylines: Vector3[][] = []
+    gcodeLayerEnds = []
+    let indexCount = 0
+    for (const layer of gcodeLayers) {
+      for (const line of layer) {
+        polylines.push(line)
+        indexCount += 2 * (line.length - 1)
+      }
+      gcodeLayerEnds.push(indexCount)
+    }
+    gcodeDrawsUnindexed = false
     if (gcodeLineColor() === 'custom') {
       const mesh = MeshBuilder.CreateLineSystem('gcode', { lines: polylines }, scene)
       mesh.color = Color3.FromHexString(gcodeColor())
@@ -1708,12 +2014,12 @@ export function StlViewerModal(props: StlViewerModalProps) {
    * {@link MAX_SOLID_SEGMENTS} the segments are thinned out to keep the
    * geometry manageable.
    */
-  const buildGcodeSolid = (data: { polylines: Vector3[][]; layerH: number }, scene: Scene): Mesh => {
+  const buildGcodeSolid = (data: { layerH: number }, scene: Scene): Mesh => {
     const MAX_SOLID_SEGMENTS = 140_000
     const halfH = Math.max(data.layerH, 0.05) / 2
     const halfW = Math.max(data.layerH * 1.8, 0.1) / 2   // Raupenbreite ≈ 1,8 × Schichthöhe
     let segCount = 0
-    for (const pl of data.polylines) segCount += pl.length - 1
+    for (const layer of gcodeLayers) for (const pl of layer) segCount += pl.length - 1
     const stride = segCount > MAX_SOLID_SEGMENTS ? Math.ceil(segCount / MAX_SOLID_SEGMENTS) : 1
 
     const positions: number[] = []
@@ -1722,7 +2028,9 @@ export function StlViewerModal(props: StlViewerModalProps) {
     // Box indices (12 triangles) wound outwards; the base is the box's first vertex.
     const BOX = [0,1,5, 0,5,4,  3,6,2, 3,7,6,  0,7,3, 0,4,7,  1,6,5, 1,2,6,  0,3,2, 0,2,1,  4,5,6, 4,6,7]
 
-    for (const pl of data.polylines) {
+    gcodeLayerEnds = []
+    for (const layer of gcodeLayers) {
+    for (const pl of layer) {
       for (let i = 0; i + 1 < pl.length; i += stride) {
         const a = pl[i], b = pl[Math.min(i + stride, pl.length - 1)]
         const dir = b.subtract(a)
@@ -1743,6 +2051,8 @@ export function StlViewerModal(props: StlViewerModalProps) {
         for (const idx of BOX) indices.push(base + idx)
       }
     }
+    gcodeLayerEnds.push(indices.length)
+    }
 
     const vd = new VertexData()
     vd.positions = positions; vd.indices = indices
@@ -1755,6 +2065,8 @@ export function StlViewerModal(props: StlViewerModalProps) {
     // top face's normal is exactly (0,1,0), the overlapping faces render identically, and the tie
     // becomes invisible. convertToFlatShadedMesh also computes the normals, so we skip ComputeNormals.
     mesh.convertToFlatShadedMesh()
+    // It also unfolds the mesh: from here it is drawn by vertex range.
+    gcodeDrawsUnindexed = true
     const mat = new StandardMaterial('gcodeSolidMat', scene)
     mat.diffuseColor = Color3.FromHexString(gcodeColor())
     mat.specularColor = new Color3(0.15, 0.15, 0.15)
@@ -1768,14 +2080,37 @@ export function StlViewerModal(props: StlViewerModalProps) {
     if (!scene || !gcodeData) return
     if (gcodePath) { gcodePath.dispose(); gcodePath = undefined }
     gcodeMat = undefined
+    if (gcodeLayers.length === 0) return
     gcodePath = gcodeMode() === 'solid'
       ? buildGcodeSolid(gcodeData, scene)
       : buildGcodeLines(gcodeData, scene)
+    applyLayerWindow()
     // The grid and the plate need no rebuild: the bounds are practically the same
     // for lines and solid, and the overlays do not depend on the mesh identity.
     // The camera stays where it is.
   }
 
+  /**
+   * Narrows what is drawn to the chosen layers. The geometry is built once and
+   * sits in layer order, so this only moves the start and the length of the one
+   * sub-mesh - no rebuild, and nothing to flicker.
+   */
+  const applyLayerWindow = () => {
+    if (!gcodePath || gcodeLayerEnds.length === 0) return
+    const last = gcodeLayerEnds.length - 1
+    const top = gcodeTopLayer() < 0 ? last : Math.min(gcodeTopLayer(), last)
+    const count = Math.max(0, gcodeLayerEnds[top])
+    gcodePath.subMeshes = []
+    // No bounding box: it would be recomputed on every step of the slider, and
+    // the camera is framed on the whole print either way.
+    if (gcodeDrawsUnindexed) new SubMesh(0, 0, count, 0, count, gcodePath, undefined, false)
+    else new SubMesh(0, 0, gcodePath.getTotalVertices(), 0, count, gcodePath, undefined, false)
+  }
+
+  const applyGcodeTopLayer = (layer: number) => {
+    setGcodeTopLayer(layer)
+    applyLayerWindow()
+  }
   const applyGcodeMode = (mode: 'lines' | 'solid') => {
     setGcodeMode(mode)
     localStorage.setItem(VIEWER_GCODE_MODE_KEY, mode)
@@ -1839,12 +2174,19 @@ export function StlViewerModal(props: StlViewerModalProps) {
 
   const viewerHeaderDeps: ViewerHeaderDeps = {
     props, translate, isLoading, formatLabel, colorGroups, colorsOpen, setColorsOpen,
-    settingsOpen, setSettingsOpen, toolsOpen, setToolsOpen, measureActive, resetView, downloadFile,
+    settingsOpen, setSettingsOpen, toolsOpen, setToolsOpen, isComparing, measureActive, resetView, downloadFile,
   }
 
   const viewerOverlaysDeps: ViewerOverlaysDeps = {
     translate, platesUI, activePlate, selectPlate, colorGroups, colorsOpen, setGroupColor, resetColors,
-    toolsOpen, isGcode, measureActive, setMeasure, clearMeasure, measureCount, measureDist,
+    toolsOpen, isGcode,
+    isComparing, compareReady, baseLabel: () => props.baseLabel ?? '', compareLabel: () => props.compareLabel ?? '',
+    showBase, setShowBase: applyShowBase, showCompare, setShowCompare: applyShowCompare,
+    wipeAt, setWipeAt: applyWipe,
+    deviationState, deviationProgress, deviationMax, toggleDeviation,
+    gcodeLayerCount, gcodeTopLayer, setGcodeTopLayer: applyGcodeTopLayer,
+    gcodeTopHeight, gcodeMaxHeight,
+    measureActive, setMeasure, clearMeasure, measureCount, measureDist,
     setMeasureLabelEl, openSplitIntro, startPhoto, takePhoto, exitPhoto, photoMode, photoRegion,
     setPhotoRegion, photoDragDown, photoDragMove, photoDragUp,
   }

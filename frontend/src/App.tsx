@@ -15,7 +15,7 @@ import { createDownloadQueueStore } from './hooks/useDownloadQueue'
 import { displayName } from './utils/designText'
 import { errorKey } from './utils/errorMessage'
 import { formatDateTime } from './utils/datetime'
-import { navBar, type NavBarDeps } from './app/navBar'
+import { navBar, navLogo, navGlobalActions, type NavBarDeps } from './app/navBar'
 import { gridMain, type GridMainDeps } from './app/gridMain'
 import { CollectionsPage } from './components/CollectionsPage'
 import { ConfirmDiscardModal, ConfirmModal } from './components/ConfirmModals'
@@ -502,8 +502,10 @@ function MainApp() {
 
       {/* Design detail page */}
       <Show when={view() === 'design' && !!openDesignId()}>
-        {navBar(navBarDeps, true)}
+        {/* No navigation bar here: the design page draws one bar of its own and
+            is handed the two pieces that belong to every page. */}
         <DesignPage designId={openDesignId()!}
+          chrome={{ logo: () => navLogo(navBarDeps), globalActions: () => navGlobalActions(navBarDeps) }}
           initialEditMode={openInEditMode()}
           onBack={() => {
             // If this design was opened via an in-app push (from grid or a

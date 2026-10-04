@@ -72,6 +72,9 @@ func migrate(database *sql.DB) {
 		"ALTER TABLE sync_queue ADD COLUMN step_total INTEGER DEFAULT NULL",
 		// Print parameters extracted from G-code files, as JSON.
 		"ALTER TABLE design_file_entries ADD COLUMN gcode_meta TEXT DEFAULT NULL",
+		// Hand-made order within a folder. 0 for everything that was there before,
+		// which keeps the old sort by path.
+		"ALTER TABLE design_file_entries ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
 		// When the job was claimed. resetStuck compared against created_at before,
 		// which measures the wait in the queue rather than the runtime.
 		"ALTER TABLE sync_queue ADD COLUMN started_at TEXT DEFAULT NULL",

@@ -12,6 +12,30 @@ export interface ViewerOverlaysDeps {
   resetColors: () => void
   toolsOpen: () => boolean
   isGcode: () => boolean
+  /** The comparison: which two fassungen, what is shown, where the wipe sits. */
+  isComparing: () => boolean
+  compareReady: () => boolean
+  baseLabel: () => string
+  compareLabel: () => string
+  showBase: () => boolean
+  setShowBase: (on: boolean) => void
+  showCompare: () => boolean
+  setShowCompare: (on: boolean) => void
+  wipeAt: () => number | null
+  setWipeAt: (at: number | null) => void
+  /** The deviation colouring and how far along it is. */
+  deviationState: () => 'off' | 'running' | 'on'
+  deviationProgress: () => number
+  deviationMax: () => number
+  toggleDeviation: () => void
+  /** The layer slider: how many there are and which one is on top. A count of
+   *  0 or 1 hides the whole control. */
+  gcodeLayerCount: () => number
+  gcodeTopLayer: () => number
+  setGcodeTopLayer: (layer: number) => void
+  gcodeTopHeight: () => number
+  /** The height of the last layer - what the readout will be at its widest. */
+  gcodeMaxHeight: () => number
   measureActive: () => boolean
   setMeasure: (on: boolean) => void
   clearMeasure: () => void
@@ -37,11 +61,106 @@ export interface ViewerOverlaysDeps {
  */
 export function viewerOverlays(deps: ViewerOverlaysDeps) {
   const { translate, platesUI, activePlate, selectPlate, colorGroups, colorsOpen, setGroupColor,
-    resetColors, toolsOpen, isGcode, measureActive, setMeasure, clearMeasure, measureCount, measureDist,
+    resetColors, toolsOpen, isGcode,
+    isComparing, compareReady, baseLabel, compareLabel, showBase, setShowBase, showCompare, setShowCompare,
+    wipeAt, setWipeAt, deviationState, deviationProgress, deviationMax, toggleDeviation,
+    gcodeLayerCount, gcodeTopLayer, setGcodeTopLayer, gcodeTopHeight, gcodeMaxHeight,
+    measureActive, setMeasure, clearMeasure, measureCount, measureDist,
     setMeasureLabelEl, openSplitIntro, startPhoto, takePhoto, exitPhoto, photoMode, photoRegion,
     setPhotoRegion, photoDragDown, photoDragMove, photoDragUp } = deps
+  const sideRow = (label: string, colour: string, on: boolean, toggle: (on: boolean) => void) => (
+    <button onClick={() => toggle(!on)}
+      style={{ display: 'flex', 'align-items': 'center', gap: '8px', padding: '5px 8px', 'border-radius': '8px',
+               background: on ? 'rgba(255,255,255,0.06)' : 'transparent', border: '1px solid transparent',
+               color: on ? '#fff' : 'rgba(255,255,255,0.4)', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif",
+               'font-size': '13px', width: '100%', 'text-align': 'left' }}>
+      <span style={{ width: '12px', height: '12px', 'border-radius': '3px', background: colour, 'flex-shrink': '0', opacity: on ? '1' : '0.35' }} />
+      {label}
+    </button>
+  )
+
+  // where the finished print is.
+  const sliderValue = () => gcodeTopLayer() < 0 ? gcodeLayerCount() - 1 : gcodeTopLayer()
+
+  /**
+   * The width the two readouts will need at their widest - the last layer over
+   * the last layer, and the full height - worked out once rather than left to
+   * the text. Otherwise the panel grows and shrinks as the numbers get longer,
+   * dragging its left edge along with the slider.
+   */
+  const readoutWidth = () => {
+    const total = String(gcodeLayerCount())
+    const counter = `${total} / ${total}`.length
+    const height = `${gcodeMaxHeight().toFixed(2)} mm`.length
+    return Math.max(counter, height)
+  }
+
   return (
     <>
+        {/* Comparing two fassungen: what each colour is, which to show, and the
+            wipe that runs one into the other. */}
+        <Show when={isComparing() && compareReady()}>
+          <div style={{ position: 'absolute', bottom: '14px', left: '50%', transform: 'translateX(-50%)', 'z-index': '6', display: 'flex', 'flex-direction': 'column', gap: '8px', padding: '12px 14px', 'border-radius': '12px', background: 'rgba(13,17,23,0.85)', border: '1px solid rgba(255,255,255,0.12)', 'backdrop-filter': 'blur(6px)', 'min-width': '260px' }}>
+            {sideRow(baseLabel() || translate('compare_side_new'), '#4ade80', showBase(), setShowBase)}
+            {sideRow(compareLabel() || translate('compare_side_old'), '#e63946', showCompare(), setShowCompare)}
+            <div style={{ display: 'flex', 'align-items': 'center', gap: '10px', 'margin-top': '2px' }}>
+              <button onClick={() => setWipeAt(wipeAt() === null ? 0.5 : null)}
+                style={{ padding: '5px 10px', 'border-radius': '8px', border: `1px solid ${wipeAt() !== null ? 'rgba(74,144,217,0.7)' : 'rgba(255,255,255,0.12)'}`, background: wipeAt() !== null ? 'rgba(74,144,217,0.16)' : 'transparent', color: wipeAt() !== null ? '#9ecbf0' : 'rgba(255,255,255,0.65)', 'font-family': "'DM Mono',monospace", 'font-size': '11px', cursor: 'pointer', 'white-space': 'nowrap' }}>
+                {translate('compare_wipe')}
+              </button>
+              <input type="range" min="0" max="1" step="0.005" value={wipeAt() ?? 0.5}
+                disabled={wipeAt() === null}
+                onInput={event => setWipeAt(parseFloat(event.currentTarget.value))}
+                style={{ flex: '1', 'accent-color': 'var(--accent)', cursor: wipeAt() === null ? 'default' : 'pointer', opacity: wipeAt() === null ? '0.35' : '1' }} />
+            </div>
+
+            {/* How far the newer model has moved from the older one, as a colour
+                per vertex. Measured on demand: it is the one thing here that
+                costs real time. */}
+            <button onClick={toggleDeviation} disabled={deviationState() === 'running'}
+              style={{ padding: '6px 10px', 'border-radius': '8px', border: `1px solid ${deviationState() === 'on' ? 'rgba(74,144,217,0.7)' : 'rgba(255,255,255,0.12)'}`, background: deviationState() === 'on' ? 'rgba(74,144,217,0.16)' : 'transparent', color: deviationState() === 'on' ? '#9ecbf0' : 'rgba(255,255,255,0.65)', 'font-family': "'DM Sans',sans-serif", 'font-size': '13px', cursor: deviationState() === 'running' ? 'progress' : 'pointer' }}>
+              {deviationState() === 'running'
+                ? `${translate('compare_deviation_working')} ${Math.round(deviationProgress() * 100)}%`
+                : translate('compare_deviation')}
+            </button>
+            <Show when={deviationState() === 'on'}>
+              <div style={{ display: 'flex', 'align-items': 'center', gap: '8px' }}>
+                {/* The same scale the model is painted in, so the colours can be
+                    read back as millimetres. */}
+                <span style={{ 'font-family': "'DM Mono',monospace", 'font-size': '10px', color: 'rgba(255,255,255,0.6)' }}>0</span>
+                <div style={{ flex: '1', height: '8px', 'border-radius': '4px', background: 'linear-gradient(to right, hsl(240,85%,100%), hsl(240,85%,50%), hsl(120,85%,50%), hsl(60,85%,50%), hsl(0,85%,50%))' }} />
+                <span style={{ 'font-family': "'DM Mono',monospace", 'font-size': '10px', color: 'rgba(255,255,255,0.6)', 'white-space': 'nowrap' }}>
+                  {deviationMax().toFixed(2)} mm
+                </span>
+              </div>
+            </Show>
+          </div>
+        </Show>
+
+        {/* Right layer slider - g-code only, and only when there is more than one
+            layer to choose between. */}
+        <Show when={isGcode() && gcodeLayerCount() > 1}>
+          <div style={{ position: 'absolute', top: '14px', right: '14px', bottom: '14px', display: 'flex', 'flex-direction': 'column', 'align-items': 'center', gap: '10px', 'z-index': '6', 'pointer-events': 'none' }}>
+            <div style={{ display: 'flex', 'flex-direction': 'column', 'align-items': 'center', gap: '10px', padding: '12px 10px', 'border-radius': '12px', background: 'rgba(13,17,23,0.85)', border: '1px solid rgba(255,255,255,0.12)', 'backdrop-filter': 'blur(6px)', 'pointer-events': 'auto', 'max-height': '100%', width: `calc(${readoutWidth()}ch + 20px)` }}>
+              <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '11px', 'font-weight': '600', 'letter-spacing': '0.04em', 'text-transform': 'uppercase', color: 'rgba(255,255,255,0.5)' }}>
+                {translate('viewer_layers_title')}
+              </span>
+              <span style={{ 'font-family': "'DM Mono',monospace", 'font-size': '12px', color: '#fff', 'white-space': 'nowrap' }}>
+                {`${sliderValue() + 1} / ${gcodeLayerCount()}`}
+              </span>
+              <span style={{ 'font-family': "'DM Mono',monospace", 'font-size': '11px', color: 'rgba(255,255,255,0.5)', 'white-space': 'nowrap' }}>
+                {gcodeTopHeight().toFixed(2)} mm
+              </span>
+              {/* Vertical by writing-mode, with the old WebKit spelling behind it:
+                  a rotated slider would drag the wrong way on half the setups. */}
+              <input type="range" min="0" max={gcodeLayerCount() - 1} step="1" value={sliderValue()}
+                onInput={event => setGcodeTopLayer(parseInt(event.currentTarget.value, 10))}
+                title={translate('viewer_layer_hint')}
+                style={{ 'writing-mode': 'vertical-lr', direction: 'rtl', '-webkit-appearance': 'slider-vertical', '-moz-orient': 'vertical', width: '22px', flex: '1', 'min-height': '120px', 'accent-color': 'var(--accent)', cursor: 'pointer' }} />
+            </div>
+          </div>
+        </Show>
+
         {/* Left plate switcher - one card per build plate (thumbnail + name + filament colours) */}
         <Show when={platesUI().length > 1}>
           <div style={{ position: 'absolute', top: '14px', left: '14px', bottom: '14px', width: '154px', display: 'flex', 'flex-direction': 'column', gap: '8px', 'z-index': '6' }}>

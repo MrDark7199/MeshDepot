@@ -35,8 +35,11 @@ export const globalStyles = `
     .stlv-card-cover { width: 100% !important; }
     /* Detail page: single column */
     .stlv-detail-grid { grid-template-columns: 1fr !important; }
-    /* Breadcrumb: don't stick below a variable-height nav */
-    .stlv-breadcrumb { position: static !important; top: auto !important; }
+    /* The design bar carries logo, name and the actions in one row, which does
+       not fit a phone: let it wrap, and give up the sticky - on a small screen
+       a bar of two or three rows is more in the way than it is useful. */
+    .stlv-breadcrumb { position: static !important; top: auto !important; height: auto !important;
+                       flex-wrap: wrap !important; padding: 10px 14px !important; row-gap: 8px !important; }
     /* Notification panel: respect screen edge */
     .stlv-notif-panel { width: min(320px, calc(100vw - 16px)) !important; right: -8px !important; }
     /* Modals */

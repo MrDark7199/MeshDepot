@@ -18,6 +18,7 @@ tags:
   - name: Design Files
   - name: Design Images
   - name: Tags
+  - name: Custom fields
   - name: Collections
   - name: Downloads
   - name: Shares
@@ -90,6 +91,20 @@ components:
         name:        { type: string }
         color:       { type: string, nullable: true, example: '#e74c3c' }
         usage_count: { type: integer }
+
+    CustomField:
+      type: object
+      description: >
+        A field of the signed-in user's own, offered on every design in their
+        library. A design shared with somebody else carries none of them: the
+        values are read through the reader's own fields.
+      properties:
+        id:          { type: integer }
+        name:        { type: string }
+        field_type:  { type: string, enum: [text, int, float, boolean, select, multiselect] }
+        options:     { type: array, items: { type: string }, description: The choices of a select or multiselect, empty for the other types }
+        position:    { type: integer }
+        usage_count: { type: integer, description: How many designs carry the field }
 
     Collection:
       type: object
@@ -793,6 +808,136 @@ paths:
         '403':
           description: Not the owner of the design
 
+  /designs/{id}/files/{fileVersionId}/entry/{entryId}/folder:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: fileVersionId, in: path, required: true, schema: { type: integer } }
+      - { name: entryId, in: path, required: true, schema: { type: integer } }
+    put:
+      tags: [Design Files]
+      summary: Move one file into a folder of its version
+      description: >
+        Owner only. The bytes are untouched - the published file is a hard link
+        into the blob store and is renamed. An empty folder puts the file back
+        into the version's root.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                folder: { type: string, example: STL Files, description: Path inside the version, empty for the root }
+      responses:
+        '200':
+          description: Moved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  relative_path: { type: string }
+        '409':
+          description: That folder already holds a file of this name
+        '422':
+          description: Folder name unusable - too deep, too long, or nothing left of it
+
+  /designs/{id}/files/{fileVersionId}/order:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: fileVersionId, in: path, required: true, schema: { type: integer } }
+    put:
+      tags: [Design Files]
+      summary: Arrange one folder's files
+      description: >
+        Owner only. The list is one folder's files in the order they should read;
+        every other file keeps the number it has, which is why two folders may
+        both count from one - files are grouped by folder before they are sorted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entry_ids]
+              properties:
+                entry_ids: { type: array, items: { type: integer } }
+      responses:
+        '200':
+          description: Arranged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ordered: { type: integer }
+        '422':
+          description: Empty list, a repeated id, or one that is not in this version
+
+  /designs/{id}/files/{fileVersionId}/folders:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
+      - { name: fileVersionId, in: path, required: true, schema: { type: integer } }
+    post:
+      tags: [Design Files]
+      summary: Create a folder in a version
+      description: >
+        Owner only. A folder holding files needs no record of its own - it
+        follows from the files' relative_path - but an empty one is kept here so
+        it survives a reload. Creating one that already exists is success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string, example: STL Files }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path: { type: string }
+        '422':
+          description: Folder name unusable
+    delete:
+      tags: [Design Files]
+      summary: Delete a folder, keeping or deleting the files it holds
+      description: >
+        Owner only. By default the files are kept: they move up into the folder
+        the deleted one sat in, structure below it intact, so with "a/b" gone
+        "a/b/c/x.stl" becomes "a/c/x.stl". With delete_files they go with the
+        folder - asked for in so many words, because there is no undoing it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path:         { type: string }
+                delete_files: { type: boolean, default: false, description: Delete the files instead of moving them up }
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  moved:   { type: integer, description: How many files were moved up }
+                  deleted: { type: integer, description: How many files were deleted, with delete_files }
+        '409':
+          description: A file would collide with one of that name in the target folder
+        '422':
+          description: Folder name unusable
+
   /designs/{id}/files/{fileVersionId}/entry/{entryId}/pwmx/mesh:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string }, description: The design's public id }
@@ -945,6 +1090,77 @@ paths:
             caller nothing
 
   # - Tags -----------------------------------
+
+  /custom-fields:
+    get:
+      tags: [Custom fields]
+      summary: List the signed-in user's own fields
+      responses:
+        '200':
+          description: The fields, in the order they were defined
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CustomField' }
+    post:
+      tags: [Custom fields]
+      summary: Define a field
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:       { type: string, maxLength: 60 }
+                field_type: { type: string, enum: [text, int, float, boolean, select, multiselect], default: text }
+                options:    { type: array, items: { type: string }, description: Required for select and multiselect, ignored otherwise }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+        '409':
+          description: A field of that name already exists
+        '422':
+          description: Name missing or too long, unknown type, a selection without choices, or the limit of 40 fields reached
+
+  /custom-fields/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    put:
+      tags: [Custom fields]
+      summary: Rename a field or change its type
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:       { type: string, maxLength: 60 }
+                field_type: { type: string, enum: [text, int, float, boolean, select, multiselect] }
+                options:    { type: array, items: { type: string } }
+      responses:
+        '200':
+          description: Updated
+        '404':
+          description: No such field of this user
+        '409':
+          description: A field of that name already exists
+    delete:
+      tags: [Custom fields]
+      summary: Delete a field and every value recorded under it
+      responses:
+        '200':
+          description: Deleted
 
   /tags:
     get:

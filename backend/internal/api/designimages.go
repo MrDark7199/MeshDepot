@@ -184,7 +184,10 @@ func (server *Server) ImagesUpload(responseWriter http.ResponseWriter, request *
 			coverPath = firstImagePath
 		}
 	}
-	httpx.Success(responseWriter, map[string]any{"uploaded": saved, "cover_path": coverPath})
+	// image_id is the row of the first image of this request. The edit screen
+	// uploads one file per request and needs it to point the cover at a picture
+	// that did not exist when the user chose it.
+	httpx.Success(responseWriter, map[string]any{"uploaded": saved, "cover_path": coverPath, "image_id": firstImageID})
 }
 
 func (server *Server) ImagesDelete(responseWriter http.ResponseWriter, request *http.Request) {
