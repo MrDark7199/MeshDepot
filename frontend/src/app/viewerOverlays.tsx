@@ -36,6 +36,14 @@ export interface ViewerOverlaysDeps {
   gcodeTopHeight: () => number
   /** The height of the last layer - what the readout will be at its widest. */
   gcodeMaxHeight: () => number
+  /** Objects whose faces look inward, and the tool that turns them round. */
+  invertedCount: () => number
+  flipMeshAll: () => void
+  flippedCount: () => number
+  canSaveFixed: () => boolean
+  addFixedToDesign: () => void
+  flipSaving: () => boolean
+  flipSaved: () => boolean
   measureActive: () => boolean
   setMeasure: (on: boolean) => void
   clearMeasure: () => void
@@ -65,6 +73,8 @@ export function viewerOverlays(deps: ViewerOverlaysDeps) {
     isComparing, compareReady, baseLabel, compareLabel, showBase, setShowBase, showCompare, setShowCompare,
     wipeAt, setWipeAt, deviationState, deviationProgress, deviationMax, toggleDeviation,
     gcodeLayerCount, gcodeTopLayer, setGcodeTopLayer, gcodeTopHeight, gcodeMaxHeight,
+    invertedCount, flipMeshAll, flippedCount, canSaveFixed, addFixedToDesign,
+    flipSaving, flipSaved,
     measureActive, setMeasure, clearMeasure, measureCount, measureDist,
     setMeasureLabelEl, openSplitIntro, startPhoto, takePhoto, exitPhoto, photoMode, photoRegion,
     setPhotoRegion, photoDragDown, photoDragMove, photoDragUp } = deps
@@ -157,6 +167,45 @@ export function viewerOverlays(deps: ViewerOverlaysDeps) {
                 onInput={event => setGcodeTopLayer(parseInt(event.currentTarget.value, 10))}
                 title={translate('viewer_layer_hint')}
                 style={{ 'writing-mode': 'vertical-lr', direction: 'rtl', '-webkit-appearance': 'slider-vertical', '-moz-orient': 'vertical', width: '22px', flex: '1', 'min-height': '120px', 'accent-color': 'var(--accent)', cursor: 'pointer' }} />
+            </div>
+          </div>
+        </Show>
+
+        {/* Objects whose faces look inward. Top left, where nothing else sits
+            while a model is being looked at, and only while there are any. */}
+        <Show when={invertedCount() > 0 || flippedCount() > 0}>
+          <div style={{ position: 'absolute', top: '14px', left: platesUI().length > 1 ? '182px' : '14px', 'z-index': '7', 'max-width': '320px', display: 'flex', 'flex-direction': 'column', gap: '8px', padding: '12px 14px', 'border-radius': '12px', background: 'rgba(40,20,10,0.88)', border: '1px solid rgba(230,120,50,0.45)', 'backdrop-filter': 'blur(6px)' }}>
+            <div style={{ display: 'flex', 'align-items': 'center', gap: '8px' }}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#f0a060" stroke-width="2.2" stroke-linecap="round" style={{ 'flex-shrink': '0' }}>
+                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '13px', 'font-weight': '700', color: '#ffd9b8' }}>
+                <Show when={invertedCount() > 0} fallback={translate('viewer_inverted_fixed')}>
+                  {translate('viewer_inverted_title').replace('{count}', String(invertedCount()))}
+                </Show>
+              </span>
+            </div>
+            <Show when={invertedCount() > 0}>
+              <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '12px', color: 'rgba(255,220,195,0.8)', 'line-height': '1.5' }}>
+                {translate('viewer_inverted_hint')}
+              </span>
+            </Show>
+            <div style={{ display: 'flex', gap: '8px', 'flex-wrap': 'wrap' }}>
+              <Show when={invertedCount() > 0}>
+                <button onClick={flipMeshAll}
+                  style={{ padding: '6px 11px', 'border-radius': '8px', border: '1px solid rgba(230,120,50,0.6)', background: 'rgba(230,120,50,0.2)', color: '#ffd9b8', 'font-family': "'DM Sans',sans-serif", 'font-size': '12px', 'font-weight': '600', cursor: 'pointer' }}>
+                  {translate('viewer_inverted_fix_all')}
+                </button>
+              </Show>
+              <Show when={flippedCount() > 0 && canSaveFixed()}>
+                <button onClick={addFixedToDesign} disabled={flipSaving() || flipSaved()}
+                  style={{ padding: '6px 11px', 'border-radius': '8px', border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.08)', color: '#fff', 'font-family': "'DM Sans',sans-serif", 'font-size': '12px', cursor: flipSaving() || flipSaved() ? 'default' : 'pointer' }}>
+                  {flipSaved() ? translate('viewer_inverted_saved')
+                    : flipSaving() ? translate('viewer_split_adding')
+                    : translate('viewer_inverted_save')}
+                </button>
+              </Show>
             </div>
           </div>
         </Show>

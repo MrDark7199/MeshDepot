@@ -170,6 +170,15 @@ export function StlViewerModal(props: StlViewerModalProps) {
   const [splitFlash, setSplitFlash] = createSignal<number | null>(null)
   const [splitPlate, setSplitPlate] = createSignal<number | 'all'>('all')
   const [splitHidden, setSplitHidden] = createSignal<boolean[]>([])
+  /** Which of the separated parts are inside out, and would download as such. */
+  const [splitInverted, setSplitInverted] = createSignal<boolean[]>([])
+  /** Trust the file's own objects rather than the geometry; see canSplitByObjects. */
+  const [splitByObjects, setSplitByObjects] = createSignal(true)
+  /** The meshes whose faces look inward, and the tool for turning them round. */
+  const [invertedMeshes, setInvertedMeshes] = createSignal<Mesh[]>([])
+  const [flippedCount, setFlippedCount] = createSignal(0)
+  const [flipSaving, setFlipSaving] = createSignal(false)
+  const [flipSaved, setFlipSaved] = createSignal(false)
   const [splitSaving, setSplitSaving] = createSignal(false)
   /**
    * Which parts are already in the design. The selection is cumulative, so a second
@@ -717,25 +726,199 @@ export function StlViewerModal(props: StlViewerModalProps) {
     return meshes
   }
 
+  /** One mesh's triangles, in the coordinates the file was written in. */
+  /**
+   * Six times the volume the faces enclose, by the divergence theorem. Positive
+   * when they look outward, negative when the object is inside out - which is
+   * the one thing a slicer cannot make sense of: it reads the inside as the
+   * outside and prints a shell around a hole, or nothing at all.
+   *
+   * Taken over the triangles as they are, so an open mesh gives a figure that
+   * means little - hence the margin before anything is called inverted.
+   */
+  const facingVolumeOf = (mesh: Mesh): number => {
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind)
+    if (!positions) return 0
+    const indices = mesh.getIndices() ?? Array.from({ length: positions.length / 3 }, (_, index) => index)
+    let total = 0
+    for (let at = 0; at + 2 < indices.length; at += 3) {
+      const a = indices[at] * 3, b = indices[at + 1] * 3, c = indices[at + 2] * 3
+      const ax = positions[a], ay = positions[a + 1], az = positions[a + 2]
+      const bx = positions[b], by = positions[b + 1], bz = positions[b + 2]
+      const cx = positions[c], cy = positions[c + 1], cz = positions[c + 2]
+      total += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)
+    }
+    return total / 6
+  }
+
+  /**
+   * The same test for a loose triangle soup - nine floats a triangle, as the
+   * split hands them about - with its own bounding box, since a part has no
+   * mesh to ask for one yet.
+   */
+  const soupLooksInverted = (positions: Float32Array): boolean => {
+    let volume = 0
+    let minX = Infinity, minY = Infinity, minZ = Infinity
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+    for (let at = 0; at + 8 < positions.length; at += 9) {
+      const ax = positions[at], ay = positions[at + 1], az = positions[at + 2]
+      const bx = positions[at + 3], by = positions[at + 4], bz = positions[at + 5]
+      const cx = positions[at + 6], cy = positions[at + 7], cz = positions[at + 8]
+      volume += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)
+      for (const [x, y, z] of [[ax, ay, az], [bx, by, bz], [cx, cy, cz]]) {
+        if (x < minX) minX = x
+        if (y < minY) minY = y
+        if (z < minZ) minZ = z
+        if (x > maxX) maxX = x
+        if (y > maxY) maxY = y
+        if (z > maxZ) maxZ = z
+      }
+    }
+    const box = Math.max((maxX - minX) * (maxY - minY) * (maxZ - minZ), 1e-6)
+    return volume / 6 < -0.05 * box
+  }
+
+  /** Turns a soup's triangles round, corner two and three swapped. */
+  const flipSoup = (positions: Float32Array): Float32Array => {
+    const flipped = new Float32Array(positions.length)
+    for (let at = 0; at + 8 < positions.length; at += 9) {
+      flipped[at] = positions[at]; flipped[at + 1] = positions[at + 1]; flipped[at + 2] = positions[at + 2]
+      flipped[at + 3] = positions[at + 6]; flipped[at + 4] = positions[at + 7]; flipped[at + 5] = positions[at + 8]
+      flipped[at + 6] = positions[at + 3]; flipped[at + 7] = positions[at + 4]; flipped[at + 8] = positions[at + 5]
+    }
+    return flipped
+  }
+
+  /** Looks over every object and remembers the ones that are inside out. */
+  const findInvertedMeshes = () => {
+    const inverted: Mesh[] = []
+    for (const group of builtGroups) {
+      for (const mesh of group.meshes) {
+        const bounds = mesh.getBoundingInfo().boundingBox.extendSize
+        // A margin against the arithmetic, not against the question: a flat or
+        // open piece can come out slightly negative without being inverted.
+        const scale = Math.max(bounds.x * bounds.y * bounds.z, 1e-6)
+        if (facingVolumeOf(mesh) < -0.05 * scale) inverted.push(mesh)
+      }
+    }
+    setInvertedMeshes(inverted)
+  }
+
+  /**
+   * Turns one object's faces round: every triangle is read through its indices,
+   * its second and third corner swapped, and written back as its own vertices
+   * with fresh normals. Doing it through the indices covers both shapes a mesh
+   * can be in here - indexed, or unfolded by the flat-shading pass.
+   */
+  const flipMesh = (mesh: Mesh) => {
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind)
+    if (!positions) return
+    const indices = mesh.getIndices() ?? Array.from({ length: positions.length / 3 }, (_, index) => index)
+    const flipped: number[] = []
+    for (let at = 0; at + 2 < indices.length; at += 3) {
+      for (const corner of [indices[at], indices[at + 2], indices[at + 1]]) {
+        flipped.push(positions[corner * 3], positions[corner * 3 + 1], positions[corner * 3 + 2])
+      }
+    }
+    const data = new VertexData()
+    data.positions = flipped
+    data.indices = Array.from({ length: flipped.length / 3 }, (_, index) => index)
+    const normals: number[] = []
+    VertexData.ComputeNormals(data.positions, data.indices, normals)
+    data.normals = normals
+    data.applyToMesh(mesh)
+    setFlippedCount(count => count + 1)
+    setFlipSaved(false)
+    findInvertedMeshes()
+  }
+
+  const flipAllInverted = () => {
+    for (const mesh of [...invertedMeshes()]) flipMesh(mesh)
+  }
+
+  /**
+   * Turns the inside-out parts round, previews and all. What leaves the viewer
+   * afterwards - the ZIP, a single STL, the files added to the design - is built
+   * from these same soups, so repairing here repairs what is downloaded.
+   */
+  const repairSplitParts = () => {
+    const inverted = splitInverted()
+    splitParts = splitParts.map((part, index) =>
+      inverted[index] ? { positions: flipSoup(part.positions), triangleCount: part.triangleCount } : part)
+    setSplitInverted(splitParts.map(() => false))
+    buildSplitPartMeshes()
+  }
+
+  /**
+   * The repaired model as one STL, added to the design beside the file it came
+   * from. STL rather than the format it arrived in: this is a repair, and what
+   * is being repaired is geometry - a 3MF's colours would have to be rebuilt to
+   * carry them, which is a different job.
+   */
+  const addFixedToDesign = async () => {
+    if (!props.onSaveFiles) return
+    setFlipSaving(true)
+    try {
+      const soup = collectTriangleSoup('all')
+      const base = (props.filename || 'model').replace(/\.[^.]+$/, '')
+      const file = new File([writeBinaryStl({ positions: soup, triangleCount: soup.length / 9 })],
+        `${base}-korrigiert.stl`, { type: 'model/stl' })
+      await props.onSaveFiles([file])
+      setFlipSaved(true)
+    } catch {
+      setFlipSaved(false)
+    } finally {
+      setFlipSaving(false)
+    }
+  }
+
+  const soupOfMesh = (mesh: Mesh, undoRoot: Matrix | null): number[] => {
+    const chunks: number[] = []
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind)
+    if (!positions) return chunks
+    mesh.computeWorldMatrix(true)
+    const toSource = undoRoot ? mesh.getWorldMatrix().multiply(undoRoot) : mesh.getWorldMatrix()
+    // A mesh without an index buffer is already a triangle soup.
+    const indices = mesh.getIndices() ?? Array.from({ length: positions.length / 3 }, (_, i) => i)
+    const point = new Vector3()
+    for (const index of indices) {
+      point.set(positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2])
+      const world = Vector3.TransformCoordinates(point, toSource)
+      chunks.push(world.x, world.y, world.z)
+    }
+    return chunks
+  }
+
   const collectTriangleSoup = (onlyPlate: number | 'all'): Float32Array => {
     const chunks: number[] = []
     const undoRoot = modelRoot ? Matrix.Invert(modelRoot.getWorldMatrix()) : null
-    for (const mesh of sourceMeshesFor(onlyPlate)) {
-      const positions = mesh.getVerticesData(VertexBuffer.PositionKind)
-      if (!positions) continue
-      mesh.computeWorldMatrix(true)
-      const toSource = undoRoot ? mesh.getWorldMatrix().multiply(undoRoot) : mesh.getWorldMatrix()
-      // A mesh without an index buffer is already a triangle soup.
-      const indices = mesh.getIndices() ?? Array.from({ length: positions.length / 3 }, (_, i) => i)
-      const point = new Vector3()
-      for (const index of indices) {
-        point.set(positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2])
-        const world = Vector3.TransformCoordinates(point, toSource)
-        chunks.push(world.x, world.y, world.z)
-      }
-    }
+    for (const mesh of sourceMeshesFor(onlyPlate)) chunks.push(...soupOfMesh(mesh, undoRoot))
     return new Float32Array(chunks)
   }
+
+  /**
+   * The objects as the file itself describes them: a 3MF is built one mesh per
+   * build item, so each mesh is one object with everything it is made of.
+   */
+  const collectObjectSoups = (onlyPlate: number | 'all'): MeshPart[] => {
+    const undoRoot = modelRoot ? Matrix.Invert(modelRoot.getWorldMatrix()) : null
+    const parts: MeshPart[] = []
+    for (const mesh of sourceMeshesFor(onlyPlate)) {
+      const chunks = soupOfMesh(mesh, undoRoot)
+      if (chunks.length === 0) continue
+      parts.push({ positions: new Float32Array(chunks), triangleCount: chunks.length / 9 })
+    }
+    // Largest first, as the connected-component split returns them.
+    return parts.sort((left, right) => right.triangleCount - left.triangleCount)
+  }
+
+  /**
+   * Whether the file says what belongs together. Only a 3MF does, and only when
+   * it holds more than one object - with one, there is nothing its own grouping
+   * could tell us that the geometry does not.
+   */
+  const canSplitByObjects = () =>
+    formatLabel() === '3MF' && sourceMeshesFor(splitPlate()).length > 1
 
   // The file as it is stored, straight from the viewer - otherwise the way to it
   // is back out to the design and down into the file list.
@@ -765,9 +948,21 @@ export function StlViewerModal(props: StlViewerModalProps) {
     setSplitProgress(0)
     setSplitError(false)
     try {
-      const soup = collectTriangleSoup(splitPlate())
-      splitParts = await splitConnectedComponents(soup, fraction => setSplitProgress(fraction))
+      // What the file calls one object stays one part. Connectivity cannot know
+      // that: a two-colour print, a lid sitting inside its box, an inlay - all
+      // of them are several shells that touch at most, and splitting them apart
+      // is what made a 3MF fall into pieces that belong together.
+      if (splitByObjects() && canSplitByObjects()) {
+        splitParts = collectObjectSoups(splitPlate())
+        setSplitProgress(1)
+      } else {
+        const soup = collectTriangleSoup(splitPlate())
+        splitParts = await splitConnectedComponents(soup, fraction => setSplitProgress(fraction))
+      }
       setSplitNames(splitParts.map((_, index) => splitFileName(index)))
+      // Checked here rather than on the way out: what is downloaded is these
+      // soups, so this is where a part can still be put right.
+      setSplitInverted(splitParts.map(part => soupLooksInverted(part.positions)))
       // Everything is chosen to begin with: the common case is wanting all of it.
       setSplitChosen(splitParts.map(() => true))
       setSplitAdded(splitParts.map(() => false))
@@ -1347,6 +1542,8 @@ export function StlViewerModal(props: StlViewerModalProps) {
 
       if (isComparing()) await loadComparison(scene)
 
+      findInvertedMeshes()
+
       refreshHelpers() // draw the grid / build plate if they were left enabled
       resetView()      // frame the model (+ bed) from the default 45° angle
       setIsLoading(false)
@@ -1709,6 +1906,10 @@ export function StlViewerModal(props: StlViewerModalProps) {
     material.diffuseColor = Color3.FromHexString(normalizeHex(hex))
     material.specularColor = new Color3(0.1, 0.1, 0.1)
     material.backFaceCulling = false
+    // Both sides are drawn, so both sides are lit: without this a face seen from
+    // behind takes its light from the wrong direction and reads as a different
+    // material rather than as the back of the one it is.
+    material.twoSidedLighting = true
     return material
   }
 
@@ -1800,7 +2001,16 @@ export function StlViewerModal(props: StlViewerModalProps) {
           x * mm[2] + y * mm[6] + z * mm[10] + mm[14],
         )
       }
-      for (const t of tris) indices.push(base + t)
+      // A mirrored instance - a left part placed as the right one, say - turns
+      // every triangle inside out. Without turning them back, that copy is lit
+      // from within and would print as a hole rather than a part.
+      if (matrix.determinant() < 0) {
+        for (let at = 0; at + 2 < tris.length; at += 3) {
+          indices.push(base + tris[at], base + tris[at + 2], base + tris[at + 1])
+        }
+      } else {
+        for (const t of tris) indices.push(base + t)
+      }
     }
 
     // Resolve an object into the given instance buffers, multiplying transforms down each branch.
@@ -2158,7 +2368,9 @@ export function StlViewerModal(props: StlViewerModalProps) {
 
   const splitPanelDeps: SplitPanelDeps = {
     props, translate, builtPlates: () => builtPlates, platesUI, splitPhase, splitProgress, splitNames,
-    splitChosen, splitAdded, splitFlash, splitHidden, toggleSplitVisible, splitPlate, setSplitPlate, splitSaving, splitError, splitAddError,
+    splitChosen, splitAdded, splitFlash, splitHidden, toggleSplitVisible, splitPlate, setSplitPlate,
+    canSplitByObjects, splitByObjects, setSplitByObjects, splitInverted, repairSplitParts,
+    splitSaving, splitError, splitAddError,
     splitPos, chosenIndices, pendingIndices, toggleSplitChoice, setAllSplitChoices, flashSplitPart,
     runSplit, closeSplit, downloadSplit, addSplitToDesign, startSplitDrag,
   }
@@ -2186,6 +2398,8 @@ export function StlViewerModal(props: StlViewerModalProps) {
     deviationState, deviationProgress, deviationMax, toggleDeviation,
     gcodeLayerCount, gcodeTopLayer, setGcodeTopLayer: applyGcodeTopLayer,
     gcodeTopHeight, gcodeMaxHeight,
+    invertedCount: () => invertedMeshes().length, flipMeshAll: flipAllInverted,
+    flippedCount, canSaveFixed: () => !!props.onSaveFiles, addFixedToDesign, flipSaving, flipSaved,
     measureActive, setMeasure, clearMeasure, measureCount, measureDist,
     setMeasureLabelEl, openSplitIntro, startPhoto, takePhoto, exitPhoto, photoMode, photoRegion,
     setPhotoRegion, photoDragDown, photoDragMove, photoDragUp,

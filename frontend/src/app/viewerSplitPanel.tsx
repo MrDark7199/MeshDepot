@@ -17,6 +17,14 @@ export interface SplitPanelDeps {
   splitHidden: () => boolean[]
   toggleSplitVisible: (index: number) => void
   splitPlate: () => number | 'all'
+  /** Which separated parts are inside out, and the repair for them. */
+  splitInverted: () => boolean[]
+  repairSplitParts: () => void
+  /** Offered only when the file says what belongs together - a 3MF with several
+   *  objects. Off, the parts are found by connectivity as before. */
+  canSplitByObjects: () => boolean
+  splitByObjects: () => boolean
+  setSplitByObjects: (on: boolean) => void
   setSplitPlate: Setter<number | 'all'>
   splitSaving: () => boolean
   splitError: () => boolean
@@ -40,7 +48,8 @@ export interface SplitPanelDeps {
  */
 export function splitPanel(deps: SplitPanelDeps) {
   const { props, translate, builtPlates, platesUI, splitPhase, splitProgress, splitNames, splitChosen,
-    splitAdded, splitFlash, splitHidden, toggleSplitVisible, splitPlate, setSplitPlate, splitSaving, splitError, splitAddError, splitPos,
+    splitAdded, splitFlash, splitHidden, toggleSplitVisible, splitPlate, setSplitPlate,
+    canSplitByObjects, splitByObjects, setSplitByObjects, splitInverted, repairSplitParts, splitSaving, splitError, splitAddError, splitPos,
     chosenIndices, pendingIndices, toggleSplitChoice, setAllSplitChoices, flashSplitPart, runSplit,
     closeSplit, downloadSplit, addSplitToDesign, startSplitDrag } = deps
 
@@ -101,6 +110,16 @@ export function splitPanel(deps: SplitPanelDeps) {
                     </select>
                   </label>
                 </Show>
+                <Show when={canSplitByObjects()}>
+                  <label style={{ display: 'flex', 'align-items': 'flex-start', gap: '9px', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={splitByObjects()}
+                      onChange={event => setSplitByObjects(event.currentTarget.checked)}
+                      style={{ 'margin-top': '2px', 'accent-color': 'var(--accent)', cursor: 'pointer' }} />
+                    <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '12px', color: 'rgba(255,255,255,0.7)', 'line-height': '1.5' }}>
+                      {translate('viewer_split_by_objects')}
+                    </span>
+                  </label>
+                </Show>
                 <div style={{ display: 'flex', gap: '8px', 'justify-content': 'flex-end' }}>
                   <button onClick={closeSplit}
                     style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', 'border-radius': '8px', padding: '8px 14px', color: 'rgba(255,255,255,0.8)', 'font-size': '13px', cursor: 'pointer', 'font-family': "'DM Sans',sans-serif" }}>
@@ -151,6 +170,30 @@ export function splitPanel(deps: SplitPanelDeps) {
                     </div>
                   </div>
 
+                  {/* Inside-out parts, before the download rather than after:
+                      what is written out is exactly what is listed here. */}
+                  <Show when={splitInverted().some(Boolean)}>
+                    <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px', padding: '10px 12px', 'border-radius': '9px', background: 'rgba(40,20,10,0.9)', border: '1px solid rgba(230,120,50,0.45)' }}>
+                      <div style={{ display: 'flex', 'align-items': 'center', gap: '8px' }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f0a060" stroke-width="2.2" stroke-linecap="round" style={{ 'flex-shrink': '0' }}>
+                          <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                          <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+                        </svg>
+                        <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '12px', 'font-weight': '700', color: '#ffd9b8' }}>
+                          {translate('viewer_split_inverted_title')
+                            .replace('{count}', String(splitInverted().filter(Boolean).length))}
+                        </span>
+                      </div>
+                      <span style={{ 'font-family': "'DM Sans',sans-serif", 'font-size': '12px', color: 'rgba(255,220,195,0.82)', 'line-height': '1.5' }}>
+                        {translate('viewer_split_inverted_hint')}
+                      </span>
+                      <button onClick={repairSplitParts}
+                        style={{ 'align-self': 'flex-start', padding: '6px 12px', 'border-radius': '8px', border: '1px solid rgba(230,120,50,0.6)', background: 'rgba(230,120,50,0.22)', color: '#ffd9b8', 'font-family': "'DM Sans',sans-serif", 'font-size': '12px', 'font-weight': '600', cursor: 'pointer' }}>
+                        {translate('viewer_split_inverted_repair')}
+                      </button>
+                    </div>
+                  </Show>
+
                   <div style={{ 'max-height': '260px', 'overflow-y': 'auto', display: 'flex', 'flex-direction': 'column', gap: '3px', border: '1px solid rgba(255,255,255,0.08)', 'border-radius': '8px', padding: '5px' }}>
                     {/* Magnifier points the part out in the model, the rest of the row is a
                         plain selection toggle. Two separate targets, so neither click has to
@@ -173,6 +216,14 @@ export function splitPanel(deps: SplitPanelDeps) {
                           </Show>
                         </span>
                         <span style={{ overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap', flex: '1' }}>{name}</span>
+                        <Show when={splitInverted()[index()]}>
+                          <span title={translate('viewer_split_inverted_row')} style={{ display: 'flex', 'align-items': 'center', 'flex-shrink': '0' }}>
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#f0a060" stroke-width="2.2" stroke-linecap="round">
+                              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                              <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+                            </svg>
+                          </span>
+                        </Show>
                         <button onClick={event => { event.stopPropagation(); toggleSplitVisible(index()) }}
                           title={translate(splitHidden()[index()] ? 'viewer_split_show_part' : 'viewer_split_hide_part')}
                           style={{ background: 'none', border: 'none', padding: '2px', cursor: 'pointer', display: 'flex', 'align-items': 'center', color: splitHidden()[index()] ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.65)', 'flex-shrink': '0' }}>
