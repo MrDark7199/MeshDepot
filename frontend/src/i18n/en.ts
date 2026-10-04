@@ -198,6 +198,8 @@ export default {
   btn_new_folder:           'New folder',
   btn_new_folder_title:     'Create a folder in this version',
   btn_delete_folder:        'Delete folder',
+  btn_rename:               'Rename',
+  rename_folder_title:      'Rename folder',
   btn_create:               'Create',
   files_drag_hint:          'Drag into a folder',
   new_folder_title:         'New folder',

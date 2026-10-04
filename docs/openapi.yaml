@@ -905,6 +905,37 @@ paths:
                   path: { type: string }
         '422':
           description: Folder name unusable
+    put:
+      tags: [Design Files]
+      summary: Rename a folder where it stands
+      description: >
+        Owner only. The files travel with it - each is renamed on disk, which
+        for a hard link into the blob store costs nothing - and so do the folders
+        inside it. The name is one segment: renaming is not moving.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, name]
+              properties:
+                path: { type: string, example: Teile }
+                name: { type: string, example: Druckteile }
+      responses:
+        '200':
+          description: Renamed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path:  { type: string, description: Where the folder sits now }
+                  moved: { type: integer, description: How many files travelled with it }
+        '409':
+          description: A file of that name is already in the target
+        '422':
+          description: Name unusable, or a path where a name was expected
     delete:
       tags: [Design Files]
       summary: Delete a folder, keeping or deleting the files it holds

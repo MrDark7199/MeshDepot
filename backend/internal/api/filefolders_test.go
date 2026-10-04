@@ -132,6 +132,67 @@ func TestFoldersDeleteKeepsTheFiles(t *testing.T) {
 	}
 }
 
+// Renaming moves what is in the folder along with it, including the folders
+// inside it, and leaves everything else where it was.
+func TestFoldersRenameTakesItsFilesAlong(t *testing.T) {
+	testHarness := newHarness(t)
+	designID := testHarness.insertDesign(testHarness.userID, "Mit Ordnern")
+	archive := zipArchive(t, map[string][]byte{
+		"Teile/klein/wuerfel.stl": stlBytes,
+		"Teile/kugel.stl":         stlBytesAlternate,
+		"liesmich.stl":            []byte("solid r\nendsolid r\n"),
+	})
+	version := testHarness.uploadVersion(designID, "1.0", "", map[string][]byte{"teile.zip": archive}).data(t)
+	versionID := coerce.Int(version["id"])
+	// An empty folder below it, to see that its row travels too.
+	testHarness.asUser(http.MethodPost,
+		fmt.Sprintf("/api/v1/designs/%s/files/%d/folders", testHarness.designPID(designID), versionID),
+		map[string]any{"path": "Teile/leer"})
+
+	answer := testHarness.asUser(http.MethodPut,
+		fmt.Sprintf("/api/v1/designs/%s/files/%d/folders", testHarness.designPID(designID), versionID),
+		map[string]any{"path": "Teile", "name": "Druckteile"})
+
+	if answer.status != http.StatusOK {
+		t.Fatalf("the rename answered %d: %s", answer.status, answer.rawBody)
+	}
+	paths := testHarness.relativePaths(versionID)
+	if !paths["Druckteile/kugel.stl"] || !paths["Druckteile/klein/wuerfel.stl"] || !paths["liesmich.stl"] {
+		t.Fatalf("the files sit at %v", paths)
+	}
+	stored := testHarness.storedFile("SELECT path FROM design_file_entries WHERE design_file_id = ? AND filename = 'kugel.stl'", versionID)
+	if _, failure := os.Stat(stored); failure != nil {
+		t.Fatalf("the file is not where its row says: %v", failure)
+	}
+	empty := testHarness.count("SELECT COUNT(*) FROM design_file_folders WHERE design_file_id = ? AND path = 'Druckteile/leer'", versionID)
+	if empty != 1 {
+		t.Fatal("the empty folder below it did not travel")
+	}
+}
+
+// A name that is really a path would file the folder somewhere else, which is
+// not what renaming means.
+func TestFoldersRenameRefusesAPath(t *testing.T) {
+	testHarness := newHarness(t)
+	designID := testHarness.insertDesign(testHarness.userID, "Mit Ordnern")
+	version := testHarness.uploadVersion(designID, "1.0", "", map[string][]byte{"wuerfel.stl": stlBytes}).data(t)
+	versionID := coerce.Int(version["id"])
+	testHarness.asUser(http.MethodPost,
+		fmt.Sprintf("/api/v1/designs/%s/files/%d/folders", testHarness.designPID(designID), versionID),
+		map[string]any{"path": "Teile"})
+
+	answer := testHarness.asUser(http.MethodPut,
+		fmt.Sprintf("/api/v1/designs/%s/files/%d/folders", testHarness.designPID(designID), versionID),
+		map[string]any{"path": "Teile", "name": "a/b"})
+
+	if answer.status != http.StatusUnprocessableEntity {
+		t.Fatalf("a path as a name answered %d: %s", answer.status, answer.rawBody)
+	}
+	if count := testHarness.count("SELECT COUNT(*) FROM design_file_folders WHERE design_file_id = ? AND path = 'Teile'", versionID); count != 1 {
+		t.Fatal("the folder was renamed anyway")
+	}
+}
+
 // The other way, and only when asked for in so many words: the folder goes and
 // its files with it.
 func TestFoldersDeleteCanTakeTheFilesAlong(t *testing.T) {

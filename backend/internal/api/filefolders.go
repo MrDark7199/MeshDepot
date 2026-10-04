@@ -62,6 +62,12 @@ type folderBody struct {
 	DeleteFiles bool `json:"delete_files"`
 }
 
+type renameFolderBody struct {
+	Path string `json:"path"`
+	// Name is the folder's new name, not a path: a rename stays where it is.
+	Name string `json:"name"`
+}
+
 type entryFolderBody struct {
 	Folder string `json:"folder"`
 }
@@ -388,6 +394,101 @@ func (server *Server) EntryMove(responseWriter http.ResponseWriter, request *htt
 	// otherwise gone - which is what "the files describe the folders" means.
 	removeEmptyDir(filepath.Join(versionDir, filepath.FromSlash(folderOf(entry.RelativePath))))
 	httpx.Success(responseWriter, map[string]any{"relative_path": target})
+}
+
+// FoldersRename gives a folder another name, where it stands. The files travel
+// with it: each one is renamed on disk, which for a hard link into the blob
+// store costs nothing, and the rows below it follow the same prefix.
+func (server *Server) FoldersRename(responseWriter http.ResponseWriter, request *http.Request) {
+	designID, fileID, ok := server.ownedVersion(responseWriter, request)
+	if !ok {
+		return
+	}
+	var body renameFolderBody
+	if failure := httpx.DecodeJSON(request, &body); failure != nil {
+		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.invalid_request")
+		return
+	}
+	path, valid := cleanFolderPath(body.Path)
+	// The new name is one segment: renaming is not moving, and a slash typed into
+	// the field would otherwise quietly file the folder somewhere else.
+	name, nameValid := cleanFolderPath(body.Name)
+	if !valid || path == "" || !nameValid || name == "" || strings.Contains(name, "/") {
+		httpx.Error(responseWriter, http.StatusUnprocessableEntity, "error.folder_name_invalid")
+		return
+	}
+	parent := folderOf(path)
+	target := name
+	if parent != "" {
+		target = parent + "/" + name
+	}
+	if strings.EqualFold(target, path) {
+		httpx.Success(responseWriter, map[string]any{"path": path})
+		return
+	}
+
+	version, ok := server.requireFileVersion(responseWriter, fileID, designID)
+	if !ok {
+		return
+	}
+	entries, failure := versionEntries(server.DB, fileID)
+	if failure != nil {
+		httpx.Error(responseWriter, http.StatusInternalServerError, "error.internal")
+		return
+	}
+
+	// Worked out in full before anything moves, so a clash cannot leave half the
+	// folder renamed.
+	taken := map[string]bool{}
+	for _, entry := range entries {
+		if !underFolder(entry.RelativePath, path) {
+			taken[strings.ToLower(entry.RelativePath)] = true
+		}
+	}
+	type move struct {
+		entry fileEntryRow
+		to    string
+	}
+	var moves []move
+	for _, entry := range entries {
+		if !underFolder(entry.RelativePath, path) {
+			continue
+		}
+		destination := target + "/" + strings.TrimPrefix(entry.RelativePath, path+"/")
+		if taken[strings.ToLower(destination)] {
+			httpx.Error(responseWriter, http.StatusConflict, "error.folder_merge_conflict")
+			return
+		}
+		taken[strings.ToLower(destination)] = true
+		moves = append(moves, move{entry: entry, to: destination})
+	}
+
+	layout := server.userLayout(request)
+	versionDir := layout.Version(designID, versionNumber(version))
+	for _, pending := range moves {
+		if failure := server.moveEntry(pending.entry, versionDir, pending.to); failure != nil {
+			httpx.Error(responseWriter, http.StatusInternalServerError, "error.internal")
+			return
+		}
+	}
+
+	// The folder's own row and those of the folders inside it. Rewritten rather
+	// than dropped, or an empty folder would disappear on being renamed.
+	rows, failure := dbutil.QueryMaps(server.DB,
+		"SELECT id, path FROM design_file_folders WHERE design_file_id = ? AND (path = ? OR path LIKE ?)",
+		fileID, path, path+"/%")
+	if failure != nil {
+		httpx.Error(responseWriter, http.StatusInternalServerError, "error.internal")
+		return
+	}
+	for _, row := range rows {
+		old := coerce.StringOr(row["path"], "")
+		dbutil.ExecLogged(server.DB, "UPDATE design_file_folders SET path = ? WHERE id = ?",
+			target+strings.TrimPrefix(old, path), coerce.Int(row["id"]))
+	}
+	removeEmptyDir(filepath.Join(versionDir, filepath.FromSlash(path)))
+	dbutil.ExecLogged(server.DB, "UPDATE designs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", designID)
+	httpx.Success(responseWriter, map[string]any{"path": target, "moved": len(moves)})
 }
 
 // EntriesReorder writes the order the user dragged a folder's files into. The

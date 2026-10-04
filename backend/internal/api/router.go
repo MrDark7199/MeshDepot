@@ -99,6 +99,7 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("PUT /api/v1/designs/{designId}/files/{fileId}/entry/{entryId}/folder", server.Auth.Require(http.HandlerFunc(server.EntryMove)))
 	mux.Handle("PUT /api/v1/designs/{designId}/files/{fileId}/order", server.Auth.Require(http.HandlerFunc(server.EntriesReorder)))
 	mux.Handle("POST /api/v1/designs/{designId}/files/{fileId}/folders", server.Auth.Require(http.HandlerFunc(server.FoldersCreate)))
+	mux.Handle("PUT /api/v1/designs/{designId}/files/{fileId}/folders", server.Auth.Require(http.HandlerFunc(server.FoldersRename)))
 	mux.Handle("DELETE /api/v1/designs/{designId}/files/{fileId}/folders", server.Auth.Require(http.HandlerFunc(server.FoldersDelete)))
 	mux.Handle("POST /api/v1/designs/{designId}/files/{fileId}/entry/{entryId}/token", server.Auth.Require(http.HandlerFunc(server.FilesCreateToken)))
 	mux.Handle("GET /api/v1/designs/{designId}/files/{fileId}/stl", server.Auth.Require(http.HandlerFunc(server.FilesServeStl)))

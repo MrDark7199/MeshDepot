@@ -30,6 +30,8 @@ export interface DesignFilesTabDeps {
                     newerVersionId: number, newerEntry: DesignFileEntry) => void
   /** Asks for a name and creates the folder in that version. */
   openNewFolder: (fileVersionId: number) => void
+  /** Asks for a new name for a folder that is already there. */
+  openRenameFolder: (fileVersionId: number, folder: string) => void
   /** Puts one file into a folder of its version, "" for the version's root. The
    *  order, when given, is that folder's files as they should read afterwards. */
   moveEntryToFolder: (fileVersionId: number, entryId: number, folder: string, order?: number[]) => void
@@ -50,7 +52,7 @@ export interface DesignFilesTabDeps {
 export function designFilesTab(deps: DesignFilesTabDeps) {
   const { props, translate, lang, user, design, activeTab, fileVersions, isLoadingFiles,
     expandedVersionIds, setExpandedVersionIds, collapsedFolders, setCollapsedFolders,
-    openAddFiles, openNewFolder, moveEntryToFolder, reorderEntries, askDeleteFolder,
+    openAddFiles, openNewFolder, openRenameFolder, moveEntryToFolder, reorderEntries, askDeleteFolder,
     compareInViewer, deleteFileEntry,
     setConfirmDeleteFileId, showEntryInViewer, isGcodeFile, isResinFile, isResinViewable,
     gcodeSummary } = deps
@@ -345,12 +347,18 @@ export function designFilesTab(deps: DesignFilesTabDeps) {
                                   </Show>
                                   {folderKey === '' ? translate('label_main_folder') : folderKey}
                                   <Show when={folderKey !== '' && !props.isReadOnly}>
+                                    {/* Quiet, and a word rather than a sign: it changes
+                                        nothing that cannot be changed back. */}
+                                    <button onClick={event => { event.stopPropagation(); openRenameFolder(fileVersion.id, folderKey) }}
+                                      style={{ 'margin-left': 'auto', padding: '5px 10px', background: 'var(--bg4)', border: '1px solid var(--border2)', 'border-radius': '7px', color: 'var(--text3)', 'font-size': '11px', cursor: 'pointer', ...monoFont }}>
+                                      {translate('btn_rename')}
+                                    </button>
                                     {/* At the right end and in the colour of the other
                                         deletes: a folder is removed where a file and a
                                         version are. */}
                                     <button onClick={event => { event.stopPropagation(); askDeleteFolder(fileVersion.id, folderKey, filesUnder(folderKey)) }}
                                       title={translate('btn_delete_folder')}
-                                      style={{ 'margin-left': 'auto', padding: '5px 9px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '7px', color: 'var(--danger)', 'font-size': '11px', cursor: 'pointer', ...monoFont, display: 'flex', 'align-items': 'center' }}>✕</button>
+                                      style={{ padding: '5px 9px', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)', 'border-radius': '7px', color: 'var(--danger)', 'font-size': '11px', cursor: 'pointer', ...monoFont, display: 'flex', 'align-items': 'center' }}>✕</button>
                                   </Show>
                                 </div>
                               </Show>

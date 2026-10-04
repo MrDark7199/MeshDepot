@@ -273,9 +273,12 @@ export function DesignPage(props: DesignPageProps) {
   // taken off the design; that is why it is the complete set rather than a patch.
   const [customValues, setCustomValues] = createSignal<Record<string, string>>({})
   const [addFilesToVersionId, setAddFilesToVersionId] = createSignal<number | null>(null)
-  /** The version a new folder is being named for, and the name so far. */
-  const [newFolderVersionId, setNewFolderVersionId] = createSignal<number | null>(null)
-  const [newFolderName, setNewFolderName] = createSignal('')
+  /**
+   * The folder dialog: which version it is for, the name being typed, and - when
+   * a folder is being renamed rather than made - the one it is about.
+   */
+  const [folderDialog, setFolderDialog] = createSignal<{ versionId: number; renaming?: string } | null>(null)
+  const [folderName, setFolderName] = createSignal('')
   /** The folder waiting for the delete dialog, with what is in it. */
   const [folderToDelete, setFolderToDelete] =
     createSignal<{ versionId: number; folder: string; fileCount: number } | null>(null)
@@ -921,14 +924,16 @@ export function DesignPage(props: DesignPageProps) {
   const foldersOfVersion = (fileVersionId: number | null) =>
     fileVersions().find(version => version.id === fileVersionId)?.folders ?? []
 
-  const createFolder = async () => {
-    const versionId = newFolderVersionId()
-    const name = newFolderName().trim()
-    if (versionId === null || !name) return
+  /** Creates the folder, or renames the one the dialog was opened on. */
+  const saveFolder = async () => {
+    const dialog = folderDialog()
+    const name = folderName().trim()
+    if (!dialog || !name) return
     try {
-      await api.createFolder(props.designId, versionId, name)
-      setNewFolderVersionId(null)
-      setNewFolderName('')
+      if (dialog.renaming) await api.renameFolder(props.designId, dialog.versionId, dialog.renaming, name)
+      else await api.createFolder(props.designId, dialog.versionId, name)
+      setFolderDialog(null)
+      setFolderName('')
       loadFiles()
     } catch (failure: unknown) {
       props.showToast(t(errorKey(failure)), 'error')
@@ -1091,7 +1096,13 @@ export function DesignPage(props: DesignPageProps) {
     props, translate, lang, user, design, activeTab, fileVersions, isLoadingFiles, expandedVersionIds,
     setExpandedVersionIds, collapsedFolders, setCollapsedFolders, deleteFileEntry, setConfirmDeleteFileId,
     openAddFiles: (fileVersionId: number) => { setUploadFolder(''); setAddFilesToVersionId(fileVersionId) },
-    openNewFolder: (fileVersionId: number) => { setNewFolderName(''); setNewFolderVersionId(fileVersionId) },
+    openNewFolder: (fileVersionId: number) => { setFolderName(''); setFolderDialog({ versionId: fileVersionId }) },
+    // The field opens on the folder's own name, not on its path: renaming
+    // leaves it where it stands.
+    openRenameFolder: (fileVersionId: number, folder: string) => {
+      setFolderName(folder.includes('/') ? folder.slice(folder.lastIndexOf('/') + 1) : folder)
+      setFolderDialog({ versionId: fileVersionId, renaming: folder })
+    },
     moveEntryToFolder,
     reorderEntries,
     askDeleteFolder: (fileVersionId: number, folder: string, fileCount: number) =>
@@ -1672,28 +1683,32 @@ export function DesignPage(props: DesignPageProps) {
           onSubmit={files => addFilesToVersion(addFilesToVersionId()!, files)} />
       </Show>
 
-      {/* Naming a new folder */}
-      <Show when={newFolderVersionId() !== null}>
-        <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.65)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'z-index': '600', 'backdrop-filter': 'blur(5px)' }}
-          onClick={() => setNewFolderVersionId(null)}>
-          <div onClick={e => e.stopPropagation()}
-            style={{ background: 'var(--bg2)', 'border-radius': '18px', padding: '28px 32px', width: '420px', border: '1px solid var(--border)', 'box-shadow': '0 24px 64px rgba(0,0,0,0.5)' }}>
-            <div style={{ ...sansFont, 'font-size': '18px', 'font-weight': '700', color: 'var(--text)', 'margin-bottom': '16px' }}>{translate('new_folder_title')}</div>
-            <input style={inputStyle} value={newFolderName()} placeholder={translate('new_folder_placeholder')} autofocus
-              onInput={e => setNewFolderName(e.currentTarget.value)}
-              onKeyDown={(e: KeyboardEvent) => { if (e.key === 'Enter') createFolder() }} />
-            <div style={{ display: 'flex', gap: '11px', 'justify-content': 'flex-end', 'margin-top': '22px' }}>
-              <button onClick={() => setNewFolderVersionId(null)}
-                style={{ padding: '9px 20px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '10px', color: 'var(--muted)', 'font-size': '14px', cursor: 'pointer', ...sansFont }}>
-                {translate('btn_cancel')}
-              </button>
-              <button onClick={createFolder} disabled={!newFolderName().trim()}
-                style={{ padding: '9px 20px', background: newFolderName().trim() ? 'var(--accent)' : 'var(--bg4)', border: 'none', 'border-radius': '10px', color: newFolderName().trim() ? '#fff' : 'var(--muted)', 'font-size': '14px', 'font-weight': '700', cursor: newFolderName().trim() ? 'pointer' : 'not-allowed', ...sansFont }}>
-                {translate('btn_create')}
-              </button>
+      {/* Naming a folder - a new one, or the one being renamed */}
+      <Show when={folderDialog()}>
+        {dialog => (
+          <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.65)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'z-index': '600', 'backdrop-filter': 'blur(5px)' }}
+            onClick={() => setFolderDialog(null)}>
+            <div onClick={e => e.stopPropagation()}
+              style={{ background: 'var(--bg2)', 'border-radius': '18px', padding: '28px 32px', width: '420px', border: '1px solid var(--border)', 'box-shadow': '0 24px 64px rgba(0,0,0,0.5)' }}>
+              <div style={{ ...sansFont, 'font-size': '18px', 'font-weight': '700', color: 'var(--text)', 'margin-bottom': '16px' }}>
+                {translate(dialog().renaming ? 'rename_folder_title' : 'new_folder_title')}
+              </div>
+              <input style={inputStyle} value={folderName()} placeholder={translate('new_folder_placeholder')} autofocus
+                onInput={e => setFolderName(e.currentTarget.value)}
+                onKeyDown={(e: KeyboardEvent) => { if (e.key === 'Enter') saveFolder() }} />
+              <div style={{ display: 'flex', gap: '11px', 'justify-content': 'flex-end', 'margin-top': '22px' }}>
+                <button onClick={() => setFolderDialog(null)}
+                  style={{ padding: '9px 20px', background: 'var(--surface)', border: '1px solid var(--border)', 'border-radius': '10px', color: 'var(--muted)', 'font-size': '14px', cursor: 'pointer', ...sansFont }}>
+                  {translate('btn_cancel')}
+                </button>
+                <button onClick={saveFolder} disabled={!folderName().trim()}
+                  style={{ padding: '9px 20px', background: folderName().trim() ? 'var(--accent)' : 'var(--bg4)', border: 'none', 'border-radius': '10px', color: folderName().trim() ? '#fff' : 'var(--muted)', 'font-size': '14px', 'font-weight': '700', cursor: folderName().trim() ? 'pointer' : 'not-allowed', ...sansFont }}>
+                  {translate(dialog().renaming ? 'btn_save' : 'btn_create')}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </Show>
 
       {/* Deleting a folder. Two ways out, because both are reasonable and only

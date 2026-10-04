@@ -198,6 +198,8 @@ export default {
   btn_new_folder:           'Neuer Ordner',
   btn_new_folder_title:     'Ordner in dieser Version anlegen',
   btn_delete_folder:        'Ordner löschen',
+  btn_rename:               'Umbenennen',
+  rename_folder_title:      'Ordner umbenennen',
   btn_create:               'Anlegen',
   files_drag_hint:          'In einen Ordner ziehen',
   new_folder_title:         'Neuer Ordner',

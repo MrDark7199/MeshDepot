@@ -30,8 +30,13 @@ export interface UploadFilesModalProps {
  * anything is sent. Shared by "upload a new version" and "add files to this
  * version": the two differ only in the version and notes fields.
  */
-/** The option that turns the folder list into a text field. */
-const NEW_FOLDER = '\u0000new'
+/**
+ * The option that turns the folder list into a text field. Two colons, because
+ * a folder can never be named that - they are stripped from a folder name - and
+ * because the NUL character this used to be never survived the DOM, so the
+ * option matched nothing and the field never appeared.
+ */
+const NEW_FOLDER = '::new'
 
 export function UploadFilesModal(props: UploadFilesModalProps) {
   const { translate } = useI18n()
@@ -119,9 +124,10 @@ export function UploadFilesModal(props: UploadFilesModalProps) {
             </div>
           </Show>
 
-          {/* Where the files land. A version without folders is not asked at all:
-            there would be one choice, and it is the one it already has. */}
-          <Show when={(props.folders ?? []).length > 0 || creatingFolder()}>
+          {/* Where the files land. Offered wherever the dialog is given somewhere
+            to put the answer - a version with no folders yet included, since
+            making the first one is exactly what one wants there. */}
+          <Show when={props.onFolderChange}>
             <div>
               <label style={labelStyle}>{translate('label_target_folder')}</label>
               <Show when={creatingFolder()} fallback={

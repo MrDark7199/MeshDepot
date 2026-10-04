@@ -132,6 +132,9 @@ export const api = {
   /** The order of one folder's files, as they should read. */
   reorderEntries: (designId: DesignID, fileVersionId: number, entryIds: number[]) =>
     request('PUT', `/designs/${designId}/files/${fileVersionId}/order`, { entry_ids: entryIds }),
+  /** Renames a folder where it stands; name is one segment, not a path. */
+  renameFolder: (designId: DesignID, fileVersionId: number, path: string, name: string) =>
+    request('PUT', `/designs/${designId}/files/${fileVersionId}/folders`, { path, name }),
   createFolder: (designId: DesignID, fileVersionId: number, path: string) =>
     request('POST', `/designs/${designId}/files/${fileVersionId}/folders`, { path }),
   /** deleteFiles decides what happens to what is inside: kept and moved up, or
