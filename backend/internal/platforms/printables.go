@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -412,6 +413,8 @@ func autoLoginPrintables(email, password string) string {
 	}
 	cookies = collectCookies(cookies, header2)
 	currentURL := absLocation(header2.Get("Location"))
+	// Where the login sent us, hop by hop, for the log when no code arrives.
+	hops := []string{"login form " + describeLoginHop(status2, currentURL, nil)}
 
 	// Step 3: follow the redirect chain until printables.com?code=…
 	authCode := ""
@@ -420,18 +423,19 @@ func autoLoginPrintables(email, password string) string {
 			authCode = parsed.Query().Get("code")
 			break
 		}
-		status3, header3, _ := rawRequest(client, http.MethodGet, currentURL, "", map[string]string{
+		status3, header3, body3 := rawRequest(client, http.MethodGet, currentURL, "", map[string]string{
 			"User-Agent": printablesUserAgent, "Cookie": strings.Join(cookies, "; "),
 		})
 		cookies = collectCookies(cookies, header3)
 		currentURL = absLocation(header3.Get("Location"))
+		hops = append(hops, describeLoginHop(status3, currentURL, body3))
 		if status3 >= 400 {
 			break
 		}
 	}
 	if authCode == "" {
-		logx.Errorf("[printables] login: the redirects after the login never reached Printables with a code " +
-			"(a second factor or a consent page may be asking for something)")
+		logx.Errorf("[printables] login: the redirects after the login never reached Printables with a code "+
+			"(a second factor or a consent page may be asking for something). Hops: %s", strings.Join(hops, " → "))
 		return ""
 	}
 
@@ -528,6 +532,36 @@ func collectCookies(existing []string, header http.Header) []string {
 		}
 	}
 	return output
+}
+
+var pageTitlePattern = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+
+// describeLoginHop names one step of the login's redirect chain. Query values
+// stay out of it - they carry the state and, at the end, the code itself - only
+// their names are kept. A page that redirects nowhere is named by its title,
+// which is what tells a second-factor or consent page from an error.
+func describeLoginHop(status int, location string, page []byte) string {
+	if location == "" {
+		description := fmt.Sprintf("HTTP %d, no further redirect", status)
+		if title := pageTitlePattern.FindSubmatch(page); title != nil {
+			description += fmt.Sprintf(", page title %q", logSnippet(title[1]))
+		}
+		return description
+	}
+	parsed, failure := url.Parse(location)
+	if failure != nil {
+		return fmt.Sprintf("HTTP %d to an unreadable address", status)
+	}
+	var parameterNames []string
+	for name := range parsed.Query() {
+		parameterNames = append(parameterNames, name)
+	}
+	sort.Strings(parameterNames)
+	description := fmt.Sprintf("HTTP %d to %s%s", status, parsed.Host, parsed.Path)
+	if len(parameterNames) > 0 {
+		description += " with " + strings.Join(parameterNames, ", ")
+	}
+	return description
 }
 
 func absLocation(location string) string {

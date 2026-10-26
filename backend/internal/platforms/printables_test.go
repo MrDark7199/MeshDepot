@@ -216,3 +216,20 @@ func TestMissingModelWithAWorkingLoginIsNotAskedForAgain(t *testing.T) {
 		t.Errorf("a token that works must not be dropped, saw %q", *seen)
 	}
 }
+
+func TestLoginHopKeepsParameterNamesButNotTheirValues(t *testing.T) {
+	hop := describeLoginHop(302, "https://www.printables.com/login?state=abc123&code=secret-code", nil)
+	if hop != "HTTP 302 to www.printables.com/login with code, state" {
+		t.Errorf("unexpected hop: %q", hop)
+	}
+	if strings.Contains(hop, "secret-code") || strings.Contains(hop, "abc123") {
+		t.Errorf("hop leaks a parameter value: %q", hop)
+	}
+}
+
+func TestLoginHopWithoutRedirectNamesThePage(t *testing.T) {
+	hop := describeLoginHop(200, "", []byte("<html><head><title>\n  Two-factor authentication | Prusa Account\n</title></head></html>"))
+	if hop != `HTTP 200, no further redirect, page title "Two-factor authentication | Prusa Account"` {
+		t.Errorf("unexpected hop: %q", hop)
+	}
+}
