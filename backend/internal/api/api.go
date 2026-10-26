@@ -13,6 +13,7 @@ import (
 	"meshdepot/internal/health"
 	"meshdepot/internal/platforms"
 	"meshdepot/internal/storage"
+	"meshdepot/internal/version"
 )
 
 type Server struct {
@@ -25,7 +26,10 @@ type Server struct {
 	// Health holds the heartbeats of the background loops. main.go hands the same
 	// registry to the workers and the scheduler; one nobody feeds makes AdminHealth
 	// report the loops as not running, which is the truth.
-	Health         *health.Registry
+	Health *health.Registry
+	// Releases tells admins about a newer version. nil leaves the check out, as
+	// tests and the harness do.
+	Releases       *version.Checker
 	downloadTokens *dlTokenStore
 	// syncsInFlight holds one entry per running library sync, keyed "userID|platform"
 	// - see triggerLibrarySync.

@@ -5,6 +5,7 @@ import { NavBtn } from '../components/NavBtn'
 import { NotificationBell } from '../components/NotificationBell'
 import { UserAvatar } from '../components/UserAvatar'
 import { UserDropdown } from '../components/UserDropdown'
+import { UpdateNotice } from '../components/UpdateNotice'
 import { createDownloadQueueStore } from '../hooks/useDownloadQueue'
 import { createNotificationsStore } from '../hooks/useNotifications'
 import { browserHandlesClick, gridHref } from '../utils/navlink'
@@ -97,6 +98,10 @@ export function navBar(deps: NavBarDeps, hideSearch = false) {
       <div class="stlv-nav-logo" style={{ flex:'1', display:'flex', 'align-items':'center' }}>
         {navLogo(deps)}
       </div>
+      {/* Hangs below the bar rather than below the logo, so on a phone it does not cover the search row. */}
+      <Show when={deps.user()?.admin}>
+        <UpdateNotice translate={translate} />
+      </Show>
 
       {/* Center - Search + Filter (hidden on mobile, drops to second row via flex-wrap) */}
       <Show when={!hideSearch}>

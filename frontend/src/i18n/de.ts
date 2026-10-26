@@ -6,6 +6,7 @@ export default {
   nav_sync_all: 'Alle auf Updates prüfen',
   nav_view_list: 'Listenansicht',
   nav_view_grid: 'Kachelansicht',
+  nav_update_available: 'Version {version} ist verfügbar',
   sort_by:         'Sortieren:',
   sort_name:       'Name',
   sort_platform:   'Plattform',

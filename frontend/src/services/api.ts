@@ -228,6 +228,7 @@ export const api = {
   adminResetPassword: (userId: string, data: Record<string, unknown>) => request('POST', `/admin/users/${encodeURIComponent(userId)}/reset-password`, data),
   adminUserDetail:    (userId: string) => request('GET', `/admin/users/${encodeURIComponent(userId)}/detail`),
   adminHealth:        () => request('GET', '/admin/health'),
+  adminVersion:       () => request('GET', '/admin/version'),
   adminGetSettings:    () => request('GET', '/admin/settings'),
   adminSaveSettings:   (data: Record<string, unknown>) => request('PUT', '/admin/settings', data),
   adminGetMail:        () => request('GET', '/admin/mail'),

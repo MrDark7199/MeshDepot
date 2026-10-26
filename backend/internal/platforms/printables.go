@@ -423,6 +423,11 @@ func autoLoginPrintables(email, password string) string {
 			authCode = parsed.Query().Get("code")
 			break
 		}
+		if destination := interstitialDestination(currentURL); destination != "" {
+			hops = append(hops, "skipped the page in between")
+			currentURL = destination
+			continue
+		}
 		status3, header3, body3 := rawRequest(client, http.MethodGet, currentURL, "", map[string]string{
 			"User-Agent": printablesUserAgent, "Cookie": strings.Join(cookies, "; "),
 		})
@@ -532,6 +537,27 @@ func collectCookies(existing []string, header http.Header) []string {
 		}
 	}
 	return output
+}
+
+// interstitialDestination returns where a page that Prusa puts between the
+// login and the authorization leads - an offer to set up a passkey, for one -
+// so the login goes on there instead of stopping on a page meant for a person.
+// Such a page names its destination in next. The login and authorization pages
+// carry next as well, but they are steps of the flow, not detours. Only a path
+// on Prusa's own site is followed.
+func interstitialDestination(rawURL string) string {
+	parsed, failure := url.Parse(rawURL)
+	if failure != nil || parsed.Host != "account.prusa3d.com" {
+		return ""
+	}
+	if strings.HasPrefix(parsed.Path, "/login") || strings.HasPrefix(parsed.Path, "/o/") {
+		return ""
+	}
+	destination := parsed.Query().Get("next")
+	if !strings.HasPrefix(destination, "/") || strings.HasPrefix(destination, "//") {
+		return ""
+	}
+	return absLocation(destination)
 }
 
 var pageTitlePattern = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)

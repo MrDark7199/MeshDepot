@@ -595,6 +595,16 @@ Returns system health status (database, Redis, disk space, PHP version).
 
 ---
 
+### GET /api/admin/version
+The running version and the newest release published on GitHub, which the server checks every six hours. `latest` and `url` are empty until the first check succeeded.
+
+**Response:** `200 OK`
+```json
+{ "current": "1.5.2", "latest": "1.5.3", "newer": true, "url": "https://github.com/MrDark7199/MeshDepot/releases/tag/v1.5.3" }
+```
+
+---
+
 ### GET /api/admin/settings
 Returns all application settings as a key/value map.
 

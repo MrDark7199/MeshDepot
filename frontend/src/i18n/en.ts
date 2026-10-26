@@ -6,6 +6,7 @@ export default {
   nav_sync_all: 'Check all for updates',
   nav_view_list: 'List view',
   nav_view_grid: 'Grid view',
+  nav_update_available: 'Version {version} is available',
   sort_by:         'Sort:',
   sort_name:       'Name',
   sort_platform:   'Platform',

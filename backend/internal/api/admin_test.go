@@ -13,6 +13,7 @@ import (
 	"meshdepot/internal/coerce"
 	"meshdepot/internal/health"
 	"meshdepot/internal/scheduler"
+	"meshdepot/internal/version"
 )
 
 // soleAdmin removes every admin except the given one; the schema seeds a
@@ -72,6 +73,7 @@ func TestAdminRoutesAreClosedToOrdinaryUsers(t *testing.T) {
 		{http.MethodGet, "/api/v1/admin/users/1/detail"},
 		{http.MethodGet, "/api/v1/admin/stats"},
 		{http.MethodGet, "/api/v1/admin/health"},
+		{http.MethodGet, "/api/v1/admin/version"},
 		{http.MethodPost, "/api/v1/admin/translations/backfill"},
 		{http.MethodGet, "/api/v1/admin/settings"},
 		{http.MethodPut, "/api/v1/admin/settings"},
@@ -996,5 +998,19 @@ func TestSettingsRejectADesignUpdateIntervalBelowTheMinimum(t *testing.T) {
 	}
 	if value := testHarness.scalar("SELECT value FROM app_settings WHERE key = 'design_update_min_days'"); value != "7" {
 		t.Fatalf("the stored interval is %q", value)
+	}
+}
+
+func TestAdminVersionNamesTheRunningVersion(t *testing.T) {
+	testHarness := newHarness(t)
+
+	answer := testHarness.asAdmin(http.MethodGet, "/api/v1/admin/version", nil).data(t)
+
+	if answer["current"] != version.Current {
+		t.Errorf("current is %v, want %s", answer["current"], version.Current)
+	}
+	// The harness runs no check, so there is nothing newer to report.
+	if answer["newer"] != false || answer["latest"] != "" {
+		t.Errorf("without a check nothing may be newer: %v", answer)
 	}
 }

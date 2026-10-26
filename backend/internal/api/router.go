@@ -164,6 +164,7 @@ func (server *Server) Router() http.Handler {
 	mux.Handle("GET /api/v1/admin/users/{id}/detail", server.Auth.RequireAdmin(http.HandlerFunc(server.AdminDetail)))
 	mux.Handle("GET /api/v1/admin/stats", server.Auth.RequireAdmin(http.HandlerFunc(server.AdminStats)))
 	mux.Handle("GET /api/v1/admin/health", server.Auth.RequireAdmin(http.HandlerFunc(server.AdminHealth)))
+	mux.Handle("GET /api/v1/admin/version", server.Auth.RequireAdmin(http.HandlerFunc(server.AdminVersion)))
 	mux.Handle("POST /api/v1/admin/translations/backfill", server.Auth.RequireAdmin(http.HandlerFunc(server.RunTranslationBackfill)))
 	mux.Handle("GET /api/v1/admin/settings", server.Auth.RequireAdmin(http.HandlerFunc(server.GetSettings)))
 	mux.Handle("PUT /api/v1/admin/settings", server.Auth.RequireAdmin(http.HandlerFunc(server.SaveSettings)))

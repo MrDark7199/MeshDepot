@@ -33,6 +33,7 @@ import (
 	"meshdepot/internal/scheduler"
 	"meshdepot/internal/storage"
 	"meshdepot/internal/translate"
+	"meshdepot/internal/version"
 	"meshdepot/internal/worker"
 
 	"meshdepot/internal/logx"
@@ -132,6 +133,9 @@ func main() {
 	authService := auth.New(database, cryptoHelper, configuration.AppHTTPS)
 	server := api.New(database, authService, cryptoHelper, configuration, registry, platformDeps)
 	server.Health = heartbeats
+	releases := version.NewChecker()
+	releases.Start(stop)
+	server.Releases = releases
 	// Without timeouts a slow client can hold connections open indefinitely, and
 	// every DB access funnels through a single connection.
 	//

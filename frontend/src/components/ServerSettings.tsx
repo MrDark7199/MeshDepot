@@ -575,6 +575,9 @@ function TabInfo() {
 
   const load = () => { setLoading(true); api.adminHealth().then((r: any) => setHealth(r.data)).catch(() => setHealth(null)).finally(() => setLoading(false)) }
   load()
+  // The server holds the version, so the about page and the update notice agree.
+  const [runningVersion, setRunningVersion] = createSignal('')
+  api.adminVersion().then((response: any) => setRunningVersion(response.data?.current ?? '')).catch(() => {})
 
   // 'off' is a subsystem switched off by a setting rather than a fault, but it
   // gets the danger colours all the same: it means nothing is being synced, and
@@ -590,7 +593,7 @@ function TabInfo() {
           <div style={{ width: '52px', height: '52px', 'border-radius': '14px', background: 'var(--accent)', display: 'flex', 'align-items': 'center', 'justify-content': 'center', 'font-size': '28px', 'flex-shrink': '0' }}>🖨️</div>
           <div>
             <div style={{ 'font-size': '20px', 'font-weight': '800', color: 'var(--text)', ...sans, 'letter-spacing': '-0.02em' }}>Mesh<span style={{ color: 'var(--accent)' }}>Depot</span></div>
-            <div style={{ 'font-size': '12px', color: 'var(--muted)', ...mono }}>Version 1.5.1</div>
+            <div style={{ 'font-size': '12px', color: 'var(--muted)', ...mono }}>{runningVersion() ? `Version ${runningVersion()}` : ''}</div>
           </div>
         </div>
         <div style={{ 'font-size': '12px', color: 'var(--muted)', ...mono, 'line-height': '1.8', 'border-top': '1px solid var(--border)', 'padding-top': '12px' }}>

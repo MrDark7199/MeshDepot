@@ -2426,6 +2426,27 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/HealthChecks' }
 
+  /admin/version:
+    get:
+      tags: [Admin]
+      summary: Running version and the newest GitHub release
+      description: >
+        The server asks GitHub for the newest published release every six hours
+        and answers from memory. latest and url stay empty until the first check
+        succeeded; url only ever points into the MeshDepot repository.
+      responses:
+        '200':
+          description: Version information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  current: { type: string, example: "1.5.2" }
+                  latest:  { type: string, example: "1.5.3" }
+                  newer:   { type: boolean, description: latest is a later version than current }
+                  url:     { type: string, description: Release page on GitHub }
+
   /admin/mail:
     get:
       tags: [Admin]

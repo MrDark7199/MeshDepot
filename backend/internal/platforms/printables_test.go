@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -231,5 +232,28 @@ func TestLoginHopWithoutRedirectNamesThePage(t *testing.T) {
 	hop := describeLoginHop(200, "", []byte("<html><head><title>\n  Two-factor authentication | Prusa Account\n</title></head></html>"))
 	if hop != `HTTP 200, no further redirect, page title "Two-factor authentication | Prusa Account"` {
 		t.Errorf("unexpected hop: %q", hop)
+	}
+}
+
+func TestLoginSkipsThePasskeyOffer(t *testing.T) {
+	authorize := "/o/authorize/?client_id=abc&response_type=code&redirect_uri=https%3A%2F%2Fwww.printables.com%2Flogin%3Fstate%3Dx"
+	offer := "https://account.prusa3d.com/passkeys/offer/?next=" + url.QueryEscape(authorize)
+	if destination := interstitialDestination(offer); destination != "https://account.prusa3d.com"+authorize {
+		t.Errorf("expected the authorization, got %q", destination)
+	}
+}
+
+func TestLoginFollowsOnlyDetoursOnPrusa(t *testing.T) {
+	for _, address := range []string{
+		"https://account.prusa3d.com/login/?next=%2Fo%2Fauthorize%2F",
+		"https://account.prusa3d.com/o/authorize/?next=%2Fsomewhere",
+		"https://account.prusa3d.com/passkeys/offer/?next=https%3A%2F%2Fevil.example%2F",
+		"https://account.prusa3d.com/passkeys/offer/?next=%2F%2Fevil.example%2F",
+		"https://account.prusa3d.com/passkeys/offer/",
+		"https://elsewhere.example/passkeys/offer/?next=%2Fo%2Fauthorize%2F",
+	} {
+		if destination := interstitialDestination(address); destination != "" {
+			t.Errorf("%s must not be skipped, got %q", address, destination)
+		}
 	}
 }

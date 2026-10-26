@@ -22,6 +22,7 @@ export const globalStyles = `
     /* Nav: wrap to two rows (logo+buttons / search) */
     .stlv-nav { flex-wrap: wrap !important; height: auto !important; padding: 10px 14px !important; column-gap: 10px !important; row-gap: 0 !important; }
     .stlv-nav-logo { flex: 0 0 auto !important; }
+    .stlv-update-notice { left: 14px !important; }
     .stlv-nav-right { flex: 0 0 auto !important; margin-left: auto !important; gap: 8px !important; }
     /* Search row drops below logo row */
     .stlv-nav-center { flex: 0 0 100% !important; padding-bottom: 8px !important; }

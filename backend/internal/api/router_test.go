@@ -73,6 +73,7 @@ func TestAdminRoutesRejectOrdinaryUsers(t *testing.T) {
 		{http.MethodDelete, "/api/v1/admin/users/1"},
 		{http.MethodGet, "/api/v1/admin/stats"},
 		{http.MethodGet, "/api/v1/admin/health"},
+		{http.MethodGet, "/api/v1/admin/version"},
 		{http.MethodGet, "/api/v1/admin/settings"},
 		{http.MethodPut, "/api/v1/admin/settings"},
 		{http.MethodPost, "/api/v1/admin/library-sync/run"},

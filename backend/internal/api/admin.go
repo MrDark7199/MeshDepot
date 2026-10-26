@@ -23,6 +23,7 @@ import (
 	"meshdepot/internal/quota"
 	"meshdepot/internal/scheduler"
 	"meshdepot/internal/translate"
+	"meshdepot/internal/version"
 )
 
 // settingBound is the allowed range of an app setting (all settings are int).
@@ -631,4 +632,17 @@ func fmtBytes(bytes int64) string {
 	default:
 		return fmt.Sprintf("%.0f KB", float64(bytes)/(1<<10))
 	}
+}
+
+// AdminVersion names the running version and, once GitHub has answered, the
+// newest release - for the about page and the notice under the logo.
+func (server *Server) AdminVersion(responseWriter http.ResponseWriter, request *http.Request) {
+	answer := map[string]any{"current": version.Current, "latest": "", "newer": false, "url": ""}
+	if server.Releases != nil {
+		latest := server.Releases.Latest()
+		answer["latest"] = latest.Version
+		answer["newer"] = version.Newer(latest.Version, version.Current)
+		answer["url"] = latest.URL
+	}
+	httpx.Success(responseWriter, answer)
 }
