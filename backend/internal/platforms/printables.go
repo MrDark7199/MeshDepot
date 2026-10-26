@@ -30,21 +30,30 @@ const printablesGraphQL = "https://api.printables.com/graphql/"
 // answer is unusable - a rate limit on the server IP, a non-200, or no "data"
 // field - so a temporary block does not abort the download. Every unusable
 // answer goes to the log with its status and the start of its body, because
-// the error the user sees cannot say what Printables actually answered.
+// the error the user sees cannot say what Printables actually answered. They
+// are errors when no route worked, and only warnings when a later one did, so
+// the default LOG_LEVEL=error shows exactly the requests that failed.
 func (printables Printables) graphQL(body string, headers map[string]string) []byte {
 	response, status := directPost(printablesGraphQL, body, headers)
 	if usableGraphQLAnswer(response, status) {
 		return response
 	}
-	logUnusableGraphQLAnswer("direct", body, headers, response, status)
+	failedAttempts := []string{describeUnusableGraphQLAnswer("direct", body, headers, response, status)}
 	for attempt := 1; attempt <= 2 && printables.Tor != nil; attempt++ {
 		_ = printables.Tor.NewCircuit()
 		torResponse, torStatus := printables.torPost(printablesGraphQL, body, headers)
 		if usableGraphQLAnswer(torResponse, torStatus) {
+			for _, failedAttempt := range failedAttempts {
+				logx.Warnf("%s", failedAttempt)
+			}
 			return torResponse
 		}
-		logUnusableGraphQLAnswer(fmt.Sprintf("tor attempt %d/2", attempt), body, headers, torResponse, torStatus)
+		failedAttempts = append(failedAttempts,
+			describeUnusableGraphQLAnswer(fmt.Sprintf("tor attempt %d/2", attempt), body, headers, torResponse, torStatus))
 		time.Sleep(time.Second)
+	}
+	for _, failedAttempt := range failedAttempts {
+		logx.Errorf("%s", failedAttempt)
 	}
 	return response
 }
@@ -55,14 +64,14 @@ func usableGraphQLAnswer(response []byte, status int) bool {
 
 const graphQLLogSnippetLength = 300
 
-// logUnusableGraphQLAnswer names whether a token was sent but never the token.
-func logUnusableGraphQLAnswer(route, query string, headers map[string]string, response []byte, status int) {
+// describeUnusableGraphQLAnswer names whether a token was sent but never the token.
+func describeUnusableGraphQLAnswer(route, query string, headers map[string]string, response []byte, status int) string {
 	statusText := fmt.Sprintf("HTTP %d", status)
 	if status == 0 {
 		statusText = "no answer (connection failed or timed out)"
 	}
 	_, withToken := headers["Authorization"]
-	logx.Warnf("[printables] GraphQL %s: %s, with token: %t, query: %s, answer: %s",
+	return fmt.Sprintf("[printables] GraphQL %s: %s, with token: %t, query: %s, answer: %s",
 		route, statusText, withToken, logSnippet([]byte(query)), logSnippet(response))
 }
 
@@ -73,7 +82,7 @@ func logModelWithoutData(modelID string, withToken bool, response []byte, parseF
 	if parseFailure != nil {
 		parseText = parseFailure.Error()
 	}
-	logx.Warnf("[printables] model %s: answer without model data, with token: %t, parse error: %s, answer: %s",
+	logx.Errorf("[printables] model %s: answer without model data, with token: %t, parse error: %s, answer: %s",
 		modelID, withToken, parseText, logSnippet(response))
 }
 

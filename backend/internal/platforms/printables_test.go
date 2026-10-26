@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"meshdepot/internal/logx"
 )
 
 func TestModelIDExtraction(t *testing.T) {
@@ -84,39 +86,27 @@ func TestTokenExpired(t *testing.T) {
 	}
 }
 
-func TestUnusableGraphQLAnswerIsLoggedWithoutTheToken(t *testing.T) {
-	var output bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&output)
-	defer log.SetOutput(previous)
-
+func TestUnusableGraphQLAnswerIsDescribedWithoutTheToken(t *testing.T) {
 	headers := map[string]string{"Authorization": "Bearer secret-token-value"}
-	logUnusableGraphQLAnswer("direct", `{"query":"{ print(id: 1) { name } }"}`, headers,
+	line := describeUnusableGraphQLAnswer("direct", `{"query":"{ print(id: 1) { name } }"}`, headers,
 		[]byte("<html>\n  <title>Just a moment...</title>\n</html>"), 403)
 
-	line := output.String()
 	for _, expected := range []string{"HTTP 403", "with token: true", "print(id: 1)", "<html> <title>Just a moment...</title> </html>"} {
 		if !strings.Contains(line, expected) {
-			t.Errorf("log line misses %q: %s", expected, line)
+			t.Errorf("description misses %q: %s", expected, line)
 		}
 	}
 	if strings.Contains(line, "secret-token-value") {
-		t.Errorf("log line contains the token: %s", line)
+		t.Errorf("description contains the token: %s", line)
 	}
 }
 
-func TestFailedConnectionIsLoggedAsNoAnswer(t *testing.T) {
-	var output bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&output)
-	defer log.SetOutput(previous)
+func TestFailedConnectionIsDescribedAsNoAnswer(t *testing.T) {
+	line := describeUnusableGraphQLAnswer("tor attempt 1/2", "{}", map[string]string{}, nil, 0)
 
-	logUnusableGraphQLAnswer("tor attempt 1/2", "{}", map[string]string{}, nil, 0)
-
-	line := output.String()
 	for _, expected := range []string{"tor attempt 1/2", "no answer", "with token: false", "answer: (empty)"} {
 		if !strings.Contains(line, expected) {
-			t.Errorf("log line misses %q: %s", expected, line)
+			t.Errorf("description misses %q: %s", expected, line)
 		}
 	}
 }
@@ -134,6 +124,8 @@ func TestModelWithoutDataIsLoggedWithTheAnswer(t *testing.T) {
 	log.SetOutput(&output)
 	defer log.SetOutput(previous)
 
+	logx.Configure("error")
+	defer logx.Configure("all")
 	logModelWithoutData("1861126", true, []byte(`{"data":{"print":null}}`), nil)
 
 	line := output.String()
