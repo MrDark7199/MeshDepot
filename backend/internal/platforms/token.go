@@ -130,6 +130,13 @@ func (deps Deps) persistToken(userID int, platform, token, expiresExpr string) {
 func (deps Deps) forceLogin(userID int, platform string) string {
 	account := deps.loadAccount(userID, platform)
 	account.Token, account.Expires = "", ""
-	token, _ := deps.refreshToken(account, userID, platform, nil)
+	token, loginFailed := deps.refreshToken(account, userID, platform, nil)
+	if token == "" {
+		reason := "no e-mail and password are stored, only the token"
+		if loginFailed {
+			reason = "the login with the stored e-mail and password failed"
+		}
+		logx.Errorf("[platforms] %s: user %d's token was turned away and could not be renewed - %s.", platform, userID, reason)
+	}
 	return token
 }

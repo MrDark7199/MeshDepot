@@ -610,6 +610,7 @@ export default {
   'error.platform_invalid_username':    'Diesen Benutzernamen gibt es auf der Plattform nicht.',
   'error.platform_invalid_credentials': 'Die Plattform hat diese Zugangsdaten abgelehnt.',
   'error.printables_no_files':          'Dieses Printables-Modell enthält keine herunterladbaren Dateien.',
+  'error.printables_auth_failed':       'Printables hat den gespeicherten Login abgelehnt, und eine neue Anmeldung hat nicht geklappt. Öffentliche Modelle laden trotzdem, dieses braucht den Login. Bitte E-Mail und Passwort in Kontoeinstellungen → Plattformen → Printables prüfen.',
   'error.thingiverse_auth_failed':      'Thingiverse hat das App-Token abgelehnt. Bitte in Kontoeinstellungen → Plattformen → Thingiverse prüfen.',
   'error.thangs_no_token':              'Thangs verlangt für Downloads eine Anmeldung. E-Mail + Passwort in Kontoeinstellungen → Plattformen hinterlegen.',
   'error.myminifactory_invalid_api_key': 'Der MyMiniFactory-API-Key ist ungültig oder abgelaufen.',

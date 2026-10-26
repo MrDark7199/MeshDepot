@@ -24,38 +24,39 @@ import (
 	"meshdepot/internal/logx"
 )
 
-const printablesGraphQL = "https://api.printables.com/graphql/"
+// A variable so tests can point it at a stand-in server.
+var printablesGraphQL = "https://api.printables.com/graphql/"
 
 // graphQL tries directly first and retries via Tor with a route change when the
 // answer is unusable - a rate limit on the server IP, a non-200, or no "data"
 // field - so a temporary block does not abort the download. Every unusable
 // answer goes to the log with its status and the start of its body, because
 // the error the user sees cannot say what Printables actually answered. They
-// are errors when no route worked, and only warnings when a later one did, so
-// the default LOG_LEVEL=error shows exactly the requests that failed.
+// are errors, also when a later route worked, so the default LOG_LEVEL=error
+// shows every refusal.
 func (printables Printables) graphQL(body string, headers map[string]string) []byte {
+	response, _ := printables.graphQLWithStatus(body, headers)
+	return response
+}
+
+// graphQLWithStatus is graphQL that also returns the status of the answer it
+// hands back, so a caller can tell a refused token (401) from a missing model.
+func (printables Printables) graphQLWithStatus(body string, headers map[string]string) ([]byte, int) {
 	response, status := directPost(printablesGraphQL, body, headers)
 	if usableGraphQLAnswer(response, status) {
-		return response
+		return response, status
 	}
-	failedAttempts := []string{describeUnusableGraphQLAnswer("direct", body, headers, response, status)}
+	logx.Errorf("%s", describeUnusableGraphQLAnswer("direct", body, headers, response, status))
 	for attempt := 1; attempt <= 2 && printables.Tor != nil; attempt++ {
 		_ = printables.Tor.NewCircuit()
 		torResponse, torStatus := printables.torPost(printablesGraphQL, body, headers)
 		if usableGraphQLAnswer(torResponse, torStatus) {
-			for _, failedAttempt := range failedAttempts {
-				logx.Warnf("%s", failedAttempt)
-			}
-			return torResponse
+			return torResponse, torStatus
 		}
-		failedAttempts = append(failedAttempts,
-			describeUnusableGraphQLAnswer(fmt.Sprintf("tor attempt %d/2", attempt), body, headers, torResponse, torStatus))
+		logx.Errorf("%s", describeUnusableGraphQLAnswer(fmt.Sprintf("tor attempt %d/2", attempt), body, headers, torResponse, torStatus))
 		time.Sleep(time.Second)
 	}
-	for _, failedAttempt := range failedAttempts {
-		logx.Errorf("%s", failedAttempt)
-	}
-	return response
+	return response, status
 }
 
 func usableGraphQLAnswer(response []byte, status int) bool {
@@ -110,6 +111,86 @@ var (
 
 type Printables struct{ Deps }
 
+type printablesModel struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	User        struct {
+		PublicUsername string `json:"publicUsername"`
+	} `json:"user"`
+	Images []struct {
+		FilePath string `json:"filePath"`
+	} `json:"images"`
+	Tags []struct {
+		Name string `json:"name"`
+	} `json:"tags"`
+	Stls []struct {
+		ID     json.Number `json:"id"`
+		Name   string      `json:"name"`
+		Folder string      `json:"folder"`
+	} `json:"stls"`
+}
+
+type printablesModelAnswer struct {
+	Data struct {
+		Print *printablesModel `json:"print"`
+	} `json:"data"`
+	Errors json.RawMessage `json:"errors"`
+}
+
+// fetchModel loads a model's metadata and file list. A token Printables turns
+// away is renewed once through renewLogin. When that brings no working token,
+// the model is asked for without one, which is all a public model needs; the
+// token then leaves headers too, so the file downloads that follow go without it.
+func (printables Printables) fetchModel(modelID string, userID int, headers map[string]string, renewLogin func() string) (*printablesModel, error) {
+	query := fmt.Sprintf("{ print(id: %s) { name description user { publicUsername } images { filePath } tags { name } stls { id name fileSize folder } } }", modelID)
+	body, _ := json.Marshal(map[string]string{"query": query})
+	ask := func() (printablesModelAnswer, []byte, int, error) {
+		var answer printablesModelAnswer
+		response, status := printables.graphQLWithStatus(string(body), headers)
+		parseFailure := json.Unmarshal(response, &answer)
+		return answer, response, status, parseFailure
+	}
+
+	answer, response, status, parseFailure := ask()
+	_, withToken := headers["Authorization"]
+	// Printables often revokes access tokens earlier than their JWT exp claim says,
+	// answering 401 without data. Fetch a fresh token and try once more.
+	if answer.Data.Print == nil && withToken {
+		if newToken := renewLogin(); newToken != "" {
+			headers["Authorization"] = "Bearer " + newToken
+			answer, response, status, parseFailure = ask()
+		}
+	}
+	loginTurnedAway := answer.Data.Print == nil && withToken && status == http.StatusUnauthorized
+	if loginTurnedAway {
+		logModelWithoutData(modelID, true, response, parseFailure)
+		delete(headers, "Authorization")
+		withToken = false
+		answer, response, status, parseFailure = ask()
+		if answer.Data.Print != nil {
+			logx.Errorf("[printables] user %d: the stored login was turned away and could not be renewed - model %s "+
+				"was loaded without it. Private and paid models need the login fixed in Account Settings → Platforms → Printables.",
+				userID, modelID)
+		}
+	}
+	if answer.Data.Print != nil {
+		return answer.Data.Print, nil
+	}
+
+	logModelWithoutData(modelID, withToken, response, parseFailure)
+	if loginTurnedAway {
+		return nil, MetadataError("error.printables_auth_failed:Printables turned the stored login away and "+
+			"logging in again did not work. Model %s cannot be loaded without it. "+
+			"Check the e-mail and password in Account Settings → Platforms → Printables.", modelID)
+	}
+	detail := string(answer.Errors)
+	if detail == "" {
+		detail = "no data"
+	}
+	return nil, MetadataError("Printables API returned no data for model %s. Error: %s. "+
+		"The model may be private, deleted, or the API has changed.", modelID, detail)
+}
+
 func (printables Printables) Download(sourceURL string, owner Owner, progress func(step, label string, current, total int)) (Result, error) {
 	// The numeric id is only for credentials; every path comes from owner.Layout.
 	userID := owner.ID
@@ -137,54 +218,12 @@ func (printables Printables) Download(sourceURL string, owner Owner, progress fu
 
 	// - Step 1: metadata + STL file list --------------------
 	progress("fetching_metadata", "", 0, 0)
-	metaQuery := fmt.Sprintf("{ print(id: %s) { name description user { publicUsername } images { filePath } tags { name } stls { id name fileSize folder } } }", modelID)
-	metaBody, _ := json.Marshal(map[string]string{"query": metaQuery})
-	rawResp := printables.graphQL(string(metaBody), baseHeaders)
-	var meta struct {
-		Data struct {
-			Print *struct {
-				Name        string `json:"name"`
-				Description string `json:"description"`
-				User        struct {
-					PublicUsername string `json:"publicUsername"`
-				} `json:"user"`
-				Images []struct {
-					FilePath string `json:"filePath"`
-				} `json:"images"`
-				Tags []struct {
-					Name string `json:"name"`
-				} `json:"tags"`
-				Stls []struct {
-					ID     json.Number `json:"id"`
-					Name   string      `json:"name"`
-					Folder string      `json:"folder"`
-				} `json:"stls"`
-			} `json:"print"`
-		} `json:"data"`
-		Errors json.RawMessage `json:"errors"`
+	print, failure := printables.fetchModel(modelID, userID, baseHeaders, func() string {
+		return printables.Deps.forceLogin(userID, "printables")
+	})
+	if failure != nil {
+		return Result{}, failure
 	}
-	parseFailure := json.Unmarshal(rawResp, &meta)
-	// Printables often revokes access tokens earlier than their JWT exp claim says,
-	// answering 401 without data. Fetch a fresh token and try once more.
-	if meta.Data.Print == nil && bearer != "" {
-		if newToken := printables.Deps.forceLogin(userID, "printables"); newToken != "" {
-			bearer = newToken
-			baseHeaders["Authorization"] = "Bearer " + newToken
-			rawResp = printables.graphQL(string(metaBody), baseHeaders)
-			meta.Data.Print = nil
-			parseFailure = json.Unmarshal(rawResp, &meta)
-		}
-	}
-	if meta.Data.Print == nil {
-		logModelWithoutData(modelID, bearer != "", rawResp, parseFailure)
-		detail := string(meta.Errors)
-		if detail == "" {
-			detail = "no data"
-		}
-		return Result{}, MetadataError("Printables API returned no data for model %s. Error: %s. "+
-			"The model may be private, deleted, or the API has changed.", modelID, detail)
-	}
-	print := meta.Data.Print
 
 	name := print.Name
 	if name == "" {
@@ -339,6 +378,7 @@ func autoLoginPrintables(email, password string) string {
 		"User-Agent": printablesUserAgent, "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9",
 	})
 	if status1 != 200 || len(body1) == 0 {
+		logx.Errorf("[printables] login: the Prusa login page answered HTTP %d", status1)
 		return ""
 	}
 	cookies := collectCookies(nil, header1)
@@ -349,6 +389,7 @@ func autoLoginPrintables(email, password string) string {
 		csrfToken = csrfMatch[1]
 	}
 	if csrfToken == "" {
+		logx.Errorf("[printables] login: the Prusa login page carries no CSRF token - the page has probably changed")
 		return ""
 	}
 
@@ -366,6 +407,7 @@ func autoLoginPrintables(email, password string) string {
 		"Origin": "https://account.prusa3d.com", "Cookie": strings.Join(cookies, "; "),
 	})
 	if status2 < 300 || status2 >= 400 {
+		logx.Errorf("[printables] login: Prusa did not accept the e-mail and password (HTTP %d instead of a redirect)", status2)
 		return ""
 	}
 	cookies = collectCookies(cookies, header2)
@@ -388,6 +430,8 @@ func autoLoginPrintables(email, password string) string {
 		}
 	}
 	if authCode == "" {
+		logx.Errorf("[printables] login: the redirects after the login never reached Printables with a code " +
+			"(a second factor or a consent page may be asking for something)")
 		return ""
 	}
 
@@ -406,6 +450,9 @@ func autoLoginPrintables(email, password string) string {
 		AccessToken string `json:"access_token"`
 	}
 	_ = json.Unmarshal(tokenRaw, &tokenResponse)
+	if tokenResponse.AccessToken == "" {
+		logx.Errorf("[printables] login: the code was not exchanged for a token, answer: %s", logSnippet(tokenRaw))
+	}
 	return tokenResponse.AccessToken
 }
 

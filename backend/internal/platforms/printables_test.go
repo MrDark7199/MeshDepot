@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -133,5 +134,85 @@ func TestModelWithoutDataIsLoggedWithTheAnswer(t *testing.T) {
 		if !strings.Contains(line, expected) {
 			t.Errorf("log line misses %q: %s", expected, line)
 		}
+	}
+}
+
+// printablesStandIn answers like the GraphQL API: 401 for the expired token,
+// the model for a valid token or for no token at all when the model is public.
+func printablesStandIn(t *testing.T, public bool) (*[]string, func()) {
+	t.Helper()
+	var seenAuthorizations []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		authorization := request.Header.Get("Authorization")
+		seenAuthorizations = append(seenAuthorizations, authorization)
+		switch {
+		case authorization == "Bearer expired":
+			writer.WriteHeader(http.StatusUnauthorized)
+			_, _ = writer.Write([]byte("verse.token_is_expired"))
+		case authorization == "Bearer fresh" || (authorization == "" && public):
+			_, _ = writer.Write([]byte(`{"data":{"print":{"name":"Lamp","stls":[{"id":"7","name":"body.stl"}]}}}`))
+		default:
+			_, _ = writer.Write([]byte(`{"data":{"print":null}}`))
+		}
+	}))
+	previous := printablesGraphQL
+	printablesGraphQL = server.URL
+	return &seenAuthorizations, func() {
+		printablesGraphQL = previous
+		server.Close()
+	}
+}
+
+func TestTurnedAwayLoginFallsBackToNoLoginForPublicModels(t *testing.T) {
+	seen, stop := printablesStandIn(t, true)
+	defer stop()
+
+	headers := map[string]string{"Authorization": "Bearer expired"}
+	model, failure := Printables{}.fetchModel("1", 3, headers, func() string { return "" })
+	if failure != nil || model == nil || model.Name != "Lamp" {
+		t.Fatalf("expected the public model without a login, got %v, %v", model, failure)
+	}
+	if len(*seen) != 2 || (*seen)[1] != "" {
+		t.Errorf("expected one try with the token and one without, saw %q", *seen)
+	}
+	if _, stillThere := headers["Authorization"]; stillThere {
+		t.Error("the turned-away token must leave the headers, or the file downloads send it again")
+	}
+}
+
+func TestTurnedAwayLoginOnAPrivateModelPointsAtTheSettings(t *testing.T) {
+	_, stop := printablesStandIn(t, false)
+	defer stop()
+
+	_, failure := Printables{}.fetchModel("1", 3, map[string]string{"Authorization": "Bearer expired"}, func() string { return "" })
+	if failure == nil || !strings.HasPrefix(failure.Error(), "error.printables_auth_failed:") {
+		t.Fatalf("expected the login error, got %v", failure)
+	}
+}
+
+func TestRenewedLoginIsUsedBeforeGoingWithoutOne(t *testing.T) {
+	seen, stop := printablesStandIn(t, false)
+	defer stop()
+
+	headers := map[string]string{"Authorization": "Bearer expired"}
+	model, failure := Printables{}.fetchModel("1", 3, headers, func() string { return "fresh" })
+	if failure != nil || model == nil {
+		t.Fatalf("expected the model with the renewed token, got %v", failure)
+	}
+	if len(*seen) != 2 || (*seen)[1] != "Bearer fresh" {
+		t.Errorf("expected the renewed token on the second try, saw %q", *seen)
+	}
+}
+
+func TestMissingModelWithAWorkingLoginIsNotAskedForAgain(t *testing.T) {
+	seen, stop := printablesStandIn(t, false)
+	defer stop()
+
+	_, failure := Printables{}.fetchModel("1", 3, map[string]string{"Authorization": "Bearer valid"}, func() string { return "" })
+	if failure == nil || strings.HasPrefix(failure.Error(), "error.printables_auth_failed:") {
+		t.Fatalf("expected the plain no-data error, got %v", failure)
+	}
+	if len(*seen) != 1 {
+		t.Errorf("a token that works must not be dropped, saw %q", *seen)
 	}
 }
