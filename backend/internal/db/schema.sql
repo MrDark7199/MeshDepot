@@ -288,24 +288,39 @@ CREATE TABLE IF NOT EXISTS platform_accounts (
 CREATE TRIGGER IF NOT EXISTS trg_pa_updated AFTER UPDATE ON platform_accounts
 BEGIN UPDATE platform_accounts SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id; END;
 
-CREATE TABLE IF NOT EXISTS download_queue (
+-- The one queue for everything fetched from a platform: a new design from a URL
+-- (kind 'import') and the update check of a design already in the library
+-- (kind 'update'). One table because both knock on the same door: a platform's
+-- cooldown, its anti-bot block and its one-job-at-a-time rule only hold when
+-- every request to it goes through the same runner. With two queues an import
+-- and an update of one platform ran side by side, and only one of them knew
+-- about the captcha. It replaces download_queue and sync_queue; see migrate().
+CREATE TABLE IF NOT EXISTS job_queue (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT    NOT NULL DEFAULT 'import' CHECK (kind IN ('import','update')),
     user_id      INTEGER NOT NULL,
+    -- An update's design from the start; an import's once it has been saved.
     design_id    INTEGER DEFAULT NULL,
     source_url   TEXT    NOT NULL,
     platform     TEXT    NOT NULL,
-    status       TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','downloading','done','failed')),
+    -- Queued by the scheduler rather than by a person; claimed after everything
+    -- a person asked for, or an import would wait behind a batch of checks.
+    automatic    INTEGER NOT NULL DEFAULT 0,
+    status       TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','done','failed')),
     error_msg    TEXT,
     retry_count  INTEGER NOT NULL DEFAULT 0,
-    created_at   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    started_at   TEXT    DEFAULT NULL,
-    done_at      TEXT    DEFAULT NULL,
+    progress     INTEGER NOT NULL DEFAULT 0,
     current_step TEXT    DEFAULT NULL,
     step_current INTEGER DEFAULT NULL,
     step_total   INTEGER DEFAULT NULL,
-    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+    created_at   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at   TEXT    DEFAULT NULL,
+    done_at      TEXT    DEFAULT NULL,
+    FOREIGN KEY (user_id)   REFERENCES users   (id) ON DELETE CASCADE,
+    FOREIGN KEY (design_id) REFERENCES designs (id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_dq_status ON download_queue (status);
+CREATE INDEX IF NOT EXISTS idx_jq_status ON job_queue (status);
+CREATE INDEX IF NOT EXISTS idx_jq_user_kind ON job_queue (user_id, kind, status);
 
 -- user_sessions wurde entfernt: Altlast der PHP-Portierung, von keinem
 -- Anwendungscode gelesen oder geschrieben. Die aktiven Sessions stehen in
@@ -348,23 +363,6 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications (user_id);
 
-CREATE TABLE IF NOT EXISTS sync_queue (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    design_id  INTEGER NOT NULL,
-    user_id    INTEGER NOT NULL,
-    status     TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','done','failed')),
-    error_msg  TEXT,
-    progress   INTEGER NOT NULL DEFAULT 0,
-    current_step TEXT  DEFAULT NULL,
-    step_current INTEGER DEFAULT NULL,
-    step_total   INTEGER DEFAULT NULL,
-    created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    started_at TEXT    DEFAULT NULL,
-    done_at    TEXT    DEFAULT NULL,
-    FOREIGN KEY (design_id) REFERENCES designs (id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id)   REFERENCES users   (id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_sq_user_status ON sync_queue (user_id, status);
 
 CREATE TABLE IF NOT EXISTS file_blobs (
     hash       TEXT    NOT NULL PRIMARY KEY,

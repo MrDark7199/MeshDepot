@@ -147,7 +147,7 @@ func TestBrowserImportStoresTheDesignImmediately(t *testing.T) {
 		t.Fatalf("the design is not in the library (%d rows)", stored)
 	}
 	// Nothing was queued: the whole point is that this does not wait.
-	if queued := testHarness.count("SELECT COUNT(*) FROM download_queue"); queued != 0 {
+	if queued := testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'import'"); queued != 0 {
 		t.Fatalf("the import created %d queue entries", queued)
 	}
 }
@@ -400,7 +400,7 @@ func TestBrowserImportUploadStoresCarriedFiles(t *testing.T) {
 		WHERE f.design_id = ? AND e.filename LIKE '%.zip'`, designID); archived != 0 {
 		t.Fatalf("the archive itself was stored (%d)", archived)
 	}
-	if queued := testHarness.count("SELECT COUNT(*) FROM download_queue"); queued != 0 {
+	if queued := testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'import'"); queued != 0 {
 		t.Fatalf("the upload created %d queue entries", queued)
 	}
 }

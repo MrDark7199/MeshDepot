@@ -17,8 +17,9 @@ import (
 
 // Loop names, which double as the keys of the health endpoint.
 const (
-	DownloadWorker = "download_worker"
-	SyncWorker     = "sync_worker"
+	// QueueWorker runs imports and update checks alike; one loop since the two
+	// queues became one. The key keeps its old name, which the admin page reads.
+	QueueWorker    = "download_worker"
 	SchedulerForce = "scheduler.force_flag"
 	SchedulerAuto  = "scheduler.auto_sync"
 	// Collects pending notification e-mails into one message per member.

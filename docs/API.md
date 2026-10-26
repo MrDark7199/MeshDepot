@@ -170,7 +170,7 @@ Replace the tag set for a design.
 ---
 
 ### POST /api/designs/{id}/sync
-Queue a single design for a background sync. Creates a `sync_queue` entry with `status = pending`. Returns `already_queued` if a pending or running job for the design already exists.
+Queue a single design for a background sync. Creates a `job_queue` entry of kind `update` with `status = pending`. Returns `already_queued` if a pending or running job for the design already exists.
 
 **Response:** `200 OK`
 ```json
@@ -180,7 +180,7 @@ Queue a single design for a background sync. Creates a `sync_queue` entry with `
 ---
 
 ### GET /api/designs/{id}/sync/stream
-Server-Sent Events stream for a live, foreground sync of a single design (re-downloads immediately in the request process). Use this for the interactive "sync now" button; the background worker uses `sync_queue` entries.
+Server-Sent Events stream for a live, foreground sync of a single design (re-downloads immediately in the request process). Use this for the interactive "sync now" button; the background worker uses `job_queue` entries of kind `update`.
 
 **Events emitted:**
 - `step` - `{ type: "step", step: "connect", label: "Connecting to …" }`
@@ -311,7 +311,7 @@ Reset a failed download queue entry to `pending` so the worker retries it.
 ---
 
 ### DELETE /api/download/{id}
-Cancel and remove a `pending` or `downloading` queue entry.
+Cancel and remove a `pending` or `running` queue entry (imports and updates alike).
 
 ---
 

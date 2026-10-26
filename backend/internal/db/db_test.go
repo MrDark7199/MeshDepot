@@ -76,8 +76,8 @@ func TestInitSchemaCreatesEveryTable(t *testing.T) {
 	for _, table := range []string{
 		"users", "sessions", "tags", "designs", "design_tags", "design_files",
 		"design_file_entries", "design_images", "collections", "design_collections",
-		"design_shares", "design_sync_log", "platform_accounts", "download_queue",
-		"notification_prefs", "notifications", "sync_queue", "file_blobs",
+		"design_shares", "design_sync_log", "platform_accounts", "job_queue",
+		"notification_prefs", "notifications", "file_blobs",
 		"pending_collection_assignments", "design_translations", "app_settings",
 	} {
 		var name string
@@ -181,7 +181,6 @@ func TestMigrateAddsTheLaterColumns(t *testing.T) {
 	database := newTestDatabase(t)
 
 	for table, column := range map[string]string{
-		"sync_queue":          "current_step",
 		"design_file_entries": "gcode_meta",
 		"tags":                "source",
 	} {
@@ -189,10 +188,129 @@ func TestMigrateAddsTheLaterColumns(t *testing.T) {
 			t.Fatalf("%s.%s is missing", table, column)
 		}
 	}
-	for _, column := range []string{"step_current", "step_total", "started_at"} {
-		if !columnExists(t, database, "sync_queue", column) {
-			t.Fatalf("sync_queue.%s is missing", column)
+}
+
+// oldQueues are the two tables as a database from before job_queue holds them,
+// with the columns they ended up with.
+const oldQueues = `
+CREATE TABLE download_queue (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL,
+    design_id    INTEGER DEFAULT NULL,
+    source_url   TEXT    NOT NULL,
+    platform     TEXT    NOT NULL,
+    status       TEXT    NOT NULL DEFAULT 'pending',
+    error_msg    TEXT,
+    retry_count  INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at   TEXT    DEFAULT NULL,
+    done_at      TEXT    DEFAULT NULL,
+    current_step TEXT    DEFAULT NULL,
+    step_current INTEGER DEFAULT NULL,
+    step_total   INTEGER DEFAULT NULL
+);
+CREATE TABLE sync_queue (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    design_id  INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    status     TEXT    NOT NULL DEFAULT 'pending',
+    error_msg  TEXT,
+    progress   INTEGER NOT NULL DEFAULT 0,
+    current_step TEXT  DEFAULT NULL,
+    step_current INTEGER DEFAULT NULL,
+    step_total   INTEGER DEFAULT NULL,
+    created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TEXT    DEFAULT NULL,
+    done_at    TEXT    DEFAULT NULL
+);`
+
+// An update must not lose what is waiting. Every row of both old queues comes
+// across - finished and failed ones too, so the history looks the same - and a
+// job that was running when the server went down starts again.
+func TestMigrateMovesBothQueuesIntoTheJobQueue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meshdepot.db")
+	database := openTestDatabase(t, path)
+	if failure := InitSchema(database); failure != nil {
+		t.Fatalf("init schema: %v", failure)
+	}
+	// What an existing installation carries into the update.
+	for _, statement := range []string{
+		oldQueues,
+		"INSERT INTO users (id, public_id, email, hash, name) VALUES (7, 'u7', 'a@b.c', 'x', 'A')",
+		"INSERT INTO designs (id, public_id, user_id, name, source_url, source_platform) VALUES (40, 'd40', 7, 'Helm', 'https://makerworld.com/m/1', 'makerworld')",
+		"INSERT INTO designs (id, public_id, user_id, name, source_url, source_platform) VALUES (41, 'd41', 7, 'Ohne Quelle', '', 'manual')",
+		"INSERT INTO download_queue (id, user_id, source_url, platform, status, retry_count) VALUES (15, 7, 'https://printables.com/m/2', 'printables', 'pending', 1)",
+		"INSERT INTO download_queue (id, user_id, source_url, platform, status, started_at) VALUES (16, 7, 'https://printables.com/m/3', 'printables', 'downloading', CURRENT_TIMESTAMP)",
+		"INSERT INTO download_queue (id, user_id, design_id, source_url, platform, status) VALUES (17, 7, 40, 'https://makerworld.com/m/1', 'makerworld', 'done')",
+		// A finished download whose design has since been deleted.
+		"INSERT INTO download_queue (id, user_id, design_id, source_url, platform, status, error_msg) VALUES (18, 7, 999, 'https://x/4', 'thingiverse', 'failed', 'error.timeout')",
+		"INSERT INTO sync_queue (design_id, user_id, status, error_msg) VALUES (40, 7, 'running', NULL)",
+		"INSERT INTO sync_queue (design_id, user_id, status, error_msg) VALUES (40, 7, 'failed', 'error.makerworld_captcha')",
+		// A design with no source left cannot be updated, so this one does not come along.
+		"INSERT INTO sync_queue (design_id, user_id, status) VALUES (41, 7, 'pending')",
+	} {
+		if _, failure := database.Exec(statement); failure != nil {
+			t.Fatalf("set up the old queues: %v\n%s", failure, statement)
 		}
+	}
+
+	if failure := InitSchema(database); failure != nil {
+		t.Fatalf("init schema over the old queues: %v", failure)
+	}
+
+	for _, table := range []string{"download_queue", "sync_queue"} {
+		if tableExists(database, table) {
+			t.Fatalf("%s is still there", table)
+		}
+	}
+	read := func(query string, args ...any) (status string, kind string) {
+		t.Helper()
+		if failure := database.QueryRow(query, args...).Scan(&status, &kind); failure != nil {
+			t.Fatalf("read a moved job: %v", failure)
+		}
+		return status, kind
+	}
+	if status, kind := read("SELECT status, kind FROM job_queue WHERE id = 15"); status != "pending" || kind != "import" {
+		t.Fatalf("the waiting download came across as %s/%s", kind, status)
+	}
+	var retries int
+	database.QueryRow("SELECT retry_count FROM job_queue WHERE id = 15").Scan(&retries)
+	if retries != 1 {
+		t.Fatalf("the waiting download lost its attempts: %d", retries)
+	}
+	if status, _ := read("SELECT status, kind FROM job_queue WHERE id = 16"); status != "pending" {
+		t.Fatalf("the interrupted download is %s rather than waiting again", status)
+	}
+	if status, _ := read("SELECT status, kind FROM job_queue WHERE id = 17"); status != "done" {
+		t.Fatalf("the finished download is %s", status)
+	}
+	var orphan sql.NullInt64
+	database.QueryRow("SELECT design_id FROM job_queue WHERE id = 18").Scan(&orphan)
+	if orphan.Valid {
+		t.Fatalf("the failed download still points at the deleted design %d", orphan.Int64)
+	}
+
+	var updates, running, failed int
+	database.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'update'").Scan(&updates)
+	database.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND status = 'running'").Scan(&running)
+	database.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND status = 'failed' AND error_msg = 'error.makerworld_captcha'").Scan(&failed)
+	if updates != 2 || running != 0 || failed != 1 {
+		t.Fatalf("updates came across as %d (running %d, failed with their message %d)", updates, running, failed)
+	}
+	var url, platform string
+	database.QueryRow("SELECT source_url, platform FROM job_queue WHERE kind = 'update' AND status = 'pending'").Scan(&url, &platform)
+	if url != "https://makerworld.com/m/1" || platform != "makerworld" {
+		t.Fatalf("an update took %q on %q from its design", url, platform)
+	}
+
+	// A second boot has nothing left to move and must not touch the result.
+	if failure := InitSchema(database); failure != nil {
+		t.Fatalf("second boot: %v", failure)
+	}
+	var total int
+	database.QueryRow("SELECT COUNT(*) FROM job_queue").Scan(&total)
+	if total != 6 {
+		t.Fatalf("a second boot left %d jobs instead of 6", total)
 	}
 }
 

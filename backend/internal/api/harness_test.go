@@ -80,8 +80,7 @@ func newHarness(t *testing.T) *harness {
 
 	// The loops do not run here, but the health endpoint reads their heartbeats.
 	// Tests about dead loops overwrite this deliberately.
-	server.Health.Register(health.DownloadWorker, 2*time.Second)
-	server.Health.Register(health.SyncWorker, 5*time.Second)
+	server.Health.Register(health.QueueWorker, 2*time.Second)
 	server.Health.Register(health.SchedulerForce, 30*time.Second)
 	server.Health.Register(health.SchedulerAuto, 10*time.Minute)
 
@@ -532,7 +531,7 @@ func (testHarness *harness) insertDownloadJobRow(ownerID int, sourceURL, platfor
 		doneAtExpression = "NULL"
 	}
 	result, failure := testHarness.database.Exec(
-		"INSERT INTO download_queue (user_id, source_url, platform, status, done_at) VALUES (?, ?, ?, ?, "+doneAtExpression+")",
+		"INSERT INTO job_queue (kind, user_id, source_url, platform, status, done_at) VALUES ('import', ?, ?, ?, ?, "+doneAtExpression+")",
 		ownerID, sourceURL, platform, status,
 	)
 	if failure != nil {
@@ -549,7 +548,7 @@ func (testHarness *harness) insertSyncJob(ownerID, designID int, status, doneAtE
 		doneAtExpression = "NULL"
 	}
 	result, failure := testHarness.database.Exec(
-		"INSERT INTO sync_queue (user_id, design_id, status, done_at) VALUES (?, ?, ?, "+doneAtExpression+")",
+		"INSERT INTO job_queue (kind, user_id, design_id, source_url, platform, status, done_at) VALUES ('update', ?, ?, 'https://example.test/m', 'manual', ?, "+doneAtExpression+")",
 		ownerID, designID, status,
 	)
 	if failure != nil {

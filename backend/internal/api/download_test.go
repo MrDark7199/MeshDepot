@@ -32,7 +32,7 @@ func TestDownloadQueueAcceptsASupportedURL(t *testing.T) {
 	if queued["platform"] != "printables" || queued["status"] != "pending" {
 		t.Fatalf("unexpected queue entry %s", answer.rawBody)
 	}
-	stored := testHarness.count("SELECT COUNT(*) FROM download_queue WHERE user_id = ? AND source_url = ? AND status = 'pending'",
+	stored := testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND user_id = ? AND source_url = ? AND status = 'pending'",
 		testHarness.userID, printablesURL)
 	if stored != 1 {
 		t.Fatal("no pending job was stored")
@@ -71,7 +71,7 @@ func TestDownloadQueueRejectsAnUnsupportedURL(t *testing.T) {
 			t.Fatalf("%q produced the error key %q", url, key)
 		}
 	}
-	if testHarness.count("SELECT COUNT(*) FROM download_queue") != 0 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'import'") != 0 {
 		t.Fatal("a job was queued anyway")
 	}
 }
@@ -199,7 +199,7 @@ func TestDownloadStatusReturnsTheJobWithItsDesignName(t *testing.T) {
 	testHarness := newHarness(t)
 	designID := testHarness.insertDesign(testHarness.userID, "Fertig geladen")
 	jobID := testHarness.insertDownloadJob(testHarness.userID, printablesURL, "done", "datetime('now')")
-	if _, failure := testHarness.database.Exec("UPDATE download_queue SET design_id = ? WHERE id = ?", designID, jobID); failure != nil {
+	if _, failure := testHarness.database.Exec("UPDATE job_queue SET design_id = ? WHERE id = ?", designID, jobID); failure != nil {
 		t.Fatalf("link the design: %v", failure)
 	}
 
@@ -228,7 +228,7 @@ func TestDownloadRetryResetsTheJob(t *testing.T) {
 	testHarness := withPrintablesAccount(newHarness(t))
 	jobID := testHarness.insertDownloadJob(testHarness.userID, printablesURL, "failed", "datetime('now')")
 	if _, failure := testHarness.database.Exec(
-		"UPDATE download_queue SET error_msg = 'kaputt', retry_count = 3 WHERE id = ?", jobID); failure != nil {
+		"UPDATE job_queue SET error_msg = 'kaputt', retry_count = 3 WHERE id = ?", jobID); failure != nil {
 		t.Fatalf("prepare the failed job: %v", failure)
 	}
 
@@ -238,7 +238,7 @@ func TestDownloadRetryResetsTheJob(t *testing.T) {
 		t.Fatalf("retry answered %d: %s", answer.status, answer.rawBody)
 	}
 	reset := testHarness.count(
-		"SELECT COUNT(*) FROM download_queue WHERE id = ? AND status = 'pending' AND error_msg IS NULL AND done_at IS NULL AND retry_count = 0", jobID)
+		"SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND id = ? AND status = 'pending' AND error_msg IS NULL AND done_at IS NULL AND retry_count = 0", jobID)
 	if reset != 1 {
 		t.Fatal("the job was not reset")
 	}
@@ -258,7 +258,7 @@ func TestDownloadRetryChecksThePlatformCredentials(t *testing.T) {
 	if key := answer.errorKey(t); key != "error.platform_credentials_required:thingiverse" {
 		t.Fatalf("unexpected error key %q", key)
 	}
-	if status := testHarness.scalar("SELECT status FROM download_queue WHERE id = ?", jobID); status != "failed" {
+	if status := testHarness.scalar("SELECT status FROM job_queue WHERE id = ?", jobID); status != "failed" {
 		t.Fatalf("the job was reset to %q anyway", status)
 	}
 }
@@ -272,7 +272,7 @@ func TestDownloadRetryRejectsAForeignJob(t *testing.T) {
 	if answer.status != http.StatusNotFound {
 		t.Fatalf("a foreign job answered %d", answer.status)
 	}
-	if status := testHarness.scalar("SELECT status FROM download_queue WHERE id = ?", foreign); status != "failed" {
+	if status := testHarness.scalar("SELECT status FROM job_queue WHERE id = ?", foreign); status != "failed" {
 		t.Fatalf("the foreign job was reset to %q", status)
 	}
 }
@@ -286,7 +286,7 @@ func TestDownloadCancelRemovesAPendingJob(t *testing.T) {
 	if answer.status != http.StatusOK {
 		t.Fatalf("cancel answered %d: %s", answer.status, answer.rawBody)
 	}
-	if testHarness.count("SELECT COUNT(*) FROM download_queue WHERE id = ?", jobID) != 0 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND id = ?", jobID) != 0 {
 		t.Fatal("the job survived")
 	}
 }
@@ -302,7 +302,7 @@ func TestDownloadCancelRefusesAFinishedJob(t *testing.T) {
 	if answer.status != http.StatusNotFound {
 		t.Fatalf("cancelling a finished job answered %d", answer.status)
 	}
-	if testHarness.count("SELECT COUNT(*) FROM download_queue WHERE id = ?", jobID) != 1 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND id = ?", jobID) != 1 {
 		t.Fatal("the finished job was deleted")
 	}
 }
@@ -316,7 +316,7 @@ func TestDownloadCancelRejectsAForeignJob(t *testing.T) {
 	if answer.status != http.StatusNotFound {
 		t.Fatalf("a foreign job answered %d", answer.status)
 	}
-	if testHarness.count("SELECT COUNT(*) FROM download_queue WHERE id = ?", foreign) != 1 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND id = ?", foreign) != 1 {
 		t.Fatal("a foreign job was cancelled")
 	}
 }
@@ -331,13 +331,13 @@ func TestDownloadDismissRemovesOnlyFailedJobs(t *testing.T) {
 	testHarness.asUser(http.MethodDelete, fmt.Sprintf("/api/v1/download/%d/dismiss", pending), nil)
 	testHarness.asUser(http.MethodDelete, fmt.Sprintf("/api/v1/download/%d/dismiss", foreign), nil)
 
-	if testHarness.count("SELECT COUNT(*) FROM download_queue WHERE id = ?", failed) != 0 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND id = ?", failed) != 0 {
 		t.Fatal("the failed job survived the dismissal")
 	}
-	if testHarness.count("SELECT COUNT(*) FROM download_queue WHERE id = ?", pending) != 1 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND id = ?", pending) != 1 {
 		t.Fatal("a pending job was dismissed")
 	}
-	if testHarness.count("SELECT COUNT(*) FROM download_queue WHERE id = ?", foreign) != 1 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND id = ?", foreign) != 1 {
 		t.Fatal("a foreign job was dismissed")
 	}
 }
@@ -378,10 +378,10 @@ func TestSyncAllQueuesEverySyncableDesign(t *testing.T) {
 	if queued := coerce.Int(answer.data(t)["queued"]); queued != 1 {
 		t.Fatalf("%d designs were queued, expected the one with a source url", queued)
 	}
-	if testHarness.count("SELECT COUNT(*) FROM sync_queue WHERE design_id = ?", withSource) != 1 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND design_id = ?", withSource) != 1 {
 		t.Fatal("the syncable design was not queued")
 	}
-	if testHarness.count("SELECT COUNT(*) FROM sync_queue") != 1 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'update'") != 1 {
 		t.Fatal("a design without a source url or a foreign design was queued")
 	}
 }
@@ -400,7 +400,7 @@ func TestSyncAllSkipsDesignsThatAreAlreadyQueued(t *testing.T) {
 	if queued := coerce.Int(answer.data(t)["queued"]); queued != 0 {
 		t.Fatalf("the second run queued %d designs", queued)
 	}
-	if count := testHarness.count("SELECT COUNT(*) FROM sync_queue WHERE design_id = ?", designID); count != 1 {
+	if count := testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND design_id = ?", designID); count != 1 {
 		t.Fatalf("%d jobs exist for the same design", count)
 	}
 }

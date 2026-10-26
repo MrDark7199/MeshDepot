@@ -15,7 +15,7 @@ export function DownloadPlaceholderCard(props: { job: DownloadJob; onCancel: () 
   const grad = GRADIENTS[0]
   const gradientString = `linear-gradient(135deg,${grad[0]},${grad[1]})`
   const isFailed = () => props.job.status === 'failed'
-  const isActive = () => props.job.status === 'downloading'
+  const isActive = () => props.job.status === 'running'
   const stepLabel = () => {
     if (!isActive()) return queueLabel(props.job, translate)
     const step = props.job.current_step as string | null | undefined
@@ -90,7 +90,7 @@ export function DownloadPlaceholderRow(props: { job: DownloadJob; onCancel: () =
   const translateError = makeTranslateError(translate)
   const plat = props.job.platform || 'manual'
   const isFailed = () => props.job.status === 'failed'
-  const isActive = () => props.job.status === 'downloading'
+  const isActive = () => props.job.status === 'running'
   const stepLabel = () => {
     if (!isActive()) return queueLabel(props.job, translate)
     const step = props.job.current_step as string | null | undefined

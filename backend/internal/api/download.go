@@ -9,6 +9,7 @@ import (
 	"meshdepot/internal/coerce"
 	"meshdepot/internal/dbutil"
 	"meshdepot/internal/httpx"
+	"meshdepot/internal/jobqueue"
 	"meshdepot/internal/logx"
 	"meshdepot/internal/platforms"
 	"meshdepot/internal/queuestate"
@@ -103,26 +104,31 @@ func (server *Server) DownloadQueue(responseWriter http.ResponseWriter, request 
 	// Asking for this design by hand outranks an earlier "delete and keep it gone":
 	// without lifting the block it would disappear again on the next library sync.
 	platforms.LiftSyncExclusion(server.DB, currentUserID, platform, "", sourceURL)
-	insertResult, failure := server.DB.Exec("INSERT INTO download_queue (user_id, source_url, platform, status) VALUES (?, ?, ?, 'pending')", currentUserID, sourceURL, platform)
+	id, failure := jobqueue.EnqueueImport(server.DB, currentUserID, sourceURL, platform)
 	if failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 		return
 	}
-	id, _ := insertResult.LastInsertId()
+	// Already waiting: answered with the job that is, so the caller follows that
+	// one rather than a second download of the same thing.
+	if id == 0 {
+		server.DB.QueryRow(`SELECT id FROM job_queue WHERE kind = 'import' AND user_id = ? AND source_url = ?
+			AND status IN ('pending','running') ORDER BY id DESC LIMIT 1`, currentUserID, sourceURL).Scan(&id)
+	}
 	httpx.SuccessStatus(responseWriter, http.StatusCreated, map[string]any{"queue_id": id, "platform": platform, "status": "pending"}, "Download queued")
 }
 
 func (server *Server) DownloadList(responseWriter http.ResponseWriter, request *http.Request) {
 	rows, _ := dbutil.QueryMaps(server.DB, `
-		SELECT dq.id, dq.source_url, dq.platform, dq.status, dq.error_msg, dq.retry_count,
-			dq.created_at, dq.started_at, dq.done_at, dq.current_step, dq.step_current, dq.step_total,
-			d.public_id AS design_id, d.name AS design_name FROM download_queue dq
-		LEFT JOIN designs d ON d.id = dq.design_id
-		WHERE dq.user_id = ? AND (
-			dq.status IN ('pending','downloading')
-			OR (dq.status = 'failed' AND dq.done_at > datetime('now', ?))
-			OR (dq.status = 'done'   AND dq.done_at > datetime('now', ?))
-		) ORDER BY dq.created_at DESC`, userID(request), failedJobVisible, doneJobVisible)
+		SELECT jq.id, jq.kind, jq.source_url, jq.platform, jq.status, jq.error_msg, jq.retry_count, jq.progress,
+			jq.created_at, jq.started_at, jq.done_at, jq.current_step, jq.step_current, jq.step_total,
+			d.public_id AS design_id, d.name AS design_name FROM job_queue jq
+		LEFT JOIN designs d ON d.id = jq.design_id
+		WHERE jq.user_id = ? AND (
+			jq.status IN ('pending','running')
+			OR (jq.status = 'failed' AND jq.done_at > datetime('now', ?))
+			OR (jq.status = 'done'   AND jq.done_at > datetime('now', ?))
+		) ORDER BY jq.created_at DESC`, userID(request), failedJobVisible, doneJobVisible)
 	annotateQueueRows(server.DB, rows)
 	httpx.Success(responseWriter, rows)
 }
@@ -156,11 +162,11 @@ func (server *Server) DownloadStatus(responseWriter http.ResponseWriter, request
 		return
 	}
 	row, ok := server.fetchRow(responseWriter, `
-		SELECT dq.id, dq.source_url, dq.platform, dq.status, dq.error_msg, dq.retry_count,
-			dq.created_at, dq.started_at, dq.done_at, dq.current_step, dq.step_current, dq.step_total,
-			d.public_id AS design_id, d.name AS design_name
-		FROM download_queue dq LEFT JOIN designs d ON d.id = dq.design_id
-		WHERE dq.id = ? AND dq.user_id = ? LIMIT 1`, id, userID(request))
+		SELECT jq.id, jq.kind, jq.source_url, jq.platform, jq.status, jq.error_msg, jq.retry_count, jq.progress,
+			jq.created_at, jq.started_at, jq.done_at, jq.current_step, jq.step_current, jq.step_total,
+			d.public_id AS design_id, d.name AS design_name FROM job_queue jq
+		LEFT JOIN designs d ON d.id = jq.design_id
+		WHERE jq.id = ? AND jq.user_id = ? LIMIT 1`, id, userID(request))
 	if !ok {
 		return
 	}
@@ -175,7 +181,7 @@ func (server *Server) DownloadRetry(responseWriter http.ResponseWriter, request 
 		httpx.Error(responseWriter, http.StatusNotFound, "error.not_found")
 		return
 	}
-	job, ok := server.fetchRow(responseWriter, "SELECT id, platform, source_url FROM download_queue WHERE id = ? AND user_id = ? LIMIT 1", id, currentUserID)
+	job, ok := server.fetchRow(responseWriter, "SELECT id, platform, source_url FROM job_queue WHERE id = ? AND user_id = ? LIMIT 1", id, currentUserID)
 	if !ok {
 		return
 	}
@@ -183,7 +189,7 @@ func (server *Server) DownloadRetry(responseWriter http.ResponseWriter, request 
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, errorKey)
 		return
 	}
-	dbutil.ExecLogged(server.DB, "UPDATE download_queue SET status='pending', error_msg=NULL, done_at=NULL, retry_count=0 WHERE id = ? AND user_id = ?", id, currentUserID)
+	dbutil.ExecLogged(server.DB, "UPDATE job_queue SET status='pending', error_msg=NULL, done_at=NULL, retry_count=0, progress=0 WHERE id = ? AND user_id = ?", id, currentUserID)
 	httpx.SuccessMessage(responseWriter, map[string]any{"queue_id": id, "status": "pending"}, "Retrying download")
 }
 
@@ -196,7 +202,7 @@ func (server *Server) DownloadCancel(responseWriter http.ResponseWriter, request
 	}
 	// The error is not decoration here: a failed Exec returns a nil result, and
 	// asking that for RowsAffected panics the request.
-	result, failure := server.DB.Exec("DELETE FROM download_queue WHERE id = ? AND user_id = ? AND status IN ('pending','downloading')", id, currentUserID)
+	result, failure := server.DB.Exec("DELETE FROM job_queue WHERE id = ? AND user_id = ? AND status IN ('pending','running')", id, currentUserID)
 	if failure != nil {
 		logx.Errorf("[api] cancelling queue entry %d failed: %v", id, failure)
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
@@ -216,7 +222,7 @@ func (server *Server) DownloadDismiss(responseWriter http.ResponseWriter, reques
 		httpx.Error(responseWriter, http.StatusNotFound, "error.not_found")
 		return
 	}
-	dbutil.ExecLogged(server.DB, "DELETE FROM download_queue WHERE id = ? AND user_id = ? AND status = 'failed'", id, currentUserID)
+	dbutil.ExecLogged(server.DB, "DELETE FROM job_queue WHERE id = ? AND user_id = ? AND status = 'failed'", id, currentUserID)
 	httpx.SuccessMessage(responseWriter, nil, "Dismissed")
 }
 
@@ -231,15 +237,12 @@ func (server *Server) SyncAll(responseWriter http.ResponseWriter, request *http.
 	rows, _ := dbutil.QueryMaps(server.DB, "SELECT id FROM designs WHERE user_id = ? AND source_url IS NOT NULL AND source_url != ''", currentUserID)
 	queued := 0
 	for _, designRow := range rows {
-		designIDValue := coerce.Int(designRow["id"])
-		// A failed probe skips the design rather than enqueueing it: sync_queue has no
-		// unique constraint, so "unknown" must not become a second running job.
-		_, alreadyQueued, failure := dbutil.QueryMap(server.DB, "SELECT id FROM sync_queue WHERE design_id = ? AND status IN ('pending','running') LIMIT 1", designIDValue)
-		if failure != nil || alreadyQueued {
-			continue
+		// Asked for by a person, so not automatic: these go ahead of the scheduler's.
+		// A design whose check cannot be confirmed as new is skipped rather than
+		// queued twice.
+		if added, failure := jobqueue.EnqueueUpdate(server.DB, currentUserID, coerce.Int(designRow["id"]), false); failure == nil && added {
+			queued++
 		}
-		dbutil.ExecLogged(server.DB, "INSERT INTO sync_queue (design_id, user_id, status) VALUES (?, ?, 'pending')", designIDValue, currentUserID)
-		queued++
 	}
 	// Stamped even when nothing was queued, or a fully queued library would let the
 	// button be pressed again immediately.
@@ -283,8 +286,8 @@ func (server *Server) SyncState(responseWriter http.ResponseWriter, request *htt
 	}
 
 	var downloadsPending, syncsPending int
-	server.DB.QueryRow("SELECT COUNT(*) FROM download_queue WHERE user_id = ? AND status IN ('pending','downloading')", currentUserID).Scan(&downloadsPending)
-	server.DB.QueryRow("SELECT COUNT(*) FROM sync_queue WHERE user_id = ? AND status IN ('pending','running')", currentUserID).Scan(&syncsPending)
+	server.DB.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND user_id = ? AND status IN ('pending','running')", currentUserID).Scan(&downloadsPending)
+	server.DB.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND user_id = ? AND status IN ('pending','running')", currentUserID).Scan(&syncsPending)
 
 	httpx.Success(responseWriter, map[string]any{
 		"has_accounts":                accounts > 0,
@@ -298,12 +301,13 @@ func (server *Server) SyncState(responseWriter http.ResponseWriter, request *htt
 
 func (server *Server) SyncStatus(responseWriter http.ResponseWriter, request *http.Request) {
 	rows, _ := dbutil.QueryMaps(server.DB, `
-		SELECT sq.id, d.public_id AS design_id, sq.status, sq.progress, sq.current_step, sq.step_current, sq.step_total, sq.error_msg, sq.done_at, d.name AS design_name
-		FROM sync_queue sq JOIN designs d ON d.id = sq.design_id
-		WHERE sq.user_id = ? AND (
-			sq.status IN ('pending','running')
-			OR (sq.status IN ('done','failed') AND sq.done_at > datetime('now', ?))
-		) ORDER BY sq.created_at ASC`, userID(request), doneSyncVisible)
+		SELECT jq.id, d.public_id AS design_id, jq.status, jq.progress, jq.current_step, jq.step_current, jq.step_total,
+			jq.error_msg, jq.retry_count, jq.done_at, d.name AS design_name
+		FROM job_queue jq JOIN designs d ON d.id = jq.design_id
+		WHERE jq.kind = 'update' AND jq.user_id = ? AND (
+			jq.status IN ('pending','running')
+			OR (jq.status IN ('done','failed') AND jq.done_at > datetime('now', ?))
+		) ORDER BY jq.created_at ASC`, userID(request), doneSyncVisible)
 	httpx.Success(responseWriter, rows)
 }
 

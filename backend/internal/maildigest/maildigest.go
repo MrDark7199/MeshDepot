@@ -125,8 +125,8 @@ func stillRelevant(database *sql.DB, userID int, item pending) bool {
 		}
 		var done int
 		database.QueryRow(`
-			SELECT COUNT(*) FROM download_queue
-			WHERE user_id = ? AND source_url = ? AND status = 'done'`, userID, item.reference).Scan(&done)
+			SELECT COUNT(*) FROM job_queue
+			WHERE kind = 'import' AND user_id = ? AND source_url = ? AND status = 'done'`, userID, item.reference).Scan(&done)
 		return done == 0
 	case "user_storage_80":
 		return quota.Of(database, userID).NearlyFull()

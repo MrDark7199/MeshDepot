@@ -1,7 +1,7 @@
 package platforms
 
 // Library sync. For each active platform account it imports the platform
-// collections: new designs land in the download_queue, known ones are linked
+// collections: new designs land in the job queue, known ones are linked
 // directly, and members not yet present are noted as
 // pending_collection_assignments. Likes are deliberately not synced.
 //
@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"meshdepot/internal/coerce"
 	"meshdepot/internal/dbutil"
+	"meshdepot/internal/jobqueue"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -719,17 +720,12 @@ func queueIfNew(db *sql.DB, designURL, platform string, userID int) int {
 			return 0
 		}
 	}
-	if found, known := dbutil.Exists(db,
-		"SELECT id FROM download_queue WHERE user_id=? AND source_url=? AND status IN ('pending','downloading') LIMIT 1",
-		userID, designURL); found || !known {
-		return 0
-	}
-	insertResult, failure := db.Exec("INSERT INTO download_queue (user_id, source_url, platform, status) VALUES (?,?,?,'pending')", userID, designURL, platform)
+	// Skipped when the queue already holds it, or cannot say whether it does.
+	newID, failure := jobqueue.EnqueueImport(db, userID, designURL, platform)
 	if failure != nil {
 		return 0
 	}
-	newID, _ := insertResult.LastInsertId()
-	return int(newID)
+	return newID
 }
 
 // ResolvePendingCollections links a freshly downloaded design with the

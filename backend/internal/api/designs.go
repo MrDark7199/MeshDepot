@@ -17,6 +17,7 @@ import (
 
 	"meshdepot/internal/dbutil"
 	"meshdepot/internal/httpx"
+	"meshdepot/internal/jobqueue"
 	"meshdepot/internal/platforms"
 	"meshdepot/internal/publicid"
 	"meshdepot/internal/storage"
@@ -542,19 +543,15 @@ func (server *Server) DesignsSync(responseWriter http.ResponseWriter, request *h
 		httpx.Error(responseWriter, http.StatusUnprocessableEntity, reason)
 		return
 	}
-	// A failed probe is reported rather than enqueueing a second job for the same
-	// design: sync_queue has no unique constraint.
-	_, alreadyQueued, failure := dbutil.QueryMap(server.DB, "SELECT id FROM sync_queue WHERE design_id = ? AND status IN ('pending','running') LIMIT 1", designID)
+	// Asked for by a person, so it goes ahead of the scheduler's checks. A check
+	// that cannot be confirmed as new is reported rather than queued twice.
+	added, failure := jobqueue.EnqueueUpdate(server.DB, currentUserID, designID, false)
 	if failure != nil {
 		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 		return
 	}
-	if alreadyQueued {
+	if !added {
 		httpx.SuccessMessage(responseWriter, map[string]any{"design_id": request.PathValue("id"), "status": "already_queued"}, "Already queued")
-		return
-	}
-	if _, failure := server.DB.Exec("INSERT INTO sync_queue (design_id, user_id, status) VALUES (?, ?, 'pending')", designID, currentUserID); failure != nil {
-		httpx.Error(responseWriter, http.StatusInternalServerError, "error.server")
 		return
 	}
 	httpx.SuccessMessage(responseWriter, map[string]any{"design_id": request.PathValue("id"), "status": "queued"}, "Sync queued")

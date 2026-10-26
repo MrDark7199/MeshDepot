@@ -24,7 +24,7 @@ func exclusionTestDB(t *testing.T) *sql.DB {
 func queuedCount(t *testing.T, database *sql.DB, userID int) int {
 	t.Helper()
 	var count int
-	if failure := database.QueryRow("SELECT COUNT(*) FROM download_queue WHERE user_id = ?", userID).Scan(&count); failure != nil {
+	if failure := database.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND user_id = ?", userID).Scan(&count); failure != nil {
 		t.Fatalf("counting the queue: %v", failure)
 	}
 	return count

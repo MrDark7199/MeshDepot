@@ -6,8 +6,10 @@ import (
 	_ "embed"
 	"fmt"
 	"meshdepot/internal/dbutil"
+	"meshdepot/internal/logx"
 	"meshdepot/internal/publicid"
 	"net/url"
+	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite" // CGO-free SQLite driver (driver name "sqlite").
@@ -139,6 +141,9 @@ func migrate(database *sql.DB) {
 	for _, statement := range alterStatements {
 		database.Exec(statement) // Error (column already exists) intentionally ignored.
 	}
+	// After the ALTERs above: a database old enough to miss one of the sync_queue
+	// columns gets it first, so the copy below finds what it reads.
+	migrateToJobQueue(database)
 	// Runs on every boot rather than once, so an insert path that forgets the
 	// column heals itself instead of leaving a row no URL can address.
 	backfillPublicIDs(database)
@@ -231,4 +236,124 @@ func backfillPublicIDsOf(database *sql.DB, table string) {
 	for _, rowID := range pending {
 		dbutil.ExecLogged(database, "UPDATE "+table+" SET public_id = ? WHERE id = ?", publicid.New(), rowID)
 	}
+}
+
+// migrateToJobQueue moves every row of the two old queues into job_queue and
+// drops them, in one transaction - a crash halfway leaves both old tables as they
+// were and the next boot tries again. Once they are gone it does nothing.
+//
+// Nothing is left behind: finished and failed jobs come along too, so the queue
+// display shows the same history after the update as before it. A job that was
+// running when the server stopped is set back to pending, since no worker is
+// left to finish it.
+func migrateToJobQueue(database *sql.DB) {
+	hasDownloads := tableExists(database, "download_queue")
+	hasUpdates := tableExists(database, "sync_queue")
+	if !hasDownloads && !hasUpdates {
+		return
+	}
+	// Read before the transaction opens: with a single connection, asking from
+	// outside it while it is open would wait for ever.
+	downloadColumns := columnsOf(database, "download_queue")
+	updateColumns := columnsOf(database, "sync_queue")
+
+	transaction, failure := database.Begin()
+	if failure != nil {
+		logx.Errorf("[db] job queue migration could not start: %v", failure)
+		return
+	}
+	defer transaction.Rollback()
+
+	imported, updates := int64(0), int64(0)
+	if hasDownloads {
+		// A column a very old database never got is read as its default instead.
+		pick := func(name, fallback string) string {
+			if downloadColumns[name] {
+				return name
+			}
+			return fallback
+		}
+		// The ids are kept: a page polling a job by its id keeps finding it. A design
+		// that has since been deleted no longer exists to point at, so the job keeps
+		// its history and loses only the link.
+		result, failure := transaction.Exec(`
+			INSERT INTO job_queue (id, kind, user_id, design_id, source_url, platform, status, error_msg,
+				retry_count, current_step, step_current, step_total, created_at, started_at, done_at)
+			SELECT id, 'import', user_id,
+				CASE WHEN ` + pick("design_id", "NULL") + ` IN (SELECT id FROM designs) THEN ` + pick("design_id", "NULL") + ` END,
+				source_url, platform,
+				CASE status WHEN 'downloading' THEN 'pending' WHEN 'running' THEN 'pending' ELSE status END,
+				` + pick("error_msg", "NULL") + `, ` + pick("retry_count", "0") + `,
+				` + pick("current_step", "NULL") + `, ` + pick("step_current", "NULL") + `, ` + pick("step_total", "NULL") + `,
+				` + pick("created_at", "CURRENT_TIMESTAMP") + `,
+				CASE WHEN status IN ('downloading','running') THEN NULL ELSE ` + pick("started_at", "NULL") + ` END,
+				` + pick("done_at", "NULL") + `
+			FROM download_queue`)
+		if failure != nil {
+			logx.Errorf("[db] job queue migration: downloads could not be moved, nothing changed: %v", failure)
+			return
+		}
+		imported, _ = result.RowsAffected()
+	}
+	if hasUpdates {
+		pick := func(name, fallback string) string {
+			if updateColumns[name] {
+				return "sq." + name
+			}
+			return fallback
+		}
+		// An update takes its URL and platform from its design. One whose design has
+		// no source any more could never run, so it is the only kind left out.
+		result, failure := transaction.Exec(`
+			INSERT INTO job_queue (kind, user_id, design_id, source_url, platform, status, error_msg,
+				progress, current_step, step_current, step_total, created_at, started_at, done_at)
+			SELECT 'update', sq.user_id, sq.design_id, d.source_url,
+				COALESCE(NULLIF(d.source_platform, ''), 'manual'),
+				CASE sq.status WHEN 'running' THEN 'pending' ELSE sq.status END,
+				` + pick("error_msg", "NULL") + `, ` + pick("progress", "0") + `,
+				` + pick("current_step", "NULL") + `, ` + pick("step_current", "NULL") + `, ` + pick("step_total", "NULL") + `,
+				` + pick("created_at", "CURRENT_TIMESTAMP") + `,
+				CASE WHEN sq.status = 'running' THEN NULL ELSE ` + pick("started_at", "NULL") + ` END,
+				` + pick("done_at", "NULL") + `
+			FROM sync_queue sq JOIN designs d ON d.id = sq.design_id
+			WHERE COALESCE(d.source_url, '') != ''`)
+		if failure != nil {
+			logx.Errorf("[db] job queue migration: updates could not be moved, nothing changed: %v", failure)
+			return
+		}
+		updates, _ = result.RowsAffected()
+	}
+	for _, table := range []string{"download_queue", "sync_queue"} {
+		if _, failure := transaction.Exec("DROP TABLE IF EXISTS " + table); failure != nil {
+			logx.Errorf("[db] job queue migration: %s could not be dropped, nothing changed: %v", table, failure)
+			return
+		}
+	}
+	if failure := transaction.Commit(); failure != nil {
+		logx.Errorf("[db] job queue migration could not be committed, nothing changed: %v", failure)
+		return
+	}
+	logx.Infof("[db] job queue migration: %d download(s) and %d update check(s) moved into job_queue", imported, updates)
+}
+
+func tableExists(database *sql.DB, name string) bool {
+	found, _ := dbutil.Exists(database, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", name)
+	return found
+}
+
+// columnsOf lists a table's columns; empty for a table that is not there.
+func columnsOf(database *sql.DB, table string) map[string]bool {
+	columns := map[string]bool{}
+	rows, failure := database.Query("SELECT name FROM pragma_table_info(?)", table)
+	if failure != nil {
+		return columns
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if rows.Scan(&name) == nil {
+			columns[strings.ToLower(name)] = true
+		}
+	}
+	return columns
 }

@@ -565,7 +565,7 @@ func TestAdminHealthReportsALoopThatNeverStarted(t *testing.T) {
 
 func TestAdminHealthReportsABusyWorkerAsRunning(t *testing.T) {
 	testHarness := newHarness(t)
-	endJob := testHarness.server.Health.Working(health.DownloadWorker)
+	endJob := testHarness.server.Health.Working(health.QueueWorker)
 	defer endJob()
 	testHarness.server.Health.Now = func() time.Time { return time.Now().Add(9 * time.Minute) }
 
@@ -584,7 +584,7 @@ func TestAdminHealthWarnsAboutASyncBacklog(t *testing.T) {
 	designID := testHarness.insertDesign(testHarness.userID, "Rückstau")
 	for count := 0; count < syncBacklogWarn; count++ {
 		if _, failure := testHarness.database.Exec(
-			"INSERT INTO sync_queue (design_id, user_id, status) VALUES (?, ?, 'pending')", designID, testHarness.userID,
+			"INSERT INTO job_queue (kind, design_id, user_id, source_url, platform, status) VALUES ('update', ?, ?, 'https://example.test/m', 'manual', 'pending')", designID, testHarness.userID,
 		); failure != nil {
 			t.Fatalf("fill the queue: %v", failure)
 		}

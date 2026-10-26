@@ -23,6 +23,7 @@ import (
 	"meshdepot/internal/db"
 	"meshdepot/internal/health"
 	"meshdepot/internal/httpx"
+	"meshdepot/internal/jobqueue"
 	"meshdepot/internal/maildigest"
 	"meshdepot/internal/notify"
 	"meshdepot/internal/platforms"
@@ -111,12 +112,12 @@ func main() {
 	// /admin/health can tell a loop that is idle from one that is gone.
 	heartbeats := health.New()
 
-	downloadWorker := worker.NewDownloadWorker(database, downloadProcess(database, configuration, registry), cooldownFor(database))
-	downloadWorker.Heartbeat = heartbeats
-	downloadWorker.Start(stop)
-	syncWorker := worker.NewSyncWorker(database, syncProcess(database, configuration, registry))
-	syncWorker.Heartbeat = heartbeats
-	syncWorker.Start(stop)
+	// One worker for imports and update checks: both fetch from the same platforms,
+	// and a platform's cooldown and anti-bot pause only hold when every request to it
+	// goes through the same runner.
+	queueWorker := worker.NewQueueWorker(database, jobProcess(database, configuration, registry), cooldownFor(database))
+	queueWorker.Heartbeat = heartbeats
+	queueWorker.Start(stop)
 
 	// Scheduler: forced library sync (flag) + auto-sync enqueue.
 	backgroundScheduler := scheduler.New(database, func() { platforms.RunLibrarySync(platformDeps) })
@@ -164,11 +165,8 @@ func main() {
 	// A job cut between "files written" and "DB rows inserted" leaves a half-imported
 	// design that no cleanup finds. Bounded, because a large model may need minutes
 	// and the container supervisor will not wait - cancel() then tears the rest down.
-	if !downloadWorker.Wait(workerShutdownWait) {
-		logx.Warnf("[worker] download job still running, shutting down anyway")
-	}
-	if !syncWorker.Wait(workerShutdownWait) {
-		logx.Warnf("[worker] sync job still running, shutting down anyway")
+	if !queueWorker.Wait(workerShutdownWait) {
+		logx.Warnf("[worker] queue job still running, shutting down anyway")
 	}
 	cancel()
 }
@@ -196,9 +194,34 @@ func validateConfig(configuration config.Config) error {
 	return nil
 }
 
-// downloadProcess builds the download worker's Process: resolve the downloader,
-// download, save into the library.
-func downloadProcess(database *sql.DB, configuration config.Config, registry platforms.Registry) func(worker.Job) (int, error) {
+// jobProcess is the worker's Process: an import becomes a new design, an update
+// a new version of the design it names. Everything around the two - claiming,
+// cooldown, retries, the anti-bot pause - is the worker's and the same for both.
+func jobProcess(database *sql.DB, configuration config.Config, registry platforms.Registry) func(worker.Job) (int, error) {
+	importDesign := importProcess(database, configuration, registry)
+	updateDesign := updateProcess(database, configuration, registry)
+	return func(job worker.Job) (int, error) {
+		if job.Kind == jobqueue.KindUpdate {
+			return job.DesignID, updateDesign(job)
+		}
+		return importDesign(job)
+	}
+}
+
+// stepWriter mirrors the current phase of a job into its queue row, so the
+// frontend shows the running category rather than a static "working…". Every
+// downloader serves the same progress callback.
+func stepWriter(database *sql.DB, jobID int) func(step string, current, total int) {
+	return func(step string, current, total int) {
+		dbutil.ExecLogged(database,
+			"UPDATE job_queue SET current_step=?, step_current=?, step_total=?, progress=? WHERE id=?",
+			step, current, total, stepPercent(step, current, total), jobID,
+		)
+	}
+}
+
+// importProcess resolves the downloader, downloads, and saves into the library.
+func importProcess(database *sql.DB, configuration config.Config, registry platforms.Registry) func(worker.Job) (int, error) {
 	return func(job worker.Job) (int, error) {
 		downloader := registry.Get(job.Platform)
 		if downloader == nil {
@@ -220,7 +243,10 @@ func downloadProcess(database *sql.DB, configuration config.Config, registry pla
 				"Delete designs or versions you no longer need, or ask an administrator for more space.")
 		}
 		owner := platforms.Owner{ID: job.UserID, Layout: storage.New(configuration.BasePathData).User(job.UserPublicID)}
-		result, failure := downloader.Download(job.SourceURL, owner, func(string, string, int, int) {})
+		writeStep := stepWriter(database, job.ID)
+		result, failure := downloader.Download(job.SourceURL, owner, func(step, _ string, current, total int) {
+			writeStep(step, current, total)
+		})
 		if failure != nil {
 			return 0, failure
 		}
@@ -243,10 +269,10 @@ func downloadProcess(database *sql.DB, configuration config.Config, registry pla
 	}
 }
 
-// syncProcess builds the sync worker's Process: reload the design from its
-// source_url and store it as a new version. "Unchanged" counts as done.
-func syncProcess(database *sql.DB, configuration config.Config, registry platforms.Registry) func(worker.SyncJob) error {
-	return func(job worker.SyncJob) error {
+// updateProcess reloads a design from its source_url and stores it as a new
+// version. "Unchanged" counts as done.
+func updateProcess(database *sql.DB, configuration config.Config, registry platforms.Registry) func(worker.Job) error {
+	return func(job worker.Job) error {
 		var sourceURL, name string
 		failure := database.QueryRow(
 			"SELECT COALESCE(source_url,''), COALESCE(name,'') FROM designs WHERE id=? AND user_id=? LIMIT 1",
@@ -266,15 +292,7 @@ func syncProcess(database *sql.DB, configuration config.Config, registry platfor
 		if downloader == nil {
 			return errors.New("error.unsupported_url")
 		}
-		// Mirrors the current phase into sync_queue, so the frontend shows the running
-		// category rather than a static "updating…". Every downloader serves the same
-		// progress callback.
-		writeStep := func(step string, current, total int) {
-			dbutil.ExecLogged(database,
-				"UPDATE sync_queue SET current_step=?, step_current=?, step_total=?, progress=? WHERE id=?",
-				step, current, total, syncStepPercent(step, current, total), job.ID,
-			)
-		}
+		writeStep := stepWriter(database, job.ID)
 		owner := platforms.Owner{ID: job.UserID, Layout: storage.New(configuration.BasePathData).User(job.UserPublicID)}
 		result, failure := downloader.Download(sourceURL, owner, func(step, _ string, current, total int) {
 			writeStep(step, current, total)
@@ -328,9 +346,9 @@ func syncProcess(database *sql.DB, configuration config.Config, registry platfor
 	}
 }
 
-// syncStepPercent maps the phase to a coarse 0-99 %, refined within the file and
+// stepPercent maps the phase to a coarse 0-99 %, refined within the file and
 // image phases by the counter. 100 % is set by the worker on completion.
-func syncStepPercent(step string, current, total int) int {
+func stepPercent(step string, current, total int) int {
 	switch step {
 	case "authenticating":
 		return 5

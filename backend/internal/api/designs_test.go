@@ -651,12 +651,12 @@ func TestDesignsSyncQueuesTheDesign(t *testing.T) {
 	if status := answer.data(t)["status"]; status != "queued" {
 		t.Fatalf("unexpected status %v", status)
 	}
-	if testHarness.count("SELECT COUNT(*) FROM sync_queue WHERE design_id = ? AND status = 'pending'", designID) != 1 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND design_id = ? AND status = 'pending'", designID) != 1 {
 		t.Fatal("no pending job was created")
 	}
 }
 
-// sync_queue has no unique constraint, so this check is the only thing keeping a
+// job_queue has no unique constraint, so this check is the only thing keeping a
 // second job for the same design out.
 func TestDesignsSyncDoesNotQueueTheSameDesignTwice(t *testing.T) {
 	testHarness := newHarness(t)
@@ -670,7 +670,7 @@ func TestDesignsSyncDoesNotQueueTheSameDesignTwice(t *testing.T) {
 	if status := answer.data(t)["status"]; status != "already_queued" {
 		t.Fatalf("unexpected status %v", status)
 	}
-	if count := testHarness.count("SELECT COUNT(*) FROM sync_queue WHERE design_id = ?", designID); count != 1 {
+	if count := testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND design_id = ?", designID); count != 1 {
 		t.Fatalf("%d jobs were created", count)
 	}
 }
@@ -682,7 +682,7 @@ func TestDesignsSyncQueuesAgainAfterAFinishedJob(t *testing.T) {
 	path := fmt.Sprintf("/api/v1/designs/%s/sync", testHarness.designPID(designID))
 
 	testHarness.asUser(http.MethodPost, path, nil)
-	if _, failure := testHarness.database.Exec("UPDATE sync_queue SET status = 'done' WHERE design_id = ?", designID); failure != nil {
+	if _, failure := testHarness.database.Exec("UPDATE job_queue SET status = 'done' WHERE design_id = ?", designID); failure != nil {
 		t.Fatalf("finish the job: %v", failure)
 	}
 	answer := testHarness.asUser(http.MethodPost, path, nil)
@@ -690,7 +690,7 @@ func TestDesignsSyncQueuesAgainAfterAFinishedJob(t *testing.T) {
 	if status := answer.data(t)["status"]; status != "queued" {
 		t.Fatalf("unexpected status %v", status)
 	}
-	if count := testHarness.count("SELECT COUNT(*) FROM sync_queue WHERE design_id = ?", designID); count != 2 {
+	if count := testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND design_id = ?", designID); count != 2 {
 		t.Fatalf("%d jobs exist, expected the finished one plus a new one", count)
 	}
 }
@@ -707,7 +707,7 @@ func TestDesignsSyncNeedsASourceURL(t *testing.T) {
 	if key := answer.errorKey(t); key != "error.no_source_url" {
 		t.Fatalf("unexpected error key %q", key)
 	}
-	if testHarness.count("SELECT COUNT(*) FROM sync_queue") != 0 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'update'") != 0 {
 		t.Fatal("a job was created anyway")
 	}
 }
@@ -722,7 +722,7 @@ func TestDesignsSyncRejectsAForeignDesign(t *testing.T) {
 	if answer.status != http.StatusNotFound {
 		t.Fatalf("a foreign design answered %d", answer.status)
 	}
-	if testHarness.count("SELECT COUNT(*) FROM sync_queue") != 0 {
+	if testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'update'") != 0 {
 		t.Fatal("a job for a foreign design was created")
 	}
 }
@@ -1004,7 +1004,7 @@ func TestDesignsSyncIsRefusedWithoutPlatformCredentials(t *testing.T) {
 	if key := answer.errorKey(t); !strings.HasPrefix(key, "error.platform_credentials_required") {
 		t.Errorf("error = %q, want the credentials key", key)
 	}
-	if queued := testHarness.count("SELECT COUNT(*) FROM sync_queue WHERE design_id = ?", designID); queued != 0 {
+	if queued := testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND design_id = ?", designID); queued != 0 {
 		t.Errorf("%d job(s) queued; the point is that none is", queued)
 	}
 }
@@ -1022,7 +1022,7 @@ func TestDesignsSyncQueuesOnceTheCredentialsAreThere(t *testing.T) {
 	if answer.status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", answer.status)
 	}
-	if queued := testHarness.count("SELECT COUNT(*) FROM sync_queue WHERE design_id = ?", designID); queued != 1 {
+	if queued := testHarness.count("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND design_id = ?", designID); queued != 1 {
 		t.Errorf("%d job(s) queued, want 1", queued)
 	}
 }

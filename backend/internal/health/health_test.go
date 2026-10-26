@@ -28,7 +28,7 @@ func clocked() (*Registry, func(time.Duration)) {
 func TestUnregisteredLoopIsUnknown(t *testing.T) {
 	registry := New()
 
-	if _, present := registry.Get(DownloadWorker); present {
+	if _, present := registry.Get(QueueWorker); present {
 		t.Fatal("a loop that was never started reports a status")
 	}
 }
@@ -38,13 +38,13 @@ func TestUnregisteredLoopIsUnknown(t *testing.T) {
 func TestNilRegistryTolerated(t *testing.T) {
 	var registry *Registry
 
-	registry.Register(DownloadWorker, time.Second)
-	registry.Beat(DownloadWorker)
-	registry.Working(DownloadWorker)()
-	if _, present := registry.Get(DownloadWorker); present {
+	registry.Register(QueueWorker, time.Second)
+	registry.Beat(QueueWorker)
+	registry.Working(QueueWorker)()
+	if _, present := registry.Get(QueueWorker); present {
 		t.Fatal("the nil registry answered with a status")
 	}
-	if _, present := registry.Worst(DownloadWorker); present {
+	if _, present := registry.Worst(QueueWorker); present {
 		t.Fatal("the nil registry answered a Worst query")
 	}
 }
@@ -54,9 +54,9 @@ func TestNilRegistryTolerated(t *testing.T) {
 func TestRegisterCountsAsHeartbeat(t *testing.T) {
 	registry, _ := clocked()
 
-	registry.Register(SyncWorker, 5*time.Second)
+	registry.Register(QueueWorker, 5*time.Second)
 
-	status, present := registry.Get(SyncWorker)
+	status, present := registry.Get(QueueWorker)
 	if !present || status.Stale || status.Busy {
 		t.Fatalf("a freshly registered loop reports %+v", status)
 	}
@@ -67,17 +67,17 @@ func TestRegisterCountsAsHeartbeat(t *testing.T) {
 
 func TestLoopGoesStaleAndRecovers(t *testing.T) {
 	registry, advance := clocked()
-	registry.Register(SyncWorker, 5*time.Second)
+	registry.Register(QueueWorker, 5*time.Second)
 
 	// Below the tolerance floor nothing may happen - the fast loops tick every
 	// few seconds and a loaded container delays them.
 	advance(20 * time.Second)
-	if status, _ := registry.Get(SyncWorker); status.Stale {
+	if status, _ := registry.Get(QueueWorker); status.Stale {
 		t.Fatalf("20 s of silence already count as dead: %+v", status)
 	}
 
 	advance(time.Minute)
-	status, _ := registry.Get(SyncWorker)
+	status, _ := registry.Get(QueueWorker)
 	if !status.Stale {
 		t.Fatalf("80 s of silence do not count as dead: %+v", status)
 	}
@@ -85,8 +85,8 @@ func TestLoopGoesStaleAndRecovers(t *testing.T) {
 		t.Fatalf("the reported age is %s", status.Age)
 	}
 
-	registry.Beat(SyncWorker)
-	if status, _ := registry.Get(SyncWorker); status.Stale {
+	registry.Beat(QueueWorker)
+	if status, _ := registry.Get(QueueWorker); status.Stale {
 		t.Fatalf("the loop stays dead after a tick: %+v", status)
 	}
 }
@@ -95,12 +95,12 @@ func TestLoopGoesStaleAndRecovers(t *testing.T) {
 // tile would go red on every larger download.
 func TestBusyLoopIsNotStale(t *testing.T) {
 	registry, advance := clocked()
-	registry.Register(DownloadWorker, 2*time.Second)
+	registry.Register(QueueWorker, 2*time.Second)
 
-	endJob := registry.Working(DownloadWorker)
+	endJob := registry.Working(QueueWorker)
 	advance(9 * time.Minute)
 
-	status, _ := registry.Get(DownloadWorker)
+	status, _ := registry.Get(QueueWorker)
 	if !status.Busy || status.Stale {
 		t.Fatalf("a running job reports %+v", status)
 	}
@@ -111,7 +111,7 @@ func TestBusyLoopIsNotStale(t *testing.T) {
 	// The end of the job is a sign of life, so the loop must not be stale from
 	// the silence during it.
 	endJob()
-	if status, _ := registry.Get(DownloadWorker); status.Busy || status.Stale {
+	if status, _ := registry.Get(QueueWorker); status.Busy || status.Stale {
 		t.Fatalf("after the job the loop reports %+v", status)
 	}
 }
@@ -119,18 +119,18 @@ func TestBusyLoopIsNotStale(t *testing.T) {
 // Releasing twice must not end a second, still running job.
 func TestWorkingReleaseIsIdempotent(t *testing.T) {
 	registry, _ := clocked()
-	registry.Register(DownloadWorker, 2*time.Second)
+	registry.Register(QueueWorker, 2*time.Second)
 
-	first := registry.Working(DownloadWorker)
-	second := registry.Working(DownloadWorker)
+	first := registry.Working(QueueWorker)
+	second := registry.Working(QueueWorker)
 	first()
 	first()
 
-	if status, _ := registry.Get(DownloadWorker); !status.Busy {
+	if status, _ := registry.Get(QueueWorker); !status.Busy {
 		t.Fatalf("the second job was ended along with the first: %+v", status)
 	}
 	second()
-	if status, _ := registry.Get(DownloadWorker); status.Busy {
+	if status, _ := registry.Get(QueueWorker); status.Busy {
 		t.Fatalf("the loop stays busy after the last release: %+v", status)
 	}
 }

@@ -208,9 +208,13 @@ export interface QueueItem {
   design_name?: string
   source_url?: string
   platform?: string
-  status: 'pending' | 'downloading' | 'done' | 'failed'
+  /** An import brings a new design in; an update checks one already here. Both
+   *  wait in the same queue, since both fetch from the same platforms. */
+  kind?: 'import' | 'update'
+  status: 'pending' | 'running' | 'done' | 'failed'
   error_msg?: string
   retry_count: number
+  progress?: number
   current_step?: string | null
   step_current?: number | null
   step_total?: number | null

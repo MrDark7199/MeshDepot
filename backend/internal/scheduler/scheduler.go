@@ -1,5 +1,5 @@
 // Package scheduler watches the library_sync_force flag, triggers periodic
-// library syncs and enqueues due designs into the sync_queue.
+// library syncs and enqueues due designs into the job queue as update checks.
 package scheduler
 
 import (
@@ -8,8 +8,9 @@ import (
 	"time"
 
 	"meshdepot/internal/dbutil"
-
 	"meshdepot/internal/health"
+	"meshdepot/internal/jobqueue"
+	"meshdepot/internal/queuestate"
 	"meshdepot/internal/safego"
 )
 
@@ -124,30 +125,44 @@ func (scheduler *Scheduler) autoSyncEnqueue() int {
 		return 0
 	}
 	rows, failure := scheduler.DB.Query(`
-		SELECT d.id, d.user_id FROM designs d
+		SELECT d.id, d.user_id, COALESCE(d.source_platform, '') FROM designs d
 		LEFT JOIN notification_prefs np ON np.user_id = d.user_id
 		WHERE d.source_url IS NOT NULL AND d.source_url != ''
 		  AND (np.user_id IS NULL OR np.sync_min_age_days IS NOT NULL)
 		  AND (d.last_synced_at IS NULL
 		       OR d.last_synced_at < datetime('now', '-' || MAX(COALESCE(np.sync_min_age_days, 0), ?) || ' days'))
-		  AND NOT EXISTS (SELECT 1 FROM sync_queue sq WHERE sq.design_id = d.id AND sq.status IN ('pending','running'))
+		  AND NOT EXISTS (SELECT 1 FROM job_queue jq WHERE jq.kind = 'update' AND jq.design_id = d.id
+		                  AND jq.status IN ('pending','running'))
 		ORDER BY d.last_synced_at IS NOT NULL, d.last_synced_at ASC
 		LIMIT ?`, minDays, autoSyncBatch)
 	if failure != nil {
 		return 0
 	}
-	type syncJob struct{ designID, userID int }
-	var jobs []syncJob
+	type dueDesign struct {
+		designID, userID int
+		platform         string
+	}
+	var due []dueDesign
 	for rows.Next() {
-		var job syncJob
-		if rows.Scan(&job.designID, &job.userID) == nil {
-			jobs = append(jobs, job)
+		var design dueDesign
+		if rows.Scan(&design.designID, &design.userID, &design.platform) == nil {
+			due = append(due, design)
 		}
 	}
+	// Closed before the checks below: with a single connection, a query while the
+	// rows are still open waits for ever.
 	rows.Close()
+
 	queued := 0
-	for _, job := range jobs {
-		if _, failure := scheduler.DB.Exec("INSERT INTO sync_queue (design_id, user_id, status) VALUES (?, ?, 'pending')", job.designID, job.userID); failure == nil {
+	now := time.Now()
+	for _, design := range due {
+		// A platform that is paused or has turned the server away is left out of
+		// this round. Its designs stay due and come back once it is free, instead
+		// of piling up as checks nobody may run.
+		if design.platform != "" && queuestate.Suspended(scheduler.DB, design.platform, now) {
+			continue
+		}
+		if added, failure := jobqueue.EnqueueUpdate(scheduler.DB, design.userID, design.designID, true); failure == nil && added {
 			queued++
 		}
 	}

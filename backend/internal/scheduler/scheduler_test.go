@@ -4,9 +4,11 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"meshdepot/internal/db"
 	"meshdepot/internal/publicid"
+	"meshdepot/internal/queuestate"
 )
 
 func newDB(t *testing.T) *sql.DB {
@@ -52,9 +54,9 @@ func TestAutoSyncEnqueue(t *testing.T) {
 		t.Fatalf("expected 0 on 2nd run, got %d", enqueued)
 	}
 	var count int
-	database.QueryRow("SELECT COUNT(*) FROM sync_queue").Scan(&count)
+	database.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'update'").Scan(&count)
 	if count != 1 {
-		t.Fatalf("sync_queue should have 1 row, has %d", count)
+		t.Fatalf("the queue should hold 1 update check, holds %d", count)
 	}
 }
 
@@ -88,7 +90,7 @@ func insertSyncable(t *testing.T, database *sql.DB, userID int, name string, day
 // queuedDesignNames returns the names of all designs sitting in the sync queue.
 func queuedDesignNames(t *testing.T, database *sql.DB) []string {
 	t.Helper()
-	rows, failure := database.Query("SELECT d.name FROM sync_queue sq JOIN designs d ON d.id = sq.design_id ORDER BY d.name")
+	rows, failure := database.Query("SELECT d.name FROM job_queue sq JOIN designs d ON d.id = sq.design_id WHERE sq.kind = 'update' ORDER BY d.name")
 	if failure != nil {
 		t.Fatal(failure)
 	}
@@ -188,5 +190,27 @@ func TestAutoSyncEnqueueStopsWhileUpdatesAreDisabled(t *testing.T) {
 
 	if enqueued := scheduler.autoSyncEnqueue(); enqueued != 0 {
 		t.Fatalf("the server switch is off, got %d queued", enqueued)
+	}
+}
+
+// A platform that turned the server away is left out of the round: its designs
+// stay due and come back once it is free, rather than piling up as checks the
+// worker may not run. And what the scheduler does queue is marked as its own,
+// so anything a person asks for overtakes it.
+func TestAutoSyncLeavesAPausedPlatformAlone(t *testing.T) {
+	database := newDB(t)
+	scheduler := New(database, nil)
+	database.Exec("INSERT INTO designs (user_id, public_id, name, source_url, source_platform) VALUES (1,?,'Helm','https://makerworld.com/m/1','makerworld')", publicid.New())
+	database.Exec("INSERT INTO designs (user_id, public_id, name, source_url, source_platform) VALUES (1,?,'Halter','https://printables.com/m/2','printables')", publicid.New())
+	queuestate.Block(database, "makerworld", time.Now().Add(time.Hour), "captcha", time.Now())
+
+	if enqueued := scheduler.autoSyncEnqueue(); enqueued != 1 {
+		t.Fatalf("expected only the printables design, %d were queued", enqueued)
+	}
+	var platform string
+	var automatic int
+	database.QueryRow("SELECT platform, automatic FROM job_queue WHERE kind = 'update'").Scan(&platform, &automatic)
+	if platform != "printables" || automatic != 1 {
+		t.Fatalf("the check went to %q, marked automatic=%d", platform, automatic)
 	}
 }

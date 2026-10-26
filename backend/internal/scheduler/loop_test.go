@@ -83,9 +83,9 @@ func TestAutoSyncEnqueueStopsAtTheBatchLimit(t *testing.T) {
 	}
 
 	var queued int
-	database.QueryRow("SELECT COUNT(*) FROM sync_queue").Scan(&queued)
+	database.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'update'").Scan(&queued)
 	if queued != autoSyncBatch {
-		t.Fatalf("sync_queue holds %d rows", queued)
+		t.Fatalf("the queue holds %d update checks", queued)
 	}
 }
 
@@ -103,7 +103,7 @@ func TestAutoSyncEnqueueSkipsRecentlySyncedDesigns(t *testing.T) {
 	}
 
 	var designID int
-	database.QueryRow("SELECT design_id FROM sync_queue").Scan(&designID)
+	database.QueryRow("SELECT design_id FROM job_queue WHERE kind = 'update'").Scan(&designID)
 	if designID != overdue {
 		t.Fatalf("the wrong design was enqueued: %d", designID)
 	}
@@ -114,7 +114,7 @@ func TestAutoSyncEnqueueSkipsRunningJobs(t *testing.T) {
 	database := newDB(t)
 	scheduler := New(database, nil)
 	designID := insertSyncableDesign(t, database, "running")
-	database.Exec("INSERT INTO sync_queue (design_id, user_id, status) VALUES (?, 1, 'running')", designID)
+	database.Exec("INSERT INTO job_queue (kind, design_id, user_id, source_url, platform, status) VALUES ('update', ?, 1, 'https://example.test/m', 'manual', 'running')", designID)
 
 	if enqueued := scheduler.autoSyncEnqueue(); enqueued != 0 {
 		t.Fatalf("a running design was enqueued again: %d", enqueued)
@@ -126,7 +126,7 @@ func TestAutoSyncEnqueueRequeuesAfterAFinishedJob(t *testing.T) {
 	database := newDB(t)
 	scheduler := New(database, nil)
 	designID := insertSyncableDesign(t, database, "done")
-	database.Exec("INSERT INTO sync_queue (design_id, user_id, status) VALUES (?, 1, 'done')", designID)
+	database.Exec("INSERT INTO job_queue (kind, design_id, user_id, source_url, platform, status) VALUES ('update', ?, 1, 'https://example.test/m', 'manual', 'done')", designID)
 
 	if enqueued := scheduler.autoSyncEnqueue(); enqueued != 1 {
 		t.Fatalf("expected 1 enqueued, got %d", enqueued)
@@ -145,7 +145,7 @@ func TestAutoSyncEnqueuePrefersNeverSyncedDesigns(t *testing.T) {
 	scheduler.autoSyncEnqueue()
 
 	var firstDesignID int
-	database.QueryRow("SELECT design_id FROM sync_queue ORDER BY id ASC LIMIT 1").Scan(&firstDesignID)
+	database.QueryRow("SELECT design_id FROM job_queue WHERE kind = 'update' ORDER BY id ASC LIMIT 1").Scan(&firstDesignID)
 	if firstDesignID != neverSynced {
 		t.Fatalf("the never-synced design is not first: %d", firstDesignID)
 	}
@@ -292,7 +292,7 @@ func TestStartWithoutALibrarySync(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var queued int
-		database.QueryRow("SELECT COUNT(*) FROM sync_queue").Scan(&queued)
+		database.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'update'").Scan(&queued)
 		if queued == 1 {
 			return
 		}

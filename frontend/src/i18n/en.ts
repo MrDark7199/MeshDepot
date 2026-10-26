@@ -231,7 +231,7 @@ export default {
   slicer_orca: 'OrcaSlicer',
   slicer_prusa: 'PrusaSlicer',
 
-  queue_title: 'Download Queue',
+  queue_title: 'Queue',
   btn_retry: 'Retry',
 
   collection_title: 'Collections',
@@ -319,6 +319,8 @@ export default {
   download_status_paused:      'Queue paused',
   download_try:                'Try',
   download_status_downloading: 'Downloading…',
+  queue_kind_update:        'Update',
+  queue_status_updating:    'Checking for updates…',
   download_status_failed:      'Failed',
   download_retry:              'Retry',
   download_retry_all:          'Retry all',

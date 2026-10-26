@@ -316,30 +316,31 @@ func (server *Server) AdminHealth(responseWriter http.ResponseWriter, request *h
 		"vars": map[string]any{"free": fmtBytes(free), "total": fmtBytes(total), "pct": percent},
 	}
 
-	// 2) Download worker - queue depth from the table, liveness from the loop's own
+	// 2) Downloads - queue depth from the table, liveness from the loop's own
 	// heartbeat. A dead loop and an empty queue read identically otherwise.
 	var downloadPending, downloadFailed int
-	server.DB.QueryRow("SELECT COUNT(*) FROM download_queue WHERE status IN ('pending','downloading')").Scan(&downloadPending)
-	server.DB.QueryRow("SELECT COUNT(*) FROM download_queue WHERE status='failed'").Scan(&downloadFailed)
+	server.DB.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND status IN ('pending','running')").Scan(&downloadPending)
+	server.DB.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'import' AND status='failed'").Scan(&downloadFailed)
 	downloadStatus := "ok"
 	if downloadFailed > 0 {
 		downloadStatus = "warn"
 	}
-	downloadBeat, downloadRunning := server.Health.Get(health.DownloadWorker)
+	downloadBeat, downloadRunning := server.Health.Get(health.QueueWorker)
 	checks["download_worker"] = loopCheck(loopReport{
 		labelKey: "health_download_label", okKey: "health_download_ok", busyKey: "health_download_busy",
 		okStatus: downloadStatus, vars: map[string]any{"pending": downloadPending, "failed": downloadFailed},
 		status: downloadBeat, running: downloadRunning,
 	})
 
-	// 3) Sync worker - same, plus a warning once the queue piles up.
+	// 3) Update checks - the same loop runs them, so its heartbeat is the one to
+	// read; the tile stays apart because a backlog of checks is its own warning.
 	var syncPending int
-	server.DB.QueryRow("SELECT COUNT(*) FROM sync_queue WHERE status IN ('pending','running')").Scan(&syncPending)
+	server.DB.QueryRow("SELECT COUNT(*) FROM job_queue WHERE kind = 'update' AND status IN ('pending','running')").Scan(&syncPending)
 	syncStatus, syncKey := "ok", "health_sync_ok"
 	if syncPending >= syncBacklogWarn {
 		syncStatus, syncKey = "warn", "health_sync_backlog"
 	}
-	syncBeat, syncRunning := server.Health.Get(health.SyncWorker)
+	syncBeat, syncRunning := server.Health.Get(health.QueueWorker)
 	checks["sync_worker"] = loopCheck(loopReport{
 		labelKey: "health_sync_label", okKey: syncKey, busyKey: "health_sync_busy",
 		okStatus: syncStatus, vars: map[string]any{"pending": syncPending},

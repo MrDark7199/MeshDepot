@@ -20,26 +20,73 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"meshdepot/internal/logx"
 )
 
 const printablesGraphQL = "https://api.printables.com/graphql/"
 
 // graphQL tries directly first and retries via Tor with a route change when the
 // answer is unusable - a rate limit on the server IP, a non-200, or no "data"
-// field - so a temporary block does not abort the download.
+// field - so a temporary block does not abort the download. Every unusable
+// answer goes to the log with its status and the start of its body, because
+// the error the user sees cannot say what Printables actually answered.
 func (printables Printables) graphQL(body string, headers map[string]string) []byte {
 	response, status := directPost(printablesGraphQL, body, headers)
-	if status == 200 && bytes.Contains(response, []byte(`"data"`)) {
+	if usableGraphQLAnswer(response, status) {
 		return response
 	}
-	for attempt := 0; attempt < 2 && printables.Tor != nil; attempt++ {
+	logUnusableGraphQLAnswer("direct", body, headers, response, status)
+	for attempt := 1; attempt <= 2 && printables.Tor != nil; attempt++ {
 		_ = printables.Tor.NewCircuit()
-		if torResponse, torStatus := printables.torPost(printablesGraphQL, body, headers); torStatus == 200 && bytes.Contains(torResponse, []byte(`"data"`)) {
+		torResponse, torStatus := printables.torPost(printablesGraphQL, body, headers)
+		if usableGraphQLAnswer(torResponse, torStatus) {
 			return torResponse
 		}
+		logUnusableGraphQLAnswer(fmt.Sprintf("tor attempt %d/2", attempt), body, headers, torResponse, torStatus)
 		time.Sleep(time.Second)
 	}
 	return response
+}
+
+func usableGraphQLAnswer(response []byte, status int) bool {
+	return status == 200 && bytes.Contains(response, []byte(`"data"`))
+}
+
+const graphQLLogSnippetLength = 300
+
+// logUnusableGraphQLAnswer names whether a token was sent but never the token.
+func logUnusableGraphQLAnswer(route, query string, headers map[string]string, response []byte, status int) {
+	statusText := fmt.Sprintf("HTTP %d", status)
+	if status == 0 {
+		statusText = "no answer (connection failed or timed out)"
+	}
+	_, withToken := headers["Authorization"]
+	logx.Warnf("[printables] GraphQL %s: %s, with token: %t, query: %s, answer: %s",
+		route, statusText, withToken, logSnippet([]byte(query)), logSnippet(response))
+}
+
+// logModelWithoutData covers the answers graphQL lets through - HTTP 200 with
+// a "data" field - that still carry no model, such as {"data":{"print":null}}.
+func logModelWithoutData(modelID string, withToken bool, response []byte, parseFailure error) {
+	parseText := "none"
+	if parseFailure != nil {
+		parseText = parseFailure.Error()
+	}
+	logx.Warnf("[printables] model %s: answer without model data, with token: %t, parse error: %s, answer: %s",
+		modelID, withToken, parseText, logSnippet(response))
+}
+
+func logSnippet(raw []byte) string {
+	text := strings.Join(strings.Fields(string(raw)), " ")
+	if text == "" {
+		return "(empty)"
+	}
+	characters := []rune(text)
+	if len(characters) > graphQLLogSnippetLength {
+		return string(characters[:graphQLLogSnippetLength]) + "…"
+	}
+	return text
 }
 
 const printablesUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -107,7 +154,7 @@ func (printables Printables) Download(sourceURL string, owner Owner, progress fu
 		} `json:"data"`
 		Errors json.RawMessage `json:"errors"`
 	}
-	_ = json.Unmarshal(rawResp, &meta)
+	parseFailure := json.Unmarshal(rawResp, &meta)
 	// Printables often revokes access tokens earlier than their JWT exp claim says,
 	// answering 401 without data. Fetch a fresh token and try once more.
 	if meta.Data.Print == nil && bearer != "" {
@@ -116,10 +163,11 @@ func (printables Printables) Download(sourceURL string, owner Owner, progress fu
 			baseHeaders["Authorization"] = "Bearer " + newToken
 			rawResp = printables.graphQL(string(metaBody), baseHeaders)
 			meta.Data.Print = nil
-			_ = json.Unmarshal(rawResp, &meta)
+			parseFailure = json.Unmarshal(rawResp, &meta)
 		}
 	}
 	if meta.Data.Print == nil {
+		logModelWithoutData(modelID, bearer != "", rawResp, parseFailure)
 		detail := string(meta.Errors)
 		if detail == "" {
 			detail = "no data"

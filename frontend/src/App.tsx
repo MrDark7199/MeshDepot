@@ -179,7 +179,8 @@ function MainApp() {
   // clears the queue entry (e.g. navigating back while a download finishes).
   const visibleDownloadJobs = createMemo(() => {
     const loaded = new Set(designs().map(d => d.source_url).filter(Boolean))
-    return downloads.jobs.filter(job => !job.source_url || !loaded.has(job.source_url))
+    // An update's design is already on the grid; only an import needs a stand-in.
+    return downloads.jobs.filter(job => job.kind !== 'update' && (!job.source_url || !loaded.has(job.source_url)))
   })
 
   let toastTimer: ReturnType<typeof setTimeout>

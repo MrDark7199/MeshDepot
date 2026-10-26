@@ -1,6 +1,8 @@
 package platforms
 
 import (
+	"bytes"
+	"log"
 	"net/http"
 	"strings"
 	"testing"
@@ -79,5 +81,65 @@ func TestTokenExpired(t *testing.T) {
 	}
 	if tokenExpired("garbage") {
 		t.Error("unparseable timestamp should be treated as not expired")
+	}
+}
+
+func TestUnusableGraphQLAnswerIsLoggedWithoutTheToken(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+
+	headers := map[string]string{"Authorization": "Bearer secret-token-value"}
+	logUnusableGraphQLAnswer("direct", `{"query":"{ print(id: 1) { name } }"}`, headers,
+		[]byte("<html>\n  <title>Just a moment...</title>\n</html>"), 403)
+
+	line := output.String()
+	for _, expected := range []string{"HTTP 403", "with token: true", "print(id: 1)", "<html> <title>Just a moment...</title> </html>"} {
+		if !strings.Contains(line, expected) {
+			t.Errorf("log line misses %q: %s", expected, line)
+		}
+	}
+	if strings.Contains(line, "secret-token-value") {
+		t.Errorf("log line contains the token: %s", line)
+	}
+}
+
+func TestFailedConnectionIsLoggedAsNoAnswer(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+
+	logUnusableGraphQLAnswer("tor attempt 1/2", "{}", map[string]string{}, nil, 0)
+
+	line := output.String()
+	for _, expected := range []string{"tor attempt 1/2", "no answer", "with token: false", "answer: (empty)"} {
+		if !strings.Contains(line, expected) {
+			t.Errorf("log line misses %q: %s", expected, line)
+		}
+	}
+}
+
+func TestLogSnippetCutsLongAnswersWithoutBreakingCharacters(t *testing.T) {
+	snippet := logSnippet([]byte(strings.Repeat("ä", graphQLLogSnippetLength+50)))
+	if snippet != strings.Repeat("ä", graphQLLogSnippetLength)+"…" {
+		t.Errorf("unexpected snippet: %q", snippet)
+	}
+}
+
+func TestModelWithoutDataIsLoggedWithTheAnswer(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+
+	logModelWithoutData("1861126", true, []byte(`{"data":{"print":null}}`), nil)
+
+	line := output.String()
+	for _, expected := range []string{"model 1861126", "with token: true", "parse error: none", `{"data":{"print":null}}`} {
+		if !strings.Contains(line, expected) {
+			t.Errorf("log line misses %q: %s", expected, line)
+		}
 	}
 }

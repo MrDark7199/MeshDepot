@@ -12,7 +12,7 @@ export function QueuePanel(props: {queue: QueueItem[]; onClose: () => void; onCa
     <Show when={props.queue.length > 0}>
       <div style={{ position:'fixed', bottom:'26px', right:'26px', 'z-index':'200', background:'var(--bg2)', border:'1px solid var(--border)', 'border-radius':'18px', padding:'18px', width:'380px', 'box-shadow':'0 8px 30px rgba(0,0,0,0.3)', 'max-height':'70vh', overflow:'auto' }}>
         <div style={{ display:'flex', 'align-items':'center', 'justify-content':'space-between', gap:'10px', 'margin-bottom':'13px' }}>
-          <span style={{ 'font-family':"'DM Sans',sans-serif", 'font-weight':'700', 'font-size':'15px', color:'var(--text)' }}>Download Queue</span>
+          <span style={{ 'font-family':"'DM Sans',sans-serif", 'font-weight':'700', 'font-size':'15px', color:'var(--text)' }}>{translate('queue_title')}</span>
           <Show when={failedCount() > 1}>
             <button onClick={props.onRetryAll}
               style={{ 'flex-shrink':'0', background:'var(--accent)', color:'#fff', border:'none', 'border-radius':'7px', padding:'5px 11px', 'font-size':'12px', 'font-weight':'600', cursor:'pointer', 'font-family':"'DM Sans',sans-serif" }}>
@@ -25,7 +25,18 @@ export function QueuePanel(props: {queue: QueueItem[]; onClose: () => void; onCa
             <div style={{ background:item.status==='failed'?'rgba(239,68,68,0.08)':'var(--bg3)', 'border-radius':'10px', padding:'11px 13px', border:item.status==='failed'?'1px solid rgba(239,68,68,0.3)':'1px solid transparent' }}>
               <div style={{ display:'flex', 'align-items':'center', 'justify-content':'space-between' }}>
                 <div style={{ 'min-width':'0', flex:'1' }}>
-                  <div style={{ 'font-family':"'DM Sans',sans-serif", 'font-size':'13px', color:'var(--text2)', 'font-weight':'500', overflow:'hidden', 'text-overflow':'ellipsis', 'white-space':'nowrap' }}>
+                  <div style={{ display:'flex', 'align-items':'center', gap:'7px', 'font-family':"'DM Sans',sans-serif", 'font-size':'13px', color:'var(--text2)', 'font-weight':'500', overflow:'hidden', 'text-overflow':'ellipsis', 'white-space':'nowrap' }}>
+                    {/* An update concerns a design already in the library, so it is
+                        named after it; an import has only its address so far. */}
+                    <Show when={item.kind === 'update'}>
+                      <span style={{ 'flex-shrink':'0', 'font-family':"'DM Mono',monospace", 'font-size':'10px', 'font-weight':'700', color:'var(--accent-light)', background:'rgba(69,123,157,0.18)', 'border-radius':'5px', padding:'1px 6px', 'text-transform':'uppercase', 'letter-spacing':'0.04em' }}>
+                        {translate('queue_kind_update')}
+                      </span>
+                    </Show>
+                    <Show when={item.kind === 'update' && item.design_name}>
+                      <span style={{ overflow:'hidden', 'text-overflow':'ellipsis' }}>{item.design_name}</span>
+                    </Show>
+                    <Show when={item.kind !== 'update' || !item.design_name}>
                     <Show when={item.source_url} fallback={<span>-</span>}>
                       <a href={item.source_url} target="_blank" rel="noopener noreferrer"
                         style={{ color:'inherit', 'text-decoration':'none' }}
@@ -34,14 +45,15 @@ export function QueuePanel(props: {queue: QueueItem[]; onClose: () => void; onCa
                         {item.source_url?.replace(/^https?:\/\/(www\.)?/, '').slice(0, 50) || '-'}
                       </a>
                     </Show>
+                    </Show>
                   </div>
-                  <div style={{ 'font-family':"'DM Mono',monospace", 'font-size':'11px', color:item.status==='failed'?'var(--danger)':item.status==='downloading'?'var(--accent-light)':'var(--muted)', 'margin-top':'2px' }}>
+                  <div style={{ 'font-family':"'DM Mono',monospace", 'font-size':'11px', color:item.status==='failed'?'var(--danger)':item.status==='running'?'var(--accent-light)':'var(--muted)', 'margin-top':'2px' }}>
                     {item.status === 'failed'
                       ? translate('download_status_failed')
-                      : item.status === 'downloading'
+                      : item.status === 'running'
                         ? (() => {
                             const step = item.current_step
-                            if (!step) return translate('download_status_downloading')
+                            if (!step) return translate(item.kind === 'update' ? 'queue_status_updating' : 'download_status_downloading')
                             const label = translate(`download_step_${step}` as any)
                             return item.step_current != null && item.step_total != null && (item.step_total as number) > 0
                               ? `${label} (${item.step_current}/${item.step_total})`
@@ -50,13 +62,13 @@ export function QueuePanel(props: {queue: QueueItem[]; onClose: () => void; onCa
                         : queueLabel(item, translate)}
                   </div>
                 </div>
-                <Show when={item.status === 'pending' || item.status === 'downloading'}>
+                <Show when={item.status === 'pending' || item.status === 'running'}>
                   <div style={{ display:'flex', 'align-items':'center', gap:'8px', 'flex-shrink':'0', 'margin-left':'11px' }}>
                     <div style={{ width:'17px', height:'17px', border:'2px solid var(--border)', 'border-top':'2px solid var(--accent)', 'border-radius':'50%', 'animation':'spin 0.8s linear infinite' }} />
                     <button onClick={() => props.onCancel(item.id)}
                       title={translate('download_cancel')}
-                      style={{ width:'22px', height:'22px', background:'var(--bg2)', border:'1px solid var(--border)', 'border-radius':'50%', color:'var(--muted)', 'font-size':'14px', cursor:'pointer', display:'flex', 'align-items':'center', 'justify-content':'center', 'line-height':'1', 'flex-shrink':'0' }}>
-                      ×
+                      style={{ width:'22px', height:'22px', background:'var(--danger-bg)', border:'1px solid var(--danger-border)', 'border-radius':'7px', color:'var(--danger)', 'font-size':'13px', cursor:'pointer', display:'flex', 'align-items':'center', 'justify-content':'center', 'line-height':'1', 'flex-shrink':'0' }}>
+                      ✕
                     </button>
                   </div>
                 </Show>

@@ -169,7 +169,9 @@ components:
         design_id:   { type: string, nullable: true, description: Public id of the design, once it exists }
         source_url:  { type: string }
         platform:    { type: string }
-        status:      { type: string, enum: [pending, downloading, done, failed] }
+        kind:        { type: string, enum: [import, update], description: import downloads a new design, update checks an existing one for changes }
+        status:      { type: string, enum: [pending, running, done, failed] }
+        progress:    { type: integer, description: Percent done while running }
         error_msg:   { type: string, nullable: true }
         done_at:     { type: string, format: date-time, nullable: true }
         design_name: { type: string, nullable: true }
@@ -1676,7 +1678,7 @@ paths:
               schema: { $ref: '#/components/schemas/QueueEntry' }
     delete:
       tags: [Downloads]
-      summary: Cancel pending/downloading entry
+      summary: Cancel pending/running entry
       responses:
         '200':
           description: Cancelled

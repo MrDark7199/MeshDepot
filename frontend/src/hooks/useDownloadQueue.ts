@@ -19,7 +19,7 @@ const DOWNLOAD_POLL_MS = 2500
  */
 const IDLE_WATCH_MS = 15000
 
-const isActive = (job: DownloadJob) => job.status === 'pending' || job.status === 'downloading'
+const isActive = (job: DownloadJob) => job.status === 'pending' || job.status === 'running'
 const isVisible = (job: DownloadJob) => isActive(job) || job.status === 'failed'
 
 export interface DownloadQueueDeps {

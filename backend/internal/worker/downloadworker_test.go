@@ -40,12 +40,12 @@ func TestSoftRateLimitKeepsJobPendingWithoutBurningRetries(t *testing.T) {
 	database := newTestDB(t)
 	id := enqueue(t, database, "makerworld")
 
-	downloadWorker := NewDownloadWorker(database, func(Job) (int, error) {
+	queueWorker := NewQueueWorker(database, func(Job) (int, error) {
 		return 0, errors.New("error.makerworld_captcha")
 	}, func(string) int { return 0 })
 
 	for round := 0; round < MaxRetries+2; round++ {
-		downloadWorker.RunOnce()
+		queueWorker.RunOnce()
 		status, retry, _ := statusOf(t, database, id)
 		if status != "pending" {
 			t.Fatalf("round %d: the job is %s", round+1, status)
@@ -56,7 +56,7 @@ func TestSoftRateLimitKeepsJobPendingWithoutBurningRetries(t *testing.T) {
 	}
 
 	var errorMessage string
-	database.QueryRow("SELECT error_msg FROM download_queue WHERE id = ?", id).Scan(&errorMessage)
+	database.QueryRow("SELECT error_msg FROM job_queue WHERE id = ?", id).Scan(&errorMessage)
 	if errorMessage != "error.makerworld_captcha" {
 		t.Fatalf("unexpected error message %q", errorMessage)
 	}
@@ -68,17 +68,17 @@ func TestPanickingProcessBecomesRetryableFailure(t *testing.T) {
 	database := newTestDB(t)
 	id := enqueue(t, database, "printables")
 
-	downloadWorker := NewDownloadWorker(database, func(Job) (int, error) {
+	queueWorker := NewQueueWorker(database, func(Job) (int, error) {
 		panic("unexpected platform response")
 	}, func(string) int { return 0 })
-	downloadWorker.RunOnce()
+	queueWorker.RunOnce()
 
 	status, retry, _ := statusOf(t, database, id)
 	if status != "pending" || retry != 1 {
 		t.Fatalf("expected pending/retry=1, got %s/%d", status, retry)
 	}
 	var errorMessage string
-	database.QueryRow("SELECT error_msg FROM download_queue WHERE id = ?", id).Scan(&errorMessage)
+	database.QueryRow("SELECT error_msg FROM job_queue WHERE id = ?", id).Scan(&errorMessage)
 	if errorMessage != errDownloadPanicked.Error() {
 		t.Fatalf("unexpected error message %q", errorMessage)
 	}
@@ -88,7 +88,7 @@ func TestPanickingProcessBecomesRetryableFailure(t *testing.T) {
 // through the same error interface.
 func TestLogFailureHandlesEveryStage(t *testing.T) {
 	database := newTestDB(t)
-	downloadWorker := NewDownloadWorker(database, func(Job) (int, error) { return 0, nil }, func(string) int { return 0 })
+	queueWorker := NewQueueWorker(database, func(Job) (int, error) { return 0, nil }, func(string) int { return 0 })
 	job := Job{ID: 1, Platform: "printables", SourceURL: "https://example.org/model/1"}
 
 	for _, failure := range []error{
@@ -96,8 +96,8 @@ func TestLogFailureHandlesEveryStage(t *testing.T) {
 		platforms.FilesError("error.printables_no_files"),
 		errors.New("network boom"),
 	} {
-		downloadWorker.logFailure(job, failure, false)
-		downloadWorker.logFailure(job, failure, true)
+		queueWorker.logFailure(job, failure, false)
+		queueWorker.logFailure(job, failure, true)
 	}
 }
 
@@ -107,10 +107,10 @@ func TestTypedDownloadErrorKeepsPermanenceClassification(t *testing.T) {
 	database := newTestDB(t)
 	id := enqueue(t, database, "printables")
 
-	downloadWorker := NewDownloadWorker(database, func(Job) (int, error) {
+	queueWorker := NewQueueWorker(database, func(Job) (int, error) {
 		return 0, platforms.FilesError("error.printables_no_files")
 	}, func(string) int { return 0 })
-	downloadWorker.RunOnce()
+	queueWorker.RunOnce()
 
 	status, retry, _ := statusOf(t, database, id)
 	if status != "failed" {
@@ -125,11 +125,11 @@ func TestRunOnceWithEmptyQueueDoesNothing(t *testing.T) {
 	database := newTestDB(t)
 	called := false
 
-	downloadWorker := NewDownloadWorker(database, func(Job) (int, error) {
+	queueWorker := NewQueueWorker(database, func(Job) (int, error) {
 		called = true
 		return 0, nil
 	}, func(string) int { return 0 })
-	downloadWorker.RunOnce()
+	queueWorker.RunOnce()
 
 	if called {
 		t.Fatal("Process ran although the queue was empty")
@@ -139,13 +139,13 @@ func TestRunOnceWithEmptyQueueDoesNothing(t *testing.T) {
 func TestClaimNextHandsOverTheWholeJob(t *testing.T) {
 	database := newTestDB(t)
 	if _, failure := database.Exec(
-		"INSERT INTO download_queue (user_id, source_url, platform, status, retry_count) VALUES (1, 'https://example.org/model/1', 'cults3d', 'pending', 2)",
+		"INSERT INTO job_queue (user_id, source_url, platform, status, retry_count) VALUES (1, 'https://example.org/model/1', 'cults3d', 'pending', 2)",
 	); failure != nil {
 		t.Fatalf("insert job: %v", failure)
 	}
 
-	downloadWorker := NewDownloadWorker(database, func(Job) (int, error) { return 0, nil }, func(string) int { return 0 })
-	job, ok := downloadWorker.claimNext()
+	queueWorker := NewQueueWorker(database, func(Job) (int, error) { return 0, nil }, func(string) int { return 0 })
+	job, ok := queueWorker.claimNext()
 	if !ok {
 		t.Fatal("no job was claimed")
 	}
@@ -156,7 +156,7 @@ func TestClaimNextHandsOverTheWholeJob(t *testing.T) {
 		t.Fatalf("user or retry count was lost: %+v", job)
 	}
 
-	if _, ok := downloadWorker.claimNext(); ok {
+	if _, ok := queueWorker.claimNext(); ok {
 		t.Fatal("the same job was claimed twice")
 	}
 }
@@ -165,8 +165,8 @@ func TestClaimNextOnBrokenDatabase(t *testing.T) {
 	database := newTestDB(t)
 	database.Close()
 
-	downloadWorker := NewDownloadWorker(database, func(Job) (int, error) { return 0, nil }, func(string) int { return 0 })
-	if _, ok := downloadWorker.claimNext(); ok {
+	queueWorker := NewQueueWorker(database, func(Job) (int, error) { return 0, nil }, func(string) int { return 0 })
+	if _, ok := queueWorker.claimNext(); ok {
 		t.Fatal("a closed database reported a claimed job")
 	}
 }
@@ -177,14 +177,14 @@ func TestCooldownIsPerPlatform(t *testing.T) {
 	blocked := enqueue(t, database, "makerworld")
 	other := enqueue(t, database, "printables")
 
-	downloadWorker := NewDownloadWorker(database, func(Job) (int, error) { return 1, nil }, func(platform string) int {
+	queueWorker := NewQueueWorker(database, func(Job) (int, error) { return 1, nil }, func(platform string) int {
 		if platform == "makerworld" {
 			return 30
 		}
 		return 0
 	})
-	downloadWorker.RunOnce()
-	downloadWorker.RunOnce()
+	queueWorker.RunOnce()
+	queueWorker.RunOnce()
 
 	if status, _, _ := statusOf(t, database, blocked); status != "done" {
 		t.Fatalf("the first job is %s", status)
@@ -197,13 +197,13 @@ func TestCooldownIsPerPlatform(t *testing.T) {
 func TestMarkCooldownIgnoresZeroAndMissingConfiguration(t *testing.T) {
 	database := newTestDB(t)
 
-	withoutConfiguration := NewDownloadWorker(database, nil, nil)
+	withoutConfiguration := NewQueueWorker(database, nil, nil)
 	withoutConfiguration.markCooldown("printables")
 	if withoutConfiguration.onCooldown("printables") {
 		t.Fatal("a platform is blocked although no cooldown is configured")
 	}
 
-	withZero := NewDownloadWorker(database, nil, func(string) int { return 0 })
+	withZero := NewQueueWorker(database, nil, func(string) int { return 0 })
 	withZero.markCooldown("printables")
 	if withZero.onCooldown("printables") {
 		t.Fatal("a cooldown of 0 seconds blocks the platform")
@@ -212,18 +212,18 @@ func TestMarkCooldownIgnoresZeroAndMissingConfiguration(t *testing.T) {
 
 func TestOnCooldownExpires(t *testing.T) {
 	database := newTestDB(t)
-	downloadWorker := NewDownloadWorker(database, nil, func(string) int { return 1 })
+	queueWorker := NewQueueWorker(database, nil, func(string) int { return 1 })
 
-	downloadWorker.markCooldown("printables")
-	if !downloadWorker.onCooldown("printables") {
+	queueWorker.markCooldown("printables")
+	if !queueWorker.onCooldown("printables") {
 		t.Fatal("the cooldown is not active right after it was set")
 	}
 
-	downloadWorker.mutex.Lock()
-	downloadWorker.cooldowns["printables"] = time.Now().Add(-time.Second)
-	downloadWorker.mutex.Unlock()
+	queueWorker.mutex.Lock()
+	queueWorker.cooldowns["printables"] = time.Now().Add(-time.Second)
+	queueWorker.mutex.Unlock()
 
-	if downloadWorker.onCooldown("printables") {
+	if queueWorker.onCooldown("printables") {
 		t.Fatal("an expired cooldown still blocks")
 	}
 }
@@ -231,14 +231,14 @@ func TestOnCooldownExpires(t *testing.T) {
 func TestResetStuckLeavesRunningJobsAlone(t *testing.T) {
 	database := newTestDB(t)
 	result, _ := database.Exec(
-		"INSERT INTO download_queue (user_id, source_url, platform, status, started_at, retry_count) VALUES (1, 'u', 'printables', 'downloading', CURRENT_TIMESTAMP, 0)",
+		"INSERT INTO job_queue (user_id, source_url, platform, status, started_at, retry_count) VALUES (1, 'u', 'printables', 'running', CURRENT_TIMESTAMP, 0)",
 	)
 	id, _ := result.LastInsertId()
 
-	downloadWorker := NewDownloadWorker(database, nil, func(string) int { return 0 })
-	downloadWorker.ResetStuck()
+	queueWorker := NewQueueWorker(database, nil, func(string) int { return 0 })
+	queueWorker.ResetStuck()
 
-	if status, retry, _ := statusOf(t, database, int(id)); status != "downloading" || retry != 0 {
+	if status, retry, _ := statusOf(t, database, int(id)); status != "running" || retry != 0 {
 		t.Fatalf("a job that just started was reset: %s/%d", status, retry)
 	}
 }
@@ -248,12 +248,12 @@ func TestStartProcessesQueueAndStops(t *testing.T) {
 	id := enqueue(t, database, "printables")
 	processed := make(chan struct{}, 1)
 
-	downloadWorker := NewDownloadWorker(database, func(Job) (int, error) {
+	queueWorker := NewQueueWorker(database, func(Job) (int, error) {
 		processed <- struct{}{}
 		return 42, nil
 	}, func(string) int { return 0 })
 	stop := make(chan struct{})
-	downloadWorker.Start(stop)
+	queueWorker.Start(stop)
 
 	select {
 	case <-processed:
@@ -262,7 +262,7 @@ func TestStartProcessesQueueAndStops(t *testing.T) {
 	}
 
 	close(stop)
-	if !downloadWorker.Wait(30 * time.Second) {
+	if !queueWorker.Wait(30 * time.Second) {
 		t.Fatal("the loop did not leave after stop")
 	}
 	if status, _, designID := statusOf(t, database, id); status != "done" || designID.Int64 != 42 {
@@ -274,9 +274,9 @@ func TestStartProcessesQueueAndStops(t *testing.T) {
 // a large download finishes.
 func TestWaitTimesOut(t *testing.T) {
 	database := newTestDB(t)
-	downloadWorker := NewDownloadWorker(database, nil, func(string) int { return 0 })
+	queueWorker := NewQueueWorker(database, nil, func(string) int { return 0 })
 
-	if downloadWorker.Wait(20 * time.Millisecond) {
+	if queueWorker.Wait(20 * time.Millisecond) {
 		t.Fatal("Wait reported a finished loop although none was started")
 	}
 }
